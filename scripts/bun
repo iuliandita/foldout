@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+if [ ! -x "$root/tools/node_modules/.bin/bun" ]; then
+    echo 'Install the pinned build tools with: bun install --cwd tools --frozen-lockfile' >&2
+    exit 1
+fi
+exec "$root/tools/node_modules/.bin/bun" "$@"

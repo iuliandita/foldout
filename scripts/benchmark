@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Run the opt-in owned corpus benchmark; never build the root-owned frontend."""
+import argparse
+import datetime
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--debug", action="store_true", help="debug smoke run; requires BENCHMARK_FILES=1000")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parent.parent
+    os.chdir(root)
+    count = int(os.environ.get("BENCHMARK_FILES", "50000"))
+    if args.debug and count != 1000:
+        parser.error("--debug requires explicit BENCHMARK_FILES=1000; it is not 50k validation")
+    if not 1000 <= count <= 50000:
+        parser.error("BENCHMARK_FILES must be 1000..=50000; values are never silently capped")
+    if sys.platform != "linux":
+        parser.error("Linux /proc and local filesystem accounting are required")
+    if not args.debug and not (root / "web/dist/index.html").is_file():
+        parser.error("root task must finish the frontend build before the release benchmark")
+    usage = shutil.disk_usage(root)
+    if usage.free < 3 * 1024**3:
+        parser.error("at least 3 GiB free space is required for benchmark data; release build needs extra")
+    filesystem = subprocess.check_output(["stat", "-f", "-c", "%T", str(root)], text=True).strip()
+    if filesystem not in {"ext2/ext3", "ext4", "btrfs", "xfs", "zfs", "tmpfs", "overlayfs"}:
+        parser.error(f"unapproved filesystem type {filesystem!r}; benchmark must remain on local storage")
+    versions = {}
+    for name, command in {
+        "rustc": ["rustc", "--version"], "cargo": ["cargo", "--version"],
+        "bun_pinned": [str(root / "scripts/bun"), "--version"],
+        "pdfinfo": ["pdfinfo", "-v"], "pdftoppm": ["pdftoppm", "-v"],
+        "prlimit": ["prlimit", "--version"],
+        "7zip": ["7z", "i"],
+    }.items():
+        completed = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+        versions[name] = next(line for line in completed.stdout.splitlines() if line.strip())
+    versions["python"] = sys.version.split()[0]
+    cpu = next((line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines()
+                if line.startswith("model name")), "unreported")
+    memory = next(line for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemTotal:"))
+    environment = {"utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                   "cpu_model": cpu, "logical_cpus": os.cpu_count(), "memory": memory,
+                   "filesystem_type": filesystem, "architecture": os.uname().machine,
+                   "kernel_release": os.uname().release, "tools": versions,
+                   "files": count, "profile": "debug" if args.debug else "release"}
+    command = ["cargo", "test"]
+    if not args.debug:
+        command += ["--release", "--features", "embedded-ui"]
+    command += ["--test", "benchmark", "--", "--ignored", "--exact",
+                "owned_50000_file_performance", "--nocapture"]
+    print(json.dumps(environment), flush=True)
+    print("Running: " + " ".join(command), flush=True)
+    report = None
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as child:
+        assert child.stdout is not None
+        for line in child.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if line.startswith("BENCHMARK_RESULT "):
+                report = json.loads(line.removeprefix("BENCHMARK_RESULT "))
+        status = child.wait()
+    if status == 0 and report is None:
+        raise RuntimeError("runner returned success without benchmark evidence")
+    result_file = root / "docs/local/benchmark-results.md"
+    with result_file.open("a") as output:
+        output.write("\n## Recorded run " + environment["utc"] + "\n\n")
+        output.write(f"{'Full target corpus' if count == 50000 else 'Reduced corpus, not 50k validation'}; "
+                     f"{environment['profile']}; exit status {status}.\n\n")
+        output.write("Command: `" + " ".join(command) + "`\n\n")
+        output.write("```json\n" + json.dumps({"environment": environment, "result": report}, indent=2) + "\n```\n")
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

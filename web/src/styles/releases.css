@@ -1,0 +1,293 @@
+/* Find releases: unit picker, source tabs, release results, and the download confirmation. */
+.find-releases .page-header {
+  margin-bottom: var(--space-4);
+}
+.find-releases > .back {
+  margin-bottom: var(--space-2);
+}
+.release-unit-picker .choice-text {
+  overflow-wrap: normal;
+}
+.release-unit-picker .choice-text strong,
+.release-unit-picker .choice-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.release-unit-picker .unit-picker {
+  padding: 0;
+}
+
+.releases-hint {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.release-search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: end;
+  margin-bottom: var(--space-4);
+}
+.release-search-form .field {
+  margin: 0;
+}
+.release-subheading {
+  margin: var(--space-5) 0 var(--space-2);
+}
+.release-count {
+  margin: var(--space-2) 0;
+  font-size: var(--text-sm);
+}
+.releases .empty-state {
+  padding: var(--space-6) var(--space-4);
+}
+
+/* Results table: real columns on wide screens, labeled stacks on phones. */
+.release-table-wrap {
+  margin-top: var(--space-2);
+}
+.release-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.release-table thead th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.release-table td,
+.release-table tbody th {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  text-align: left;
+}
+.release-table tbody tr:hover {
+  background: var(--hover);
+}
+.release-table .numeric {
+  text-align: right;
+  white-space: nowrap;
+}
+.release-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.release-table tbody th.release-name {
+  min-width: 14rem;
+}
+.release-action {
+  text-align: right;
+}
+.release-match {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+.release-reasons {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-xs);
+}
+
+/* Simple lists (direct downloads, chapters, archive items and files). */
+.release-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.release-list li > :first-child {
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+.release-row-meta {
+  margin: var(--space-1) 0 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.release-list details,
+.release-detail details {
+  margin-top: var(--space-1);
+  font-size: var(--text-sm);
+}
+.release-list summary,
+.release-detail summary {
+  cursor: pointer;
+  color: var(--muted);
+  min-height: 2rem;
+  display: inline-flex;
+  align-items: center;
+}
+@media (pointer: coarse) {
+  .release-list summary,
+  .release-detail summary {
+    min-height: var(--control-height);
+  }
+}
+.release-list details .job-details {
+  margin-top: var(--space-2);
+}
+.release-detail {
+  margin-top: var(--space-4);
+}
+.release-detail .section-header {
+  margin-bottom: var(--space-2);
+}
+
+/* Download confirmation: an inline panel, not a dialog. */
+.release-confirm {
+  max-width: 45rem;
+  padding: var(--space-5);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+}
+.release-confirm > h2 {
+  margin-bottom: var(--space-3);
+}
+.release-confirm-name {
+  margin: 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.release-confirm-meta {
+  margin: var(--space-1) 0 var(--space-4);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+  overflow-wrap: anywhere;
+}
+.release-confirm-assessment {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.release-confirm .editor {
+  padding-bottom: 0;
+}
+.release-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-height: var(--control-height);
+  margin: var(--space-4) 0 0;
+  font-weight: 600;
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+  cursor: pointer;
+}
+.release-ack input {
+  width: 1.25rem;
+  height: 1.25rem;
+  min-height: 0;
+  margin: 0;
+  flex: none;
+}
+.release-field-hint {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.release-pending .job-details {
+  margin: var(--space-3) 0;
+}
+.release-discard-trigger {
+  margin-top: var(--space-4);
+}
+.release-discard {
+  margin-top: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-panel);
+  background: var(--error-bg);
+}
+.release-discard p {
+  margin-top: 0;
+}
+.release-pending-elsewhere {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.release-pending-elsewhere > p {
+  flex: 1 1 20rem;
+  margin: 0;
+}
+
+@media (min-width: 48rem) {
+  .release-search-form {
+    grid-template-columns: minmax(10rem, 14rem) minmax(0, 1fr) auto;
+  }
+}
+
+@media (max-width: 47.99rem) {
+  .release-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+  }
+  .release-table,
+  .release-table tbody,
+  .release-table tr,
+  .release-table td,
+  .release-table tbody th {
+    display: block;
+  }
+  .release-table tr {
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .release-table td,
+  .release-table tbody th {
+    padding: var(--space-1) 0;
+    border: 0;
+  }
+  .release-table tbody th.release-name {
+    min-width: 0;
+  }
+  .release-table td[data-label] {
+    display: grid;
+    grid-template-columns: 6.5rem minmax(0, 1fr);
+    gap: var(--space-2);
+  }
+  .release-table td[data-label]::before {
+    content: attr(data-label);
+    color: var(--muted);
+  }
+  .release-table td[data-label]:empty {
+    display: none;
+  }
+  .release-table .numeric,
+  .release-action {
+    text-align: left;
+  }
+  .release-action {
+    padding-top: var(--space-2);
+  }
+  .release-confirm {
+    padding: var(--space-4);
+  }
+}

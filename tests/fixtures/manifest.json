@@ -1,0 +1,115 @@
+{
+  "fixtures": [
+    {
+      "path": "natural-order.cbz",
+      "sha256": "cd1b95c9267aa03a4e8de4a4c8c80f40cdb6fc80a2e62e0dacce83cc51a99056",
+      "bytes": 549,
+      "pages": 3,
+      "dimensions": "16x24 pixels per page",
+      "source": "Original geometric test data created for this project",
+      "license": "CC0-1.0",
+      "expected": "valid",
+      "page_order": [
+        "1.png",
+        "2.png",
+        "10.png"
+      ]
+    },
+    {
+      "path": "single-page.pdf",
+      "sha256": "9fc7ebbc6d48239d89d88ebed8fa83c66866613b90eca1fa6f55259a65d69b2d",
+      "bytes": 465,
+      "pages": 1,
+      "dimensions": "144x216 points",
+      "source": "Original geometric test data created for this project",
+      "license": "CC0-1.0",
+      "expected": "valid",
+      "page_order": null
+    },
+    {
+      "path": "rar/rar4-valid.rar",
+      "format": "cbr",
+      "case": "valid-rar4",
+      "sha256": "d421b86f6290aefad61b2a36737253b2b30fe27c156bd95abfc230f24fe0307e",
+      "bytes": 336,
+      "expected": "valid",
+      "selected_entry": "test.txt",
+      "selected_entry_sha256": "5a5f16e01faf8adf92eb4499a2d3e93010c4b41dbb7f698f4a8466d9f58e6dd2",
+      "source": "https://github.com/libarchive/libarchive/blob/693bc2c8e894b283a415eb265f78ba84f536d683/libarchive/test/test_read_format_rar.rar.uu",
+      "source_sha256": "d1e75b4120995bce82fc4e72ebf8b80d18ea69fa34ac62de383b8393f92afa09",
+      "license": "BSD-2-Clause; libarchive COPYING applies to the distribution, and this uu fixture has no individual override"
+    },
+    {
+      "path": "rar/rar5-valid.rar",
+      "format": "cbr",
+      "case": "valid-rar5",
+      "sha256": "68f9d7e2662cd5bc5607ba9c6bf1edbf121cf3b08011a7d8643091791750a7c8",
+      "bytes": 436,
+      "expected": "valid",
+      "selected_entry": "test.bin",
+      "selected_entry_sha256": "588870a2dade35c2650fbb7898c9a9c7f21fce7c281198604e8d0c9737f2c375",
+      "source": "https://github.com/libarchive/libarchive/blob/693bc2c8e894b283a415eb265f78ba84f536d683/libarchive/test/test_read_format_rar5_compressed.rar.uu",
+      "source_sha256": "7a87af5035430d2307f9a183b2da8a71c95b3c0a5b8e8d1f172ef3343d4b8620",
+      "license": "BSD-2-Clause; libarchive COPYING applies to the distribution, and this uu fixture has no individual override"
+    },
+    {
+      "path": "rar/rar5-solid.rar",
+      "format": "cbr",
+      "case": "valid-rar5-solid",
+      "sha256": "1149dda288494ab6c954d0e3f2a8831318aaf9c69e7da741729bb0c681f924b5",
+      "bytes": 1050,
+      "expected": "valid",
+      "selected_entry": "test.bin",
+      "selected_entry_sha256": "588870a2dade35c2650fbb7898c9a9c7f21fce7c281198604e8d0c9737f2c375",
+      "source": "https://github.com/libarchive/libarchive/blob/693bc2c8e894b283a415eb265f78ba84f536d683/libarchive/test/test_read_format_rar5_solid.rar.uu",
+      "source_sha256": "1ced0e33ea4dc6847c05e63878f020d7c6c5cc82812b441865f16797fc7c8eaa",
+      "license": "BSD-2-Clause; libarchive COPYING applies to the distribution, and this uu fixture has no individual override"
+    },
+    {
+      "path": "rar/rar4-encrypted.rar",
+      "format": "cbr",
+      "case": "encrypted-rar4",
+      "sha256": "c30dc6d10e59aaab1c863afa469d188c644a22d67d6e50ac7ca887e520f5fc8b",
+      "bytes": 311,
+      "expected": "password-required",
+      "decoder_expectations": {
+        "7z": { "exit": 2, "reason": "Data Error in encrypted file. Wrong password?" },
+        "unrar": { "exit": 3, "reason": "Checksum error in the encrypted file" }
+      },
+      "source": "https://github.com/libarchive/libarchive/blob/693bc2c8e894b283a415eb265f78ba84f536d683/libarchive/test/test_read_format_rar4_encrypted.rar.uu",
+      "source_sha256": "42dbdbebe72842c255ef9d600a37ca38cde2133e07abfcf49512dcb81280c746",
+      "license": "BSD-2-Clause; libarchive COPYING applies to the distribution, and this uu fixture has no individual override"
+    },
+    {
+      "path": "rar/rar5-encrypted.rar",
+      "format": "cbr",
+      "case": "encrypted-rar5",
+      "sha256": "72b69a1d5f5757511e683a9207166c60e91ce0846ae446b8b332b085f9e0ba48",
+      "bytes": 391,
+      "expected": "password-required",
+      "decoder_expectations": {
+        "7z": { "exit": 2, "reason": "Wrong password" },
+        "unrar": { "exit": 11, "reason": "Incorrect password" }
+      },
+      "source": "https://github.com/libarchive/libarchive/blob/693bc2c8e894b283a415eb265f78ba84f536d683/libarchive/test/test_read_format_rar5_encrypted.rar.uu",
+      "source_sha256": "5cc262d34226c3c9298df7bda065eee1523f8ff6ebaced486f48117095661a0b",
+      "license": "BSD-2-Clause; libarchive COPYING applies to the distribution, and this uu fixture has no individual override"
+    },
+    {
+      "path": "rar/rar5-truncated.rar",
+      "format": "cbr",
+      "case": "truncated-rar5",
+      "sha256": "e0b828fb606b4b3844423e8c346e1f77f77bf271dc8794346900c7370d700291",
+      "bytes": 160,
+      "expected": "corrupt",
+      "decoder_expectations": {
+        "7z": { "exit": 2, "reason": "Cannot open the file as archive" },
+        "unrar": { "exit": 3, "reason": "Corrupt header is found" }
+      },
+      "source": "https://github.com/libarchive/libarchive/blob/693bc2c8e894b283a415eb265f78ba84f536d683/libarchive/test/test_read_format_rar5_truncated_huff.rar.uu",
+      "source_sha256": "8e950d5c5246a43e82df7838b754305e7e7a315f1552de41f72d6beae59b9cf0",
+      "license": "BSD-2-Clause; libarchive COPYING applies to the distribution, and this uu fixture has no individual override"
+    }
+  ],
+  "cbr": "Six libarchive-derived RAR fixtures; see docs/formats.md"
+}

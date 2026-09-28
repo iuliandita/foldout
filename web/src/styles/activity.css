@@ -1,0 +1,152 @@
+/* Activity timeline and its detail pages. */
+.activity-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-5);
+}
+.activity-list {
+  border-top: 1px solid var(--line);
+}
+.activity-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    'icon main chevron'
+    'icon status chevron'
+    'icon time chevron';
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-height: 3.5rem;
+  padding: var(--space-3) var(--space-2);
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+}
+.activity-row:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.activity-row:focus-visible {
+  outline-offset: -2px;
+}
+.activity-icon {
+  grid-area: icon;
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--muted);
+  align-self: start;
+}
+.activity-main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.activity-main strong {
+  font-size: var(--text-md);
+  line-height: var(--leading-md);
+}
+.activity-meta,
+.activity-time {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.activity-state {
+  grid-area: status;
+  justify-self: start;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.activity-time {
+  grid-area: time;
+  justify-self: start;
+}
+.activity-time.finished {
+  color: var(--text);
+  font-weight: 600;
+}
+.activity-chevron {
+  grid-area: chevron;
+  display: flex;
+  color: var(--muted);
+}
+.activity-more {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--space-5);
+}
+.activity-detail {
+  max-width: 48rem;
+}
+.activity-detail-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+.activity-detail-link {
+  margin: calc(-1 * var(--space-3)) 0 var(--space-4);
+}
+.activity-detail .job-details {
+  margin: var(--space-4) 0 var(--space-5);
+}
+.activity-detail > .actions {
+  margin-bottom: var(--space-4);
+}
+.back .icon {
+  margin-left: -4px;
+}
+.technical-details {
+  margin-top: var(--space-6);
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-2);
+}
+.technical-details summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-height);
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  width: fit-content;
+}
+.technical-details summary:hover {
+  color: var(--text);
+}
+.technical-details .job-details {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+}
+.technical-row {
+  display: contents;
+}
+.technical-details code {
+  font-family: ui-monospace, monospace;
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+@media (min-width: 48rem) {
+  .activity-row {
+    grid-template-columns: auto minmax(0, 1fr) 13rem 11rem auto;
+    grid-template-areas: 'icon main status time chevron';
+    gap: var(--space-4);
+    padding: var(--space-2) var(--space-3);
+  }
+  .activity-time {
+    justify-self: end;
+    text-align: end;
+  }
+  .activity-icon {
+    align-self: center;
+  }
+}

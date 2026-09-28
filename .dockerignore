@@ -1,0 +1,7 @@
+.*
+*.md
+docs/local
+target
+web/node_modules
+tools/node_modules
+state

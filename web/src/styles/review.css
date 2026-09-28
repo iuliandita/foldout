@@ -1,0 +1,89 @@
+/* Review page: grouped lists of things waiting on the user. */
+.review-section {
+  margin-bottom: var(--space-6);
+}
+.review-section:last-child {
+  margin-bottom: 0;
+}
+.review-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-lg);
+  line-height: var(--leading-lg);
+  margin: 0 0 var(--space-2);
+}
+.review-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.5rem;
+  padding: 0 var(--space-2);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.review-note {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+  margin: 0 0 var(--space-2);
+}
+.review-list {
+  border-top: 1px solid var(--line);
+}
+.review-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-height: 3.5rem;
+  padding: var(--space-3) var(--space-2);
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+}
+.review-row:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.review-row:focus-visible {
+  outline-offset: -2px;
+}
+.review-icon {
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--muted);
+  align-self: start;
+}
+.review-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.review-main strong {
+  font-size: var(--text-md);
+  line-height: var(--leading-md);
+}
+.review-meta {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.review-time {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+  white-space: nowrap;
+}
+.review-chevron {
+  display: flex;
+  color: var(--muted);
+}

@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+umask 077
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+cd "$(dirname "$0")/.."
+cargo fmt --all -- --check
+cargo clippy --locked --offline --all-targets -- -D warnings
+cargo test --locked --offline --all-targets
+api_check=$(mktemp)
+trap 'rm -f "$api_check"' EXIT HUP INT TERM
+./scripts/generate-api "$api_check"
+cmp web/src/lib/api/schema.d.ts "$api_check"
+./scripts/bun run --cwd web check
+./scripts/bun run --cwd web build
+cargo clippy --locked --offline --all-targets --features embedded-ui -- -D warnings
+cargo test --locked --offline --all-targets --features embedded-ui
+cargo build --locked --offline --release --features embedded-ui

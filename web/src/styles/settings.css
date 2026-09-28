@@ -1,0 +1,127 @@
+/* General settings: label and description on the left, control on the right; stacked on narrow screens. */
+.setting-list {
+  max-width: 40rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+.setting-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3) var(--space-5);
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--line);
+}
+.setting-row-text {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+.setting-row-label {
+  display: block;
+  font-weight: 600;
+}
+.setting-row-description {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.setting-row-control {
+  flex: 0 1 auto;
+  max-width: 100%;
+}
+.setting-row-control select {
+  min-width: 12rem;
+  max-width: 100%;
+}
+.setting-row-value {
+  font-weight: 600;
+}
+
+/* Storage */
+/* A row's overflow menu stays pinned to the right edge instead of wrapping under the text. */
+.inventory-list li.has-menu {
+  flex-wrap: nowrap;
+}
+.inventory-list li.has-menu > div {
+  flex-basis: auto;
+}
+.inventory-list li.has-menu > :last-child {
+  flex: none;
+  margin-left: auto;
+}
+.inventory-heading {
+  min-width: 0;
+  flex: 1 1 16rem;
+}
+.inventory-heading h3 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.inventory-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+.inventory-list-head h4 {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+/* One ellipsis only, in the middle: the folder name at the end never shrinks. */
+.root-path {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--space-1);
+  min-width: 0;
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.root-path .path-tail {
+  flex-shrink: 0;
+}
+.inventory-hint {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.root-path .path-text {
+  overflow: hidden;
+  flex: 0 1 auto;
+  max-width: calc(100% - var(--control-height) - var(--space-1));
+}
+.copy-status {
+  flex-basis: 100%;
+  font-size: var(--text-xs);
+  line-height: var(--leading-xs);
+}
+.copy-status:empty {
+  display: none;
+}
+
+/* Start options in the empty Sources state: one button and one line each. */
+.source-starts {
+  display: grid;
+  gap: var(--space-4);
+  width: min(100%, 32rem);
+  text-align: start;
+}
+.source-starts li {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+}
+.empty-state .source-starts p {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}

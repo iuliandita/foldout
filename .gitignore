@@ -1,0 +1,11 @@
+docs/local/
+/target/
+/web/node_modules/
+/tools/node_modules/
+/web/dist/
+/state/
+/.handoff/
+/ROADMAP.md
+/AGENTS.md
+/PRODUCT.md
+/.env

@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+manifest="$repo_root/tests/fixtures/manifest.json"
+fixtures="$repo_root/tests/fixtures"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/check-formats.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+cases_file="$scratch/cbr-cases.jsonl"
+
+for command in awk jq mktemp rg sha256sum stat timeout prlimit 7z unrar; do
+  command -v "$command" >/dev/null || {
+    printf 'missing required command: %s\n' "$command" >&2
+    exit 1
+  }
+done
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+limited() {
+  # -so and p are redirected to scratch files; RLIMIT_FSIZE bounds those files.
+  # No stdout pipe is used, so this does not claim to bound a pipe buffer.
+  prlimit --as=268435456 --cpu=3 --fsize=1048576 -- timeout 5s "$@"
+}
+
+hash_file() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+check_metadata() {
+  local path=$1 sha=$2 bytes=$3 source_sha=$4 license=$5
+  [[ -n "$source_sha" && -n "$license" ]] || fail "missing source metadata for $path"
+  [[ $(hash_file "$path") == "$sha" ]] || fail "hash mismatch for $path"
+  [[ $(stat -c%s "$path") == "$bytes" ]] || fail "size mismatch for $path"
+}
+
+check_valid() {
+  local file=$1 entry=$2 entry_sha=$3 case_name=$4
+  local seven_output="$scratch/$case_name.7z"
+  local unrar_output="$scratch/$case_name.unrar"
+
+  limited 7z l -bd -p- "$file" >/dev/null || fail "7z could not list $case_name"
+  limited 7z t -bd -p- "$file" >/dev/null || fail "7z could not test $case_name"
+  limited 7z x -bd -y -p- -so "$file" "$entry" >"$seven_output" || fail "7z could not extract $entry from $case_name"
+  [[ $(hash_file "$seven_output") == "$entry_sha" ]] || fail "7z extracted unexpected data from $case_name"
+
+  limited unrar lt -cfg- -p- "$file" >/dev/null || fail "unrar could not list $case_name"
+  limited unrar t -cfg- -p- "$file" >/dev/null || fail "unrar could not test $case_name"
+  limited unrar p -cfg- -p- -inul "$file" "$entry" >"$unrar_output" || fail "unrar could not extract $entry from $case_name"
+  [[ $(hash_file "$unrar_output") == "$entry_sha" ]] || fail "unrar extracted unexpected data from $case_name"
+}
+
+check_encrypted() {
+  local file=$1 case_name=$2 seven_exit=$3 seven_reason=$4 unrar_exit=$5 unrar_reason=$6 actual_exit
+  local seven_log="$scratch/$case_name.7z.log"
+  local unrar_log="$scratch/$case_name.unrar.log"
+
+  limited 7z l -bd -p- "$file" >/dev/null || fail "7z could not identify $case_name"
+  limited unrar lt -cfg- -p- "$file" >/dev/null || fail "unrar could not identify $case_name"
+  if limited 7z t -bd -p- "$file" >"$seven_log" 2>&1; then actual_exit=0; else actual_exit=$?; fi
+  [[ $actual_exit == "$seven_exit" ]] || fail "7z exit $actual_exit, expected $seven_exit for $case_name"
+  rg -Fq "$seven_reason" "$seven_log" || fail "7z did not report the expected password failure for $case_name"
+  if limited unrar t -cfg- -p- "$file" >"$unrar_log" 2>&1; then actual_exit=0; else actual_exit=$?; fi
+  [[ $actual_exit == "$unrar_exit" ]] || fail "unrar exit $actual_exit, expected $unrar_exit for $case_name"
+  rg -Fq "$unrar_reason" "$unrar_log" || fail "unrar did not report the expected password failure for $case_name"
+}
+
+check_corrupt() {
+  local file=$1 case_name=$2 seven_exit=$3 seven_reason=$4 unrar_exit=$5 unrar_reason=$6 actual_exit
+  local seven_log="$scratch/$case_name.7z.log"
+  local unrar_log="$scratch/$case_name.unrar.log"
+
+  if limited 7z l -bd -p- "$file" >"$seven_log" 2>&1; then actual_exit=0; else actual_exit=$?; fi
+  [[ $actual_exit == "$seven_exit" ]] || fail "7z exit $actual_exit, expected $seven_exit for $case_name"
+  rg -Fq "$seven_reason" "$seven_log" || fail "7z did not report the expected corruption for $case_name"
+  if limited unrar lt -cfg- -p- "$file" >"$unrar_log" 2>&1; then actual_exit=0; else actual_exit=$?; fi
+  [[ $actual_exit == "$unrar_exit" ]] || fail "unrar exit $actual_exit, expected $unrar_exit for $case_name"
+  rg -Fq "$unrar_reason" "$unrar_log" || fail "unrar did not report the expected corruption for $case_name"
+}
+
+if ! jq -e '
+  [.fixtures[] | select(.format == "cbr")] as $cases |
+  ($cases | length) == 6 and
+  ($cases | map(.case) | ((all(.[]; (type == "string") and (length > 0))) and (unique | length == 6))) and
+  ($cases | map(.expected) | sort == ["corrupt", "password-required", "password-required", "valid", "valid", "valid"])
+' "$manifest" >/dev/null; then
+  fail "manifest must contain six nonempty, distinct CBR cases with the expected case types"
+fi
+if ! jq -c '.fixtures[] | select(.format == "cbr")' "$manifest" >"$cases_file"; then
+  fail "could not read CBR cases from manifest"
+fi
+
+while IFS= read -r fixture; do
+  relative_path=$(jq -r '.path' <<<"$fixture")
+  sha=$(jq -r '.sha256' <<<"$fixture")
+  bytes=$(jq -r '.bytes' <<<"$fixture")
+  expected=$(jq -r '.expected' <<<"$fixture")
+  case_name=$(jq -r '.case' <<<"$fixture")
+  entry=$(jq -r '.selected_entry // ""' <<<"$fixture")
+  entry_sha=$(jq -r '.selected_entry_sha256 // ""' <<<"$fixture")
+  source_sha=$(jq -r '.source_sha256' <<<"$fixture")
+  license=$(jq -r '.license' <<<"$fixture")
+  seven_exit=$(jq -r '.decoder_expectations["7z"].exit // ""' <<<"$fixture")
+  seven_reason=$(jq -r '.decoder_expectations["7z"].reason // ""' <<<"$fixture")
+  unrar_exit=$(jq -r '.decoder_expectations.unrar.exit // ""' <<<"$fixture")
+  unrar_reason=$(jq -r '.decoder_expectations.unrar.reason // ""' <<<"$fixture")
+  file="$fixtures/$relative_path"
+  [[ -f "$file" ]] || fail "missing fixture: $relative_path"
+  check_metadata "$file" "$sha" "$bytes" "$source_sha" "$license"
+  case "$expected" in
+    valid)
+      [[ -n "$entry" && -n "$entry_sha" ]] || fail "missing selected-entry metadata for $relative_path"
+      check_valid "$file" "$entry" "$entry_sha" "$case_name"
+      ;;
+    password-required) check_encrypted "$file" "$case_name" "$seven_exit" "$seven_reason" "$unrar_exit" "$unrar_reason" ;;
+    corrupt) check_corrupt "$file" "$case_name" "$seven_exit" "$seven_reason" "$unrar_exit" "$unrar_reason" ;;
+    *) fail "unknown expected case for $relative_path: $expected" ;;
+  esac
+  [[ $(hash_file "$file") == "$sha" ]] || fail "decoder changed fixture: $relative_path"
+done <"$cases_file"
+
+printf 'CBR fixture corpus verified.\n'

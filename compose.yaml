@@ -1,0 +1,39 @@
+services:
+  library:
+    build:
+      context: .
+    image: libraryd:0.1.0
+    user: "1000:1000"
+    environment:
+      LIBRARY_STATE_DIR: /state
+      LIBRARY_LISTEN: 0.0.0.0:8787
+      LIBRARY_ORIGIN: ${LIBRARY_ORIGIN:-http://localhost:8787}
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - state:/state
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 2.0
+    stop_grace_period: 30s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8787/health/ready"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  state:

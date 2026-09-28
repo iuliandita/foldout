@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+output=${1:-web/src/lib/api/schema.d.ts}
+mkdir -p "$(dirname "$output")"
+./tools/node_modules/.bin/openapi-typescript api/openapi.yaml --output "$output"
