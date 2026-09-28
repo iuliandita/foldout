@@ -42,9 +42,18 @@ their versions are not locked. Rebuild regularly for security updates.
 shutdown and keeps bounded logs. Do not use `docker compose down --volumes` on
 state you need to retain.
 
-Image manifests support multiple architectures, but a host build only verifies
-that host's architecture. No multiarch build, release, signing, or publication
-is implied by this packaging.
+A development image for amd64 and arm64 is published from every `develop` push as
+`ghcr.io/iuliandita/foldout:nightly` (and `:nightly-<short sha>`). It is a moving,
+unreleased channel: expect breaking changes and keep a verified backup. The image
+is signed with cosign keyless signing and carries SBOM and provenance attestations:
+
+```sh
+cosign verify ghcr.io/iuliandita/foldout:nightly \
+  --certificate-identity-regexp '^https://github.com/iuliandita/foldout/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+There are no tagged releases yet.
 
 ## Initial administrator
 
