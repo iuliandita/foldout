@@ -29,7 +29,7 @@ RUN --mount=type=cache,id=libraryd-rust-${TARGETARCH},target=/build/target,shari
     cargo build --locked --offline --release --features embedded-ui \
     && cp /build/target/release/libraryd /build/libraryd
 
-FROM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11 AS archive
+FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS archive
 ARG TARGETARCH
 RUN apk add --no-cache ca-certificates xz tar
 WORKDIR /archive
@@ -44,7 +44,7 @@ RUN case "$TARGETARCH" in \
     && tar -xJf archive.tar.xz 7zzs License.txt readme.txt \
     && chmod 755 7zzs
 
-FROM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 COPY --from=archive /archive/7zzs /usr/bin/7z
 COPY --from=archive /archive/License.txt /archive/readme.txt /usr/share/licenses/7zip/
 RUN apk add --no-cache ca-certificates poppler-utils util-linux-misc libgcc \
