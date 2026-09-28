@@ -19,15 +19,15 @@ automatically repaired. Keep SQLite on local storage, not NFS or SMB. Mount medi
 roots separately, read-only for scans; explicitly grant write access only to roots
 intended for imports. Preserve the same media paths when recovering a catalog.
 
-The build pins Rust 1.98.1, Bun 1.4.2, and Alpine 3.23.4 with registry manifest
+The build pins Rust 1.98.1, Bun 1.4.2, and Alpine 3.24.2 with registry manifest
 digests. Build tools install separately under `tools/`, including TypeScript 5 for
 the API generator. Frontend TypeScript 7 stays under `web/`. The build checks the
 generated API types, type-checks and compiles the frontend, and embeds its assets
 in the release executable. The runtime contains neither Bun nor Rust.
 
 Alpine packages supply
-[poppler-utils](https://pkgs.alpinelinux.org/package/v3.23/main/x86_64/poppler-utils)
-and [util-linux-misc](https://pkgs.alpinelinux.org/package/v3.23/main/x86/util-linux-misc)
+[poppler-utils](https://pkgs.alpinelinux.org/package/v3.24/main/x86_64/poppler-utils)
+and [util-linux-misc](https://pkgs.alpinelinux.org/package/v3.24/main/x86/util-linux-misc)
 for `pdfinfo`, `pdftoppm`, and `prlimit`. Alpine's `7zip` package omits RAR decoding,
 so the image uses the static `7zzs` executable from
 [upstream 7-Zip 26.03](https://github.com/ip7z/7zip/releases/tag/26.03), installed
