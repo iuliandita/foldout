@@ -63,12 +63,12 @@ export function Icon({ icon: Glyph, size = 20 }: { icon: TablerIcon; size?: numb
   return <Glyph className="icon" size={size} stroke={1.75} aria-hidden="true" focusable="false" />;
 }
 
-/** Foldout mark: a page with its top-right corner folded over, in the accent color. */
+/** Foldout mark: an opened three-panel spread. */
 export function BrandMark() {
   return (
     <svg className="brand-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path className="brand-mark-page" d="M6 3h9l6 6v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
-      <path className="brand-mark-fold" d="M15 3v4a2 2 0 0 0 2 2h4z" />
+      <path className="brand-mark-page" d="M2 4l6 3v14l-6-3zM15 3l7 4v14l-7-4z" />
+      <path className="brand-mark-fold" d="M8 7l7-4v14l-7 4z" />
     </svg>
   );
 }

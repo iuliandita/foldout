@@ -12,19 +12,23 @@
   font-synthesis: none;
   -webkit-text-size-adjust: 100%;
 
-  --bg: light-dark(oklch(98.5% 0.004 165), oklch(19% 0.008 165));
-  --surface: light-dark(oklch(96% 0.007 165), oklch(23% 0.011 165));
-  --raised: light-dark(oklch(99.2% 0.003 165), oklch(26% 0.013 165));
-  --text: light-dark(oklch(23% 0.012 165), oklch(94% 0.008 165));
-  --muted: light-dark(oklch(44% 0.018 165), oklch(75% 0.018 165));
-  --line: light-dark(oklch(79% 0.012 165), oklch(36% 0.016 165));
-  --control: light-dark(oklch(56% 0.02 165), oklch(60% 0.02 165));
-  --accent: light-dark(oklch(42% 0.09 165), oklch(79% 0.1 165));
-  --accent-hover: light-dark(oklch(36% 0.085 165), oklch(85% 0.09 165));
-  --accent-text: light-dark(oklch(98.5% 0.005 165), oklch(19% 0.015 165));
-  --hover: light-dark(oklch(93% 0.01 165), oklch(27.5% 0.013 165));
-  --pressed: light-dark(oklch(89.5% 0.014 165), oklch(31% 0.016 165));
-  --selected: light-dark(oklch(91% 0.04 165), oklch(32% 0.045 165));
+  --bg: light-dark(#faf9f6, #171719);
+  --surface: light-dark(#f1f0ec, #222224);
+  --raised: light-dark(#fffefa, #2b2b2e);
+  --text: light-dark(#252526, #f0efeb);
+  --muted: light-dark(#60605f, #bdbdb9);
+  --line: light-dark(#b9b9b4, #4b4b4e);
+  --control: light-dark(#777773, #8b8b8c);
+  --accent: light-dark(#674c00, #f5cd27);
+  --accent-hover: light-dark(#563e00, #ffe166);
+  --accent-text: light-dark(#ffffff, #171719);
+  /* Bright action fills use dark lettering; links and focus use the deeper accent. */
+  --action: light-dark(#f5ca18, #f5cd27);
+  --action-hover: light-dark(#e6b900, #ffe166);
+  --action-text: light-dark(#211d0d, #211d0d);
+  --hover: light-dark(#f7f0d8, #302b1e);
+  --pressed: light-dark(#f1e5b7, #403722);
+  --selected: light-dark(#f5ca18, #403722);
 
   --success: light-dark(oklch(42% 0.1 150), oklch(81% 0.12 150));
   --success-bg: light-dark(oklch(95% 0.03 150), oklch(27% 0.04 150));
@@ -35,7 +39,7 @@
   --info: light-dark(oklch(45% 0.1 240), oklch(81% 0.08 240));
   --info-bg: light-dark(oklch(95.5% 0.025 240), oklch(27% 0.035 240));
 
-  --shadow: 0 4px 16px light-dark(oklch(25% 0.02 165 / 0.14), oklch(5% 0.01 165 / 0.5));
+  --shadow: 0 4px 16px light-dark(oklch(25% 0.005 260 / 0.14), oklch(5% 0.003 260 / 0.5));
 
   --space-1: 0.25rem;
   --space-2: 0.5rem;
@@ -168,19 +172,19 @@ a:hover {
 .primary,
 button.primary,
 .button.primary {
-  background: var(--accent);
-  color: var(--accent-text);
-  border-color: var(--accent);
+  background: var(--action);
+  color: var(--action-text);
+  border-color: var(--action);
 }
 button.primary:not(:disabled):hover,
 .button.primary:hover {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
-  color: var(--accent-text);
+  background: var(--action-hover);
+  border-color: var(--action-hover);
+  color: var(--action-text);
 }
 button.primary:not(:disabled):active,
 .button.primary:active {
-  background: color-mix(in oklch, var(--accent), var(--text) 22%);
+  background: color-mix(in oklch, var(--action), var(--text) 22%);
 }
 .ghost,
 button.ghost,
@@ -312,10 +316,10 @@ table {
   flex: none;
 }
 .brand-mark-page {
-  fill: var(--accent);
+  fill: var(--action);
 }
 .brand-mark-fold {
-  fill: color-mix(in oklch, var(--accent) 50%, var(--bg));
+  fill: color-mix(in oklch, var(--action) 50%, var(--bg));
 }
 .sidebar {
   display: none;

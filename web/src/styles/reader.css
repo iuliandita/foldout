@@ -1,4 +1,4 @@
-/* Reader: always a near-black tinted canvas, whatever the app theme is. styles.css
+/* Reader: always a near-black canvas, whatever the app theme is. styles.css
    declares its light-dark() tokens on .reader-view too, so with color-scheme: dark
    here they resolve to their dark values. */
 .reader-view {
@@ -6,8 +6,8 @@
   accent-color: var(--accent);
   caret-color: var(--accent);
   scrollbar-color: var(--control) transparent;
-  --reader-canvas: oklch(14.5% 0.006 165);
-  --reader-chrome: oklch(19% 0.008 165);
+  --reader-canvas: #101012;
+  --reader-chrome: #171719;
   position: fixed;
   inset: 0;
   overflow: hidden;
