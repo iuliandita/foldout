@@ -314,9 +314,9 @@ function Manager() {
     }
   }
   const brand = (
-    <a className="brand" href="#/">
+    <a className="brand" href="#/" aria-label={t('app')}>
       <BrandMark />
-      {t('app')}
+      <span className="brand-name">{t('app')}</span>
     </a>
   );
   return (
@@ -373,7 +373,7 @@ function Manager() {
                 <Icon icon={item.icon} size={22} />
                 {item.id === 'review' && <NavBadge count={reviewTotal} />}
               </span>
-              {t(item.id)}
+              <span className="tab-label">{t(item.id)}</span>
             </a>
           ))}
         <Menu
@@ -385,7 +385,7 @@ function Manager() {
               <span className="tab-icon">
                 <Icon icon={IconDots} size={22} />
               </span>
-              {t('more')}
+              <span className="tab-label">{t('more')}</span>
             </>
           }
           items={[

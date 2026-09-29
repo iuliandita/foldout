@@ -168,26 +168,28 @@ export function Settings({ isAdmin }: { isAdmin: boolean }) {
   return (
     <>
       <PageHeader title={t('settings')} />
-      <Tabs label={t('settingsSections')} items={sections} urlParam="section">
-        {(section) =>
-          section === 'general' ? (
-            <General />
-          ) : section === 'sources' ? (
-            <Integrations />
-          ) : section === 'storage' ? (
-            <Storage />
-          ) : (
-            isAdmin ? (
-              <Keys />
+      <div className="settings-tabs">
+        <Tabs label={t('settingsSections')} items={sections} urlParam="section">
+          {(section) =>
+            section === 'general' ? (
+              <General />
+            ) : section === 'sources' ? (
+              <Integrations />
+            ) : section === 'storage' ? (
+              <Storage />
             ) : (
-              <section>
-                <SectionHeader title={t('apiKeys')} />
-                <p>{t('accessRestricted')}</p>
-              </section>
+              isAdmin ? (
+                <Keys />
+              ) : (
+                <section>
+                  <SectionHeader title={t('apiKeys')} />
+                  <p>{t('accessRestricted')}</p>
+                </section>
+              )
             )
-          )
-        }
-      </Tabs>
+          }
+        </Tabs>
+      </div>
     </>
   );
 }

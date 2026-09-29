@@ -279,6 +279,7 @@ export function Tabs<T extends string>({
     onSelect?.(id);
   }
   function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') return;
     const next = nextIndex(event.key, index, items.length);
     if (next === undefined) return;
     event.preventDefault();
@@ -288,7 +289,7 @@ export function Tabs<T extends string>({
   if (active === undefined) return null;
   return (
     <div className="tabs">
-      <div role="tablist" aria-label={label}>
+      <div role="tablist" aria-label={label} aria-orientation="horizontal">
         {items.map((item, index) => (
           <button
             key={item.id}

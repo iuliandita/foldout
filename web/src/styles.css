@@ -338,6 +338,11 @@ table {
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
+@media (max-width: 24rem) {
+  .topbar .brand-name {
+    display: none;
+  }
+}
 .tabbar {
   position: fixed;
   inset: auto 0 0 0;
@@ -380,6 +385,23 @@ table {
   display: flex;
   padding: 2px var(--space-4);
   border-radius: 999px;
+}
+@media (max-width: 24rem) {
+  .tab-icon {
+    padding-inline: var(--space-1);
+  }
+}
+@media (max-width: 16rem) {
+  .tabbar .tab-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 .tabbar > a[aria-current],
 .tabbar > .menu > button.current {
@@ -494,6 +516,17 @@ main {
 @media (min-width: 80rem) {
   main {
     padding: var(--space-7);
+  }
+}
+@media (min-width: 48rem) and (max-width: 63.99rem) {
+  .app-shell {
+    grid-template-columns: 11rem minmax(0, 1fr);
+  }
+  .app-shell::before {
+    width: 11rem;
+  }
+  .sidebar .palette-trigger kbd {
+    display: none;
   }
 }
 .skip-link {
