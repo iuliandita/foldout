@@ -361,6 +361,7 @@ export function Library({ query, canManage, isAdmin }: { query: URLSearchParams;
                         fileId={item.cover_file_id}
                         title={item.title}
                         contentType={item.content_type}
+                        width={56}
                       />
                       <span className="library-row-main">
                         <strong className="library-row-title" id={domId('row', item.id, 'title')} title={item.title}>

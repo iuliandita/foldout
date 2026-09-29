@@ -22,6 +22,9 @@
 .cover.sm {
   width: 40px;
 }
+.cover.md {
+  width: 56px;
+}
 .cover.lg {
   width: 120px;
   border-radius: var(--radius-panel);
@@ -34,7 +37,7 @@
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 .cover.placeholder {
   display: flex;
@@ -56,16 +59,29 @@
 }
 .cover.fill.placeholder {
   gap: var(--space-2);
+  align-items: flex-start;
+  padding: 16px;
   background: color-mix(in oklch, var(--text) 6%, var(--surface));
 }
-.cover.fill .cover-initial {
-  color: var(--muted);
-  font-size: clamp(1.5rem, 28cqi, 3rem);
+.cover.fill .cover-title {
+  align-self: stretch;
+  min-height: 0;
+  margin-block: auto;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 7;
+  line-clamp: 7;
+  color: var(--text);
+  font-size: clamp(1rem, 10cqi, 1.5rem);
+  font-weight: 600;
+  line-height: 1.25;
 }
 .cover.sm .icon {
   display: none;
 }
-/* Placeholder shapes per content type, drawn in tinted neutrals behind the initial. */
+/* Fixed-size placeholder shapes per content type, drawn behind the initial. */
 .cover.placeholder > * {
   position: relative;
 }
@@ -74,9 +90,6 @@
   position: absolute;
   background: color-mix(in oklch, var(--text) 12%, var(--surface));
 }
-.cover.placeholder.comic {
-  aspect-ratio: 2 / 3;
-}
 .cover.placeholder.comic::before {
   top: 7%;
   left: 9%;
@@ -84,17 +97,11 @@
   height: 13%;
   border-radius: 2px;
 }
-.cover.placeholder.manga {
-  aspect-ratio: 7 / 10;
-}
 .cover.placeholder.manga::before {
   top: 0;
   right: 0;
   bottom: 0;
   width: 13%;
-}
-.cover.placeholder.magazine {
-  aspect-ratio: 3 / 4;
 }
 .cover.placeholder.magazine::before {
   top: 0;
@@ -102,6 +109,10 @@
   right: 0;
   height: 18%;
   border-bottom: 2px solid color-mix(in oklch, var(--accent) 45%, transparent);
+}
+.cover.fill.placeholder::before,
+.cover.fill.placeholder::after {
+  content: none;
 }
 
 /* Library toolbar */
@@ -217,7 +228,7 @@
 }
 .library-row {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) 20px;
+  grid-template-columns: 56px minmax(0, 1fr) 20px;
   grid-template-areas:
     'cover main chevron'
     'cover status chevron';
@@ -290,7 +301,7 @@
 /* Cover grid */
 .library-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(clamp(10rem, 12vw, 14rem), 1fr));
   gap: var(--space-5) var(--space-4);
 }
 .library-tile {
@@ -308,12 +319,11 @@
   background: var(--hover);
   color: var(--text);
 }
-/* Covers and per-type placeholder shapes keep their own proportions but sit on one baseline,
-   so titles line up across a row. 2:3 is the tallest shape used. */
+/* Every cover uses the same ratio, keeping titles aligned across a row. */
 .library-shelf {
   display: flex;
   align-items: flex-end;
-  aspect-ratio: 2 / 3;
+  aspect-ratio: 5 / 7;
   margin-bottom: var(--space-1);
 }
 .library-shelf > .cover {
@@ -338,7 +348,7 @@
 }
 @media (max-width: 47.99rem) {
   .library-grid {
-    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 10rem), 1fr));
     gap: var(--space-4) var(--space-3);
   }
 }
