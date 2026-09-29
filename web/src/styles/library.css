@@ -212,6 +212,7 @@
 
 /* Library rows */
 .library-list {
+  max-width: 56rem;
   border-top: 1px solid var(--line);
 }
 .library-row {
@@ -278,15 +279,8 @@
 }
 @media (min-width: 48rem) {
   .library-row {
-    grid-template-columns: 40px minmax(0, 1fr) 17rem 20px;
-    grid-template-areas: 'cover main status chevron';
     padding-block: var(--space-1);
-    gap: var(--space-4);
-  }
-  /* One right-aligned cluster in a fixed-width column so rows line up. */
-  .library-row-status {
-    justify-content: flex-end;
-    text-align: right;
+    column-gap: var(--space-4);
   }
   .library-row-monitoring {
     flex: none;
@@ -494,6 +488,7 @@
 
 /* Units */
 .units {
+  max-width: 48rem;
   margin-top: var(--space-4);
 }
 .units .section-header {
@@ -591,6 +586,9 @@
     grid-template-areas: 'main status actions';
     min-height: 3.5rem;
     padding-block: var(--space-1);
+  }
+  .unit-actions > :is(button, .button) {
+    min-width: 9.5rem;
   }
 }
 

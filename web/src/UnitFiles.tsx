@@ -27,7 +27,7 @@ export function ReadButton({ unitId, showFiles }: { unitId: string; showFiles: (
     }
   }
   return (
-    <Button size="sm" icon={IconBook} disabled={busy} aria-busy={busy} onClick={() => void open()}>
+    <Button size="sm" variant="ghost" icon={IconBook} disabled={busy} aria-busy={busy} onClick={() => void open()}>
       {t('readFile')}
     </Button>
   );

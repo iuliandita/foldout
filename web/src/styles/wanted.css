@@ -145,6 +145,7 @@
   line-height: var(--leading-sm);
 }
 .wanted-groups {
+  max-width: 56rem;
   border-top: 1px solid var(--line);
 }
 .wanted-group {
