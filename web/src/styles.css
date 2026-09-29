@@ -111,6 +111,11 @@ textarea {
 textarea {
   padding: var(--space-2) var(--space-3);
 }
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
 select:not([multiple]):not([size]) {
   appearance: none;
   padding-right: 2.5rem;
