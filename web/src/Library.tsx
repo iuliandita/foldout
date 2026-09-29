@@ -18,7 +18,7 @@ import {
   IconListSearch,
 } from '@tabler/icons-react';
 import { Cover } from './Cover';
-import { editionName, formatUnitDate } from './format';
+import { editionName, unitDisplay } from './format';
 import { FileList, ReadButton, readerHref } from './UnitFiles';
 import { unitStatus } from './status';
 import { ApiError, type Schema, post, request } from './lib/api/client';
@@ -727,9 +727,10 @@ function BulkMonitor({
               const locked = running || finished(id);
               const query = queryOf(unit);
               const invalid = showInvalid && !excluded.has(id) && !finished(id) && !queryValid(query);
+              const display = unitDisplay(unit.context.unit, locale);
               const meta = [
                 t(unit.context.unit.kind),
-                formatUnitDate(unit.context.unit, locale),
+                display.date,
                 editions.size > 1 ? editionName(unit.context.edition, locale) : null,
               ]
                 .filter(Boolean)
@@ -749,7 +750,9 @@ function BulkMonitor({
                       }}
                     />
                     <span className="bulk-unit">
-                      <strong>{unit.context.unit.label}</strong>
+                      <strong title={display.label !== unit.context.unit.label ? unit.context.unit.label : undefined}>
+                        {display.label}
+                      </strong>
                       <span className="unit-meta">{meta}</span>
                     </span>
                   </label>
@@ -1622,8 +1625,9 @@ function Units({
                 const state = wantedUnit && unitStatus(wantedUnit);
                 const findHref = `#/search?unit=${encodeURIComponent(unit.id)}`;
                 const monitored = (wanted.byUnit.get(unit.id)?.enabled_monitor_count ?? 0) > 0;
+                const display = unitDisplay(unit, locale);
                 const meta = [
-                  formatUnitDate(unit, locale),
+                  display.date,
                   unit.kind === 'special' || unit.kind === 'combined' ? t(unit.kind) : null,
                   monitored ? t('statusMonitored') : null,
                 ]
@@ -1667,7 +1671,7 @@ function Units({
                     tabIndex={-1}
                   >
                     <div className="unit-main">
-                      <strong>{unit.label}</strong>
+                      <strong title={display.label !== unit.label ? unit.label : undefined}>{display.label}</strong>
                       {meta && <span className="unit-meta">{meta}</span>}
                     </div>
                     <div className="unit-status">

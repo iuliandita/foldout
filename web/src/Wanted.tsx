@@ -9,7 +9,7 @@ import {
 } from '@tabler/icons-react';
 import { ApiError, type Schema, post, request } from './lib/api/client';
 import { Cover } from './Cover';
-import { editionLabel, editionName, formatUnitDate } from './format';
+import { editionLabel, editionName, unitDisplay } from './format';
 import { useI18n, type Locale, type MessageKey } from './i18n';
 import {
   Button,
@@ -75,10 +75,10 @@ function replaceHash(hash: string) {
 /* Kind and date only when the label does not already say them ("Volume 1", "September 2026"). */
 function unitMeta(unit: Schema['Unit'], kind: string, locale: Locale, edition?: Schema['Edition']) {
   const label = unit.label.toLowerCase();
-  const date = formatUnitDate(unit, locale);
+  const { date } = unitDisplay(unit, locale);
   return [
     label.includes(kind.toLowerCase()) ? undefined : kind,
-    date && !label.includes(date.toLowerCase()) ? date : undefined,
+    date,
     edition ? editionLabel(edition, locale) : undefined,
   ]
     .filter(Boolean)
@@ -574,7 +574,7 @@ function WantedGroup({
   for (const item of items) {
     if (unitStatus(item).kind !== 'missing') continue;
     const { edition, unit } = item.context;
-    const label = datedLabel.test(unit.label.trim()) ? (formatUnitDate(unit, locale) ?? unit.label) : unit.label;
+    const { label } = unitDisplay(unit, locale);
     const entry = missingByEdition.get(edition.id);
     if (entry) entry.labels.push(label);
     else missingByEdition.set(edition.id, { edition, labels: [label] });
@@ -680,7 +680,8 @@ function WantedGroup({
           items.map((item) => {
             const { edition, unit } = item.context;
             const status = unitStatus(item);
-            const name = `${publication.title} ${unit.label}`.trim();
+            const display = unitDisplay(unit, locale);
+            const name = `${publication.title} ${display.label}`.trim();
             return (
               <li key={unit.id} className="wanted-unit">
                 {canManage && (
@@ -691,7 +692,7 @@ function WantedGroup({
                   />
                 )}
                 <div className="wanted-unit-main">
-                  <strong>{unit.label}</strong>
+                  <strong title={display.label !== unit.label ? unit.label : undefined}>{display.label}</strong>
                   <span className="wanted-meta">
                     {unitMeta(unit, t(unit.kind), locale, editions.size > 1 ? edition : undefined)}
                   </span>
