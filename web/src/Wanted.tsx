@@ -4,7 +4,6 @@ import {
   IconBell,
   IconChevronDown,
   IconChevronUp,
-  IconPlugConnected,
   IconSearch,
   IconX,
 } from '@tabler/icons-react';
@@ -324,7 +323,6 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
   const selectedTargets = allItems.filter((item) => selected.has(item.context.unit.id) && runnable(item));
   const filtersId = domId('wanted', 'filters');
   const filterSummaryId = domId('wanted', 'filters', 'summary');
-  const setupId = domId('wanted', 'setup');
 
   return (
     <>
@@ -332,28 +330,17 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
         title={t('wanted')}
         meta={t('wantedIntro')}
         actions={
-          canManage && result.data && groups.length > 0 ? (
+          canManage && result.data && runTargets.length > 0 ? (
             <RunMonitored
               targets={runTargets}
               hasSource={hasIndexer}
-              sourceHint={!noSource}
               label={t('wantedRunMonitored')}
               confirm="wantedRunConfirm"
               none="wantedRunNoneShown"
-              reasonId={noSource ? setupId : undefined}
             />
           ) : undefined
         }
       />
-      {canManage && noSource && groups.length > 0 && (
-        <div className="notice info wanted-setup" role="note">
-          <Icon icon={IconPlugConnected} size={20} />
-          <p id={setupId}>{t('wantedSetupTitle')}</p>
-          <a className="button sm" href="#/settings?section=sources">
-            {t('openSourceSettings')}
-          </a>
-        </div>
-      )}
       <ErrorNotice error={sources.error} retry={sources.reload} />
       <div className="wanted-toolbar">
         <SearchField label={t('wantedSearch')} value={q} onChange={(value) => update({ q: value.trim() })} />
@@ -372,7 +359,7 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
               className="wanted-filters-toggle"
               aria-expanded={filtersOpen}
               aria-controls={filtersId}
-              aria-describedby={filtersOpen ? undefined : filterSummaryId}
+              aria-describedby={!filtersOpen && activeFilters ? filterSummaryId : undefined}
               onClick={() => setFiltersOpen((open) => !open)}
             >
               <Icon icon={IconAdjustmentsHorizontal} size={18} />
@@ -381,7 +368,7 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
                 : t('libraryFilters')}
               <Icon icon={IconChevronDown} size={16} />
             </button>
-            {!filtersOpen && (
+            {!filtersOpen && activeFilters > 0 && (
               <span className="wanted-filters-summary" id={filterSummaryId}>
                 {filterSummary}
               </span>
@@ -408,6 +395,11 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
           </FilterGroup>
         </div>
       </div>
+      {canManage && noSource && groups.length > 0 && runTargets.length === 0 && (
+        <p className="wanted-default-note wanted-source-note">
+          {t('wantedSetupTitle')} <a href="#/settings?section=sources">{t('openSourceSettings')}</a>
+        </p>
+      )}
       {groups.length > 0 && monitoring === 'all' && !requestedMonitoring && defaultMonitoring === 'all' && (
         <p className="wanted-default-note">{t('wantedNothingMonitoredNote')}</p>
       )}
@@ -457,11 +449,9 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
                   <RunMonitored
                     targets={selectedTargets}
                     hasSource={hasIndexer}
-                    sourceHint={!noSource}
                     label={t('wantedRunSelected')}
                     confirm="wantedRunConfirmSelected"
                     none="wantedRunNoneSelected"
-                    reasonId={noSource ? setupId : undefined}
                   />
                   <Button
                     variant="ghost"
@@ -741,22 +731,16 @@ type RunFailure = { id: string; label: string; message: string };
 function RunMonitored({
   targets,
   hasSource,
-  sourceHint,
   label,
   confirm,
   none,
-  reasonId,
 }: {
   targets: WantedUnit[];
   /* undefined while sources load */
   hasSource: boolean | undefined;
-  /* false when the page already shows the setup banner */
-  sourceHint: boolean;
   label: string;
   confirm: MessageKey;
   none: MessageKey;
-  /* id of reason text shown elsewhere on the page (the setup banner) */
-  reasonId?: string;
 }) {
   const { t } = useI18n();
   const [phase, setPhase] = useState<'idle' | 'confirm' | 'running' | 'done'>('idle');
@@ -793,14 +777,12 @@ function RunMonitored({
   const running = phase === 'running';
   const loaded = hasSource !== undefined;
   const hint =
-    loaded && !hasSource ? (
-      sourceHint ? (
-        <>
-          {t('wantedRunNeedsSource')} <a href="#/settings?section=sources">{t('openSourceSettings')}</a>
-        </>
-      ) : undefined
-    ) : loaded && !targets.length ? (
+    loaded && !targets.length ? (
       t(none)
+    ) : loaded && !hasSource ? (
+      <>
+        {t('wantedRunNeedsSource')} <a href="#/settings?section=sources">{t('openSourceSettings')}</a>
+      </>
     ) : undefined;
   return (
     <div className="wanted-run">
@@ -821,7 +803,7 @@ function RunMonitored({
           icon={IconSearch}
           disabled={!hasSource || !targets.length || running}
           aria-busy={running}
-          aria-describedby={hint ? hintId : loaded && !hasSource ? reasonId : undefined}
+          aria-describedby={hint ? hintId : undefined}
           onClick={() => {
             setQueued(targets);
             setProgress({ done: 0, started: 0 });
