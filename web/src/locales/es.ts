@@ -655,6 +655,7 @@ export const es: Record<keyof typeof en, string> = {
   skipToContent: 'Saltar al contenido',
   mainNavigation: 'Navegación principal',
   review: 'Revisión',
+  reviewAction: 'Revisar',
   reviewWaiting: '{count} esperando tu decisión',
   reviewIntro: 'Descargas, importaciones y decisiones de publicaciones que necesitan tu atención.',
   reviewEmptyTitle: 'Nada necesita tu atención ahora mismo.',

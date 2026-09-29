@@ -647,6 +647,7 @@ export const en = {
   skipToContent: 'Skip to content',
   mainNavigation: 'Main navigation',
   review: 'Review',
+  reviewAction: 'Review',
   reviewWaiting: '{count} waiting for you',
   reviewIntro: 'Downloads, imports, and release decisions that need you.',
   reviewEmptyTitle: 'Nothing needs you right now.',

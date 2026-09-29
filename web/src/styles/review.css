@@ -32,11 +32,13 @@
   margin: 0 0 var(--space-2);
 }
 .review-list {
+  max-width: 56rem;
   border-top: 1px solid var(--line);
 }
 .review-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "icon main time action";
   align-items: center;
   gap: var(--space-1) var(--space-3);
   min-height: 3.5rem;
@@ -53,6 +55,7 @@
   outline-offset: -2px;
 }
 .review-icon {
+  grid-area: icon;
   display: grid;
   place-items: center;
   width: 2.25rem;
@@ -63,6 +66,7 @@
   align-self: start;
 }
 .review-main {
+  grid-area: main;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -78,12 +82,27 @@
   line-height: var(--leading-sm);
 }
 .review-time {
+  grid-area: time;
   color: var(--muted);
   font-size: var(--text-sm);
   line-height: var(--leading-sm);
   white-space: nowrap;
 }
-.review-chevron {
+.review-action {
+  grid-area: action;
   display: flex;
+  align-items: center;
+  gap: var(--space-1);
   color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+  white-space: nowrap;
+}
+@media (width < 48rem) {
+  .review-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "icon main action"
+      "icon time action";
+  }
 }

@@ -188,39 +188,55 @@ export function Review() {
               </p>
             )}
             <ul className="review-list">
-              {section.items.map((item) => (
-                <li key={`${item.kind}:${item.id}`}>
-                  <a
-                    className="review-row"
-                    href={itemHref(item)}
-                    aria-labelledby={domId('review', item.kind, item.id, 'title')}
-                    aria-describedby={[
-                      itemMeta(t, item) && domId('review', item.kind, item.id, 'meta'),
-                      domId('review', item.kind, item.id, 'time'),
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
-                  >
-                    <span className="review-icon">
-                      <Icon icon={section.icon} />
-                    </span>
-                    <span className="review-main">
-                      <strong id={domId('review', item.kind, item.id, 'title')}>{whatHappened(t, item)}</strong>
-                      {itemMeta(t, item) && (
-                        <span className="review-meta" id={domId('review', item.kind, item.id, 'meta')}>
-                          {itemMeta(t, item)}
-                        </span>
-                      )}
-                    </span>
-                    <span className="review-time" id={domId('review', item.kind, item.id, 'time')}>
-                      {item.created_at !== null ? <RelativeTime seconds={item.created_at} /> : t('unavailable')}
-                    </span>
-                    <span className="review-chevron">
-                      <Icon icon={IconChevronRight} size={18} />
-                    </span>
-                  </a>
-                </li>
-              ))}
+              {section.items.map((item) => {
+                const reason = whatHappened(t, item);
+                const meta = itemMeta(t, item);
+                const title = (item.kind === 'file_to_link' ? meta?.split('/').at(-1) : meta) || reason;
+                const showPath = item.kind === 'file_to_link' && !!meta && meta !== title;
+                const showReason = title !== reason;
+                return (
+                  <li key={`${item.kind}:${item.id}`}>
+                    <a
+                      className="review-row"
+                      href={itemHref(item)}
+                      aria-labelledby={domId('review', item.kind, item.id, 'title')}
+                      aria-describedby={[
+                        showPath && domId('review', item.kind, item.id, 'path'),
+                        showReason && domId('review', item.kind, item.id, 'reason'),
+                        domId('review', item.kind, item.id, 'time'),
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                    >
+                      <span className="review-icon">
+                        <Icon icon={section.icon} />
+                      </span>
+                      <span className="review-main">
+                        <strong id={domId('review', item.kind, item.id, 'title')} title={meta || title}>
+                          {title}
+                        </strong>
+                        {showPath && (
+                          <span className="sr-only" id={domId('review', item.kind, item.id, 'path')}>
+                            {meta}
+                          </span>
+                        )}
+                        {showReason && (
+                          <span className="review-meta" id={domId('review', item.kind, item.id, 'reason')}>
+                            {reason}
+                          </span>
+                        )}
+                      </span>
+                      <span className="review-time" id={domId('review', item.kind, item.id, 'time')}>
+                        {item.created_at !== null ? <RelativeTime seconds={item.created_at} /> : t('unavailable')}
+                      </span>
+                      <span className="review-action">
+                        {t('reviewAction')}
+                        <Icon icon={IconChevronRight} size={18} />
+                      </span>
+                    </a>
+                  </li>
+                );
+              })}
             </ul>
           </section>
         ))
@@ -229,10 +245,10 @@ export function Review() {
           title={t('reviewEmptyTitle')}
           action={
             <>
-              <a className="button" href="#/wanted">
+              <a className="button primary" href="#/wanted">
                 {t('reviewSeeMissing')}
               </a>
-              <a className="button" href="#/activity">
+              <a className="button ghost" href="#/activity">
                 {t('reviewSeeActivity')}
               </a>
             </>
