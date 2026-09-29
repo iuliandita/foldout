@@ -547,6 +547,8 @@ export const es: Record<keyof typeof en, string> = {
   addIssue: 'Añadir número',
   addVolumeOrChapter: 'Añadir volumen o capítulo',
   startReading: 'Empezar a leer',
+  aboutMonitoring: 'Sobre el seguimiento',
+  aboutEditions: 'Sobre las ediciones',
   monitoringHelp:
     'El seguimiento consulta tus fuentes de Prowlarr de forma periódica en busca de elementos que faltan y te muestra candidatos para revisar. No se descarga nada sin tu confirmación.',
   editionHelp: 'Una edición es una publicación en un idioma o región concretos.',

@@ -541,6 +541,8 @@ export const en = {
   addIssue: 'Add issue',
   addVolumeOrChapter: 'Add volume or chapter',
   startReading: 'Start reading',
+  aboutMonitoring: 'About monitoring',
+  aboutEditions: 'About editions',
   monitoringHelp:
     'Monitoring checks your Prowlarr sources on a schedule for missing items and lists candidates for you to review. Nothing downloads without your confirmation.',
   editionHelp: 'An edition is one language or regional release of this publication.',

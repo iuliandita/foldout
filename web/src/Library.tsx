@@ -123,8 +123,8 @@ export function Library({ query, canManage, isAdmin }: { query: URLSearchParams;
   const [filtersOpen, setFiltersOpen] = useState(false);
   const listRef = useRef<HTMLUListElement>(null);
   useRowKeys(listRef);
-  /* Content type and view stay visible; availability and sort sit behind the Filters disclosure. */
-  const activeFilters = [availability !== 'all', sort !== 'title'].filter(Boolean).length;
+  /* Content type, view, and sort stay visible; availability sits behind the Filters disclosure. */
+  const activeFilters = availability !== 'all' ? 1 : 0;
   const filtersId = useId();
   useEffect(() => setPrevious([]), [kind, q, sort, availability]);
   /* Defaults stay out of the URL; any change without an explicit cursor starts from the first page. */
@@ -157,12 +157,30 @@ export function Library({ query, canManage, isAdmin }: { query: URLSearchParams;
       <PageHeader
         title={t('library')}
         actions={
-          canManage &&
           !emptyLibrary && (
-            <a className="button primary library-add" href={`#/new${kind ? `?kind=${kind}` : ''}`}>
-              <Icon icon={IconPlus} size={18} />
-              {t('add')}
-            </a>
+            <>
+              <label className="library-select library-sort">
+                <span>{t('librarySort')}</span>
+                <select
+                  value={sort}
+                  onChange={(event) =>
+                    go(libraryHref({ sort: sorts.find((value) => value === event.target.value) ?? 'title' }), false)
+                  }
+                >
+                  {sorts.map((value) => (
+                    <option key={value} value={value}>
+                      {t(sortNames[value])}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {canManage && (
+                <a className="button primary library-add" href={`#/new${kind ? `?kind=${kind}` : ''}`}>
+                  <Icon icon={IconPlus} size={18} />
+                  {t('add')}
+                </a>
+              )}
+            </>
           )
         }
       />
@@ -229,21 +247,6 @@ export function Library({ query, canManage, isAdmin }: { query: URLSearchParams;
               {availabilities.map((value) => (
                 <option key={value} value={value}>
                   {t(availabilityNames[value])}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="library-select">
-            <span>{t('librarySort')}</span>
-            <select
-              value={sort}
-              onChange={(event) =>
-                go(libraryHref({ sort: sorts.find((value) => value === event.target.value) ?? 'title' }), false)
-              }
-            >
-              {sorts.map((value) => (
-                <option key={value} value={value}>
-                  {t(sortNames[value])}
                 </option>
               ))}
             </select>
@@ -1187,7 +1190,7 @@ export function PublicationDetail({
                 </>
               }
             />
-            <HelpTip>{t('monitoringHelp')}</HelpTip>
+            <HelpTip label={t('aboutMonitoring')}>{t('monitoringHelp')}</HelpTip>
           </div>
           {!(singleEdition && visibleEditions.length === 1) && (
             <div className="edition-bar">
@@ -1230,7 +1233,7 @@ export function PublicationDetail({
                   }
                 />
               )}
-              {visibleEditions.length > 1 && <HelpTip>{t('editionHelp')}</HelpTip>}
+              {visibleEditions.length > 1 && <HelpTip label={t('aboutEditions')}>{t('editionHelp')}</HelpTip>}
               </div>
               {editions.next && (
                 <Button

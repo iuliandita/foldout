@@ -841,6 +841,19 @@
 .library-select select {
   width: auto;
 }
+.page-header:has(.library-sort) > .actions {
+  min-width: 0;
+  max-width: 100%;
+}
+.library-sort {
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.library-sort select {
+  flex: 1 1 auto;
+  max-width: 100%;
+}
 
 /* The mobile top bar carries Add on every page; avoid a second Add control here. */
 @media (max-width: 47.99rem) {
