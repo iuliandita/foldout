@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react';
+import { IconChevronRight } from '@tabler/icons-react';
 import { useI18n, type MessageKey } from './i18n';
 import { ApiError, request, type Schema } from './lib/api/client';
-import { Button, EmptyState, ErrorNotice, Field, Loading, SaveForm, SectionHeader, useResource, value, optional } from './ui';
+import { ErrorNotice, Field, Icon, Loading, SaveForm, SectionHeader, useResource, value, optional } from './ui';
 
 const kinds = {
   comicvine: 'Comic Vine',
@@ -20,6 +21,7 @@ type TestResult = Schema['IntegrationTestResult'];
 const endpoint = '/settings/integrations';
 /* Ways to start when nothing is configured; each opens the add form preset to a kind the API supports. */
 const starts: { kind: Kind; title: MessageKey; hint: MessageKey }[] = [
+  { kind: 'comicvine', title: 'sourcesStartMetadata', hint: 'sourcesStartMetadataHint' },
   { kind: 'prowlarr', title: 'sourcesStartIndexer', hint: 'sourcesStartIndexerHint' },
   { kind: 'sabnzbd', title: 'sourcesStartClient', hint: 'sourcesStartClientHint' },
   { kind: 'getcomics', title: 'sourcesStartDirect', hint: 'sourcesStartDirectHint' },
@@ -36,7 +38,7 @@ export function Integrations() {
         title={t('sourcesAndClients')}
         description={t('integrationHint')}
         help={<p>{t('helpMonitor')}</p>}
-        action={{
+        action={list.data?.items.length ? {
           label: t('addIntegration'),
           creates: true,
           disabled: !!editing,
@@ -44,7 +46,7 @@ export function Integrations() {
             setStartKind(undefined);
             setEditing('new');
           },
-        }}
+        } : undefined}
       />
       {editing && (
         <IntegrationForm
@@ -76,28 +78,27 @@ export function Integrations() {
         </ul>
       )}
       {list.data?.items.length === 0 && !editing && (
-        <EmptyState
-          title={t('sourcesEmptyTitle')}
-          action={
-            <ul className="source-starts">
-              {starts.map((start) => (
-                <li key={start.kind}>
-                  <Button
-                    onClick={() => {
-                      setStartKind(start.kind);
-                      setEditing('new');
-                    }}
-                  >
-                    {t(start.title)}
-                  </Button>
-                  <p>{t(start.hint)}</p>
-                </li>
-              ))}
-            </ul>
-          }
-        >
-          {t('sourcesEmptyText')}
-        </EmptyState>
+        <div className="sources-empty">
+          <h3>{t('sourcesEmptyTitle')}</h3>
+          <p>{t('sourcesEmptyText')}</p>
+          <ul className="source-starts">
+            {starts.map((start) => (
+              <li key={start.kind}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStartKind(start.kind);
+                    setEditing('new');
+                  }}
+                >
+                  <strong>{t(start.title)}</strong>
+                  <span>{t(start.hint)}</span>
+                  <Icon icon={IconChevronRight} size={18} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </section>
   );

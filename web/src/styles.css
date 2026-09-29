@@ -520,6 +520,7 @@ main {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--space-4);
+  min-height: var(--control-height);
   margin-bottom: var(--space-5);
 }
 .page-header > div:first-child {

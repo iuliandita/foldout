@@ -21,6 +21,10 @@
 .add-step:last-child::before {
   display: none;
 }
+.add-step.upcoming,
+.add-step.current::before {
+  display: none;
+}
 .add-step.done::before {
   background: var(--accent);
 }

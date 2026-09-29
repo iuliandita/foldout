@@ -282,6 +282,7 @@ function Manager() {
       </main>
     );
   const canManage = session?.scope !== 'read';
+  const isAdmin = session?.scope === 'admin';
   if (/^\/reader\/[^/]+$/.test(route.path))
     return (
       <ReaderLoadBoundary key={route.path}>
@@ -404,7 +405,7 @@ function Manager() {
         {!canManage && <p className="notice">{t('readOnly')}</p>}
         <Suspense fallback={<Loading />}>
         {route.path === '/' ? (
-          <Library query={route.query} canManage={canManage} />
+          <Library query={route.query} canManage={canManage} isAdmin={isAdmin} />
         ) : route.path === '/search' && canManage ? (
           <Search query={route.query} userId={session!.user_id} />
         ) : route.path === '/wanted' ? (
@@ -426,9 +427,9 @@ function Manager() {
         ) : route.path === '/review' ? (
           <Review />
         ) : route.path === '/settings' ? (
-          <Settings isAdmin={session?.scope === 'admin'} />
+          <Settings isAdmin={isAdmin} />
         ) : route.path === '/new' && canManage ? (
-          <AddPublication query={route.query} />
+          <AddPublication query={route.query} isAdmin={isAdmin} />
         ) : /^\/publication\/[^/]+$/.test(route.path) ? (
           <PublicationDetail
             key={route.path}

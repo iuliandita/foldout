@@ -99,7 +99,7 @@ function metaLine(t: Translate, item: Schema['PublicationSummary']) {
   return [t(typeNames[item.content_type]), item.run_label].filter(Boolean).join(', ');
 }
 
-export function Library({ query, canManage }: { query: URLSearchParams; canManage: boolean }) {
+export function Library({ query, canManage, isAdmin }: { query: URLSearchParams; canManage: boolean; isAdmin: boolean }) {
   const { t, locale } = useI18n();
   const kind = contentTypes.find((kind) => kind === query.get('kind'));
   const cursor = query.get('cursor');
@@ -166,7 +166,7 @@ export function Library({ query, canManage }: { query: URLSearchParams; canManag
           )
         }
       />
-      <div className="library-toolbar">
+      {!emptyLibrary && <div className="library-toolbar">
         <SearchField
           label={t('searchPublications')}
           value={q}
@@ -249,7 +249,7 @@ export function Library({ query, canManage }: { query: URLSearchParams; canManag
             </select>
           </label>
         </div>
-      </div>
+      </div>}
       {result.loading || staleCursor ? (
         <Loading />
       ) : result.error ? (
@@ -257,7 +257,40 @@ export function Library({ query, canManage }: { query: URLSearchParams; canManag
       ) : (
         result.data && (
           <>
-            {items.length === 0 ? (
+            {emptyLibrary ? (
+              <section className="library-start" aria-labelledby="library-start-title">
+                <h2 id="library-start-title">{t('emptyLibrary')}</h2>
+                {canManage && <p>{t(isAdmin ? 'libraryStartIntro' : 'libraryStartManageIntro')}</p>}
+                {canManage ? (
+                  <>
+                    <ul className="library-start-options">
+                      {([
+                        ...(isAdmin ? [{ href: '#/settings?section=storage', icon: IconFiles, title: 'libraryStartScan', hint: 'libraryStartScanHint' }] as const : []),
+                        { href: '#/new', icon: IconSearch, title: 'libraryStartFind', hint: 'libraryStartFindHint' },
+                        { href: '#/new?manual=1', icon: IconPencil, title: 'libraryStartManual', hint: 'libraryStartManualHint' },
+                      ] as const).map((option) => (
+                        <li key={option.href}>
+                          <a href={option.href}>
+                            <Icon icon={option.icon} size={22} />
+                            <span>
+                              <strong>{t(option.title)}</strong>
+                              <span>{t(option.hint)}</span>
+                            </span>
+                            <Icon icon={IconChevronRight} size={18} />
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="library-start-source">
+                      {isAdmin ? <>
+                        {t('libraryStartSourceHint')}{' '}
+                        <a href="#/settings?section=sources">{t('addSetUpSource')}</a>
+                      </> : t('libraryStartAdminHint')}
+                    </p>
+                  </>
+                ) : <p>{t('libraryStartManagerHint')}</p>}
+              </section>
+            ) : items.length === 0 ? (
               <EmptyState
                 title={t(
                   q
@@ -277,14 +310,7 @@ export function Library({ query, canManage }: { query: URLSearchParams; canManag
                     <a className="button" href={libraryHref({ kind: null, availability: 'all' })}>
                       {t(availability !== 'all' ? 'resetFilters' : 'clearFilters')}
                     </a>
-                  ) : (
-                    canManage && (
-                      <a className="button primary" href="#/new">
-                        <Icon icon={IconPlus} size={18} />
-                        {t('addPublication')}
-                      </a>
-                    )
-                  )
+                  ) : undefined
                 }
               >
                 {!q && !filtered ? t('emptyHint') : undefined}

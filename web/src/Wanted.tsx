@@ -332,7 +332,7 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
         title={t('wanted')}
         meta={t('wantedIntro')}
         actions={
-          canManage && result.data ? (
+          canManage && result.data && groups.length > 0 ? (
             <RunMonitored
               targets={runTargets}
               hasSource={hasIndexer}
@@ -345,7 +345,7 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
           ) : undefined
         }
       />
-      {canManage && noSource && (
+      {canManage && noSource && groups.length > 0 && (
         <div className="notice info wanted-setup" role="note">
           <Icon icon={IconPlugConnected} size={20} />
           <p id={setupId}>{t('wantedSetupTitle')}</p>
@@ -408,7 +408,7 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
           </FilterGroup>
         </div>
       </div>
-      {monitoring === 'all' && !requestedMonitoring && defaultMonitoring === 'all' && (
+      {groups.length > 0 && monitoring === 'all' && !requestedMonitoring && defaultMonitoring === 'all' && (
         <p className="wanted-default-note">{t('wantedNothingMonitoredNote')}</p>
       )}
       {publicationId && <PublicationScope id={publicationId} clear={() => update({ publicationId: '' })} />}
@@ -483,7 +483,12 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
           {t('wantedEmptyMonitoredText')}
         </EmptyState>
       ) : atDefaults ? (
-        <EmptyState title={t('wantedEmptyTitle')}>{t('wantedEmptyText')}</EmptyState>
+        <EmptyState
+          title={t('wantedEmptyTitle')}
+          action={canManage ? <a className="button" href="#/">{t('wantedOpenLibrary')}</a> : undefined}
+        >
+          {t('wantedEmptyText')}
+        </EmptyState>
       ) : (
         <EmptyState
           title={t('wantedNoMatchesTitle')}

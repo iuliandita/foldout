@@ -108,20 +108,54 @@
   display: none;
 }
 
-/* Start options in the empty Sources state: one button and one line each. */
-.source-starts {
-  display: grid;
-  gap: var(--space-4);
-  width: min(100%, 32rem);
-  text-align: start;
+/* Start options in the empty Sources state. */
+.sources-empty {
+  padding-top: var(--space-4);
 }
-.source-starts li {
-  display: grid;
-  justify-items: start;
-  gap: var(--space-1);
-}
-.empty-state .source-starts p {
+.sources-empty h3 {
   margin: 0;
+  font-size: var(--text-md);
+}
+.sources-empty > p {
+  margin: var(--space-1) 0 var(--space-4);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+.source-starts {
+  width: min(100%, 38rem);
+  border-top: 1px solid var(--line);
+}
+.source-starts button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 1.25rem;
+  gap: var(--space-1);
+  justify-content: stretch;
+  width: 100%;
+  min-height: 4.5rem;
+  padding: var(--space-3);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+.source-starts button:hover {
+  background: var(--hover);
+}
+.source-starts button strong {
+  grid-column: 1;
+  font-size: var(--text-sm);
+}
+.source-starts button span {
+  grid-column: 1;
+  color: var(--muted);
   font-size: var(--text-sm);
   line-height: var(--leading-sm);
+  font-weight: 400;
+}
+.source-starts button > .icon {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: var(--muted);
 }

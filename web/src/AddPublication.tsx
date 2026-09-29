@@ -63,20 +63,21 @@ function syncUrl(params: Record<string, string | undefined>) {
 const isUncertain = (error: unknown) =>
   !(error instanceof ApiError) || error.status === 0 || error.status >= 500 || error.code === 'invalid_response';
 
-export function AddPublication({ query }: { query: URLSearchParams }) {
+export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isAdmin: boolean }) {
   const { t } = useI18n();
   const choices = useResource<Schema['IntegrationChoiceList']>('/search/integrations');
   const [kind, setKind] = useState<Kind | undefined>(() => kinds.find((item) => item === query.get('kind')));
-  const [step, setStep] = useState<Step>(kind ? 2 : 1);
+  const [manualPath, setManualPath] = useState(query.get('manual') === '1');
+  const [step, setStep] = useState<Step>(kind ? (manualPath ? 3 : 2) : 1);
   const [search, setSearch] = useState({ q: query.get('q') ?? '', source: query.get('source') ?? '' });
-  const [origin, setOrigin] = useState<Origin>();
+  const [origin, setOrigin] = useState<Origin | undefined>(kind && manualPath ? { manual: true } : undefined);
   const [details, setDetails] = useState<Details>(emptyDetails);
   const heading = useRef<HTMLDivElement>(null);
   const moved = useRef(false);
 
   useEffect(() => {
-    syncUrl({ kind, source: search.source, q: search.q });
-  }, [kind, search]);
+    syncUrl({ kind, source: search.source, q: search.q, manual: manualPath ? '1' : undefined });
+  }, [kind, search, manualPath]);
   useEffect(() => {
     if (!moved.current) {
       moved.current = true;
@@ -95,12 +96,13 @@ export function AddPublication({ query }: { query: URLSearchParams }) {
     if (next !== kind) {
       setKind(next);
       setSearch({ q: search.q, source: '' });
-      setOrigin(undefined);
+      setOrigin(manualPath ? { manual: true } : undefined);
       setDetails(emptyDetails);
     }
-    setStep(2);
+    setStep(manualPath ? 3 : 2);
   }
   function chooseOrigin(next: Origin) {
+    setManualPath(next.manual);
     setOrigin(next);
     setDetails(
       next.manual
@@ -116,6 +118,8 @@ export function AddPublication({ query }: { query: URLSearchParams }) {
       ? t('addManualEntry')
       : `${providerNames[origin.candidate.provider]} #${origin.candidate.external_id}`
     : '';
+  const totalSteps = manualPath ? 4 : 5;
+  const shownStep = (index: Step) => manualPath && index > 2 ? index - 1 : index;
 
   return (
     <>
@@ -123,11 +127,16 @@ export function AddPublication({ query }: { query: URLSearchParams }) {
         <Icon icon={IconChevronLeft} size={18} />
         {t('back')}
       </a>
-      <PageHeader title={t('addPublication')} />
+      <PageHeader
+        title={t('addPublication')}
+        meta={t('addStepProgress').replace('{n}', String(shownStep(step))).replace('{total}', String(totalSteps))}
+      />
       <div ref={heading}>
         <ol className="add-steps">
           <StepSection
             index={1}
+            number={shownStep(1)}
+            total={totalSteps}
             step={step}
             title={t('addStepType')}
             done={kind ? t(kind) : undefined}
@@ -136,8 +145,10 @@ export function AddPublication({ query }: { query: URLSearchParams }) {
             <KindPicker value={kind} choose={chooseKind} />
           </StepSection>
 
-          <StepSection
+          {!manualPath && <StepSection
             index={2}
+            number={shownStep(2)}
+            total={totalSteps}
             step={step}
             title={t('addStepFind')}
             done={originText || undefined}
@@ -152,6 +163,7 @@ export function AddPublication({ query }: { query: URLSearchParams }) {
                 <ProviderSearch
                   kind={kind}
                   sources={sources}
+                  isAdmin={isAdmin}
                   initial={search}
                   remember={setSearch}
                   pick={(candidate) => chooseOrigin({ manual: false, candidate })}
@@ -161,21 +173,32 @@ export function AddPublication({ query }: { query: URLSearchParams }) {
             <div className="actions">
               <Button onClick={() => setStep(1)}>{t('addBack')}</Button>
             </div>
-          </StepSection>
+          </StepSection>}
 
           <StepSection
             index={3}
+            number={shownStep(3)}
+            total={totalSteps}
             step={step}
             title={t('addStepEdition')}
             done={details.title ? [details.title, details.run_label, editionText].filter(Boolean).join(' / ') : undefined}
             change={() => setStep(3)}
           >
+            {manualPath && (
+              <Button variant="ghost" icon={IconSearch} onClick={() => {
+                setManualPath(false);
+                setOrigin(undefined);
+                setStep(2);
+              }}>
+                {t('addSearchInstead')}
+              </Button>
+            )}
             {kind && origin && (
               <EditionForm
                 kind={kind}
                 origin={origin}
                 details={details}
-                back={() => setStep(2)}
+                back={() => setStep(manualPath ? 1 : 2)}
                 save={(next) => {
                   setDetails(next);
                   setStep(4);
@@ -186,6 +209,8 @@ export function AddPublication({ query }: { query: URLSearchParams }) {
 
           <StepSection
             index={4}
+            number={shownStep(4)}
+            total={totalSteps}
             step={step}
             title={t('addStepMonitor')}
             done={t('addMonitorLater')}
@@ -195,7 +220,7 @@ export function AddPublication({ query }: { query: URLSearchParams }) {
             {!choices.loading && !hasProwlarr && (
               <p className="notice info">
                 {t('addMonitorNeedsProwlarr')}{' '}
-                <a href="#/settings?section=sources">{t('addSetUpSource')}</a>
+                {isAdmin ? <a href="#/settings?section=sources">{t('addSetUpSource')}</a> : t('addAskAdminSource')}
               </p>
             )}
             <div className="actions">
@@ -206,7 +231,7 @@ export function AddPublication({ query }: { query: URLSearchParams }) {
             </div>
           </StepSection>
 
-          <StepSection index={5} step={step} title={t('addStepSummary')}>
+          <StepSection index={5} number={shownStep(5)} total={totalSteps} step={step} title={t('addStepSummary')}>
             {kind && origin && (
               <Summary
                 kind={kind}
@@ -275,6 +300,8 @@ function KindPicker({ value, choose }: { value?: Kind; choose: (kind: Kind) => v
 
 function StepSection({
   index,
+  number,
+  total,
   step,
   title,
   done,
@@ -282,6 +309,8 @@ function StepSection({
   children,
 }: {
   index: Step;
+  number: number;
+  total: number;
   step: Step;
   title: string;
   done?: string;
@@ -294,11 +323,11 @@ function StepSection({
     <li className={`add-step ${state}`} aria-current={state === 'current' ? 'step' : undefined}>
       <div className="add-step-head">
         <span className="add-step-number" aria-hidden="true">
-          {index}
+          {number}
         </span>
         <div className="add-step-title">
           <h2 tabIndex={-1}>
-            <span className="sr-only">{t('addStepOf').replace('{n}', String(index))} </span>
+            <span className="sr-only">{t('addStepOf').replace('{n}', String(number)).replace('{total}', String(total))} </span>
             {title}
           </h2>
           {state === 'done' && done && <p className="add-step-done">{done}</p>}
@@ -319,6 +348,7 @@ type SearchRun = { integration_id: string; query: string; page: number; limit: n
 function ProviderSearch({
   kind,
   sources,
+  isAdmin,
   initial,
   remember,
   pick,
@@ -326,6 +356,7 @@ function ProviderSearch({
 }: {
   kind: Kind;
   sources: Choice[];
+  isAdmin: boolean;
   initial: { q: string; source: string };
   remember: (value: { q: string; source: string }) => void;
   pick: (candidate: Candidate) => void;
@@ -398,9 +429,11 @@ function ProviderSearch({
         <p>{t('addNoSource').replace('{type}', t(kind))}</p>
         <div className="actions">
           {manualButton}
-          <a className="button" href="#/settings?section=sources">
-            {t('addSetUpSource')}
-          </a>
+          {isAdmin ? (
+            <a className="button" href="#/settings?section=sources">
+              {t('addSetUpSource')}
+            </a>
+          ) : <span>{t('addAskAdminSource')}</span>}
         </div>
       </div>
     );
