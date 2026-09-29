@@ -251,6 +251,7 @@ function Manager() {
                     name="setupToken"
                     type="password"
                     required
+                    showRequiredMark={false}
                     autoComplete="off"
                     maxLength={43}
                     hint={t('setupTokenHint')}
@@ -260,6 +261,7 @@ function Manager() {
                   label={t('username')}
                   name="username"
                   required
+                  showRequiredMark={false}
                   autoComplete="username"
                   autoFocus
                   maxLength={100}
@@ -269,6 +271,7 @@ function Manager() {
                   name="password"
                   type="password"
                   required
+                  showRequiredMark={false}
                   autoComplete={auth === 'setup' ? 'new-password' : 'current-password'}
                   minLength={auth === 'setup' ? 12 : undefined}
                   maxLength={1024}
@@ -277,7 +280,10 @@ function Manager() {
               </SaveForm>
             </>
           )}
-          <Appearance />
+          <details className="auth-appearance">
+            <summary>{t('appearance')}</summary>
+            <Appearance />
+          </details>
         </div>
       </main>
     );
@@ -347,7 +353,6 @@ function Manager() {
       </header>
       <aside className="sidebar">
         {brand}
-        <p className="brand-caption">{t('brandCaption')}</p>
         <PaletteButton />
         <nav aria-label={t('mainNavigation')}>
           {navItems.map((item) => (

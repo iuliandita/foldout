@@ -835,14 +835,15 @@ export function Loading() {
 export function Field({
   label,
   hint,
+  showRequiredMark = true,
   ...props
-}: InputHTMLAttributes<HTMLInputElement> & { label: string; hint?: string }) {
+}: InputHTMLAttributes<HTMLInputElement> & { label: string; hint?: string; showRequiredMark?: boolean }) {
   const { t } = useI18n();
   const id = props.id ?? props.name;
   return (
     <label className="field" htmlFor={id}>
       <span>
-        {label} {props.required ? '*' : <small>({t('optional')})</small>}
+        {label} {props.required ? (showRequiredMark ? '*' : null) : <small>({t('optional')})</small>}
       </span>
       <input {...props} id={id} aria-describedby={hint ? `${id}-hint` : undefined} />
       {hint && <small id={`${id}-hint`}>{hint}</small>}
