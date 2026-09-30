@@ -1277,6 +1277,7 @@
     "/api/v1/library/roots/{id}/entries": {
       "get": {
         "operationId": "listInventory",
+        "description": "Lists persisted inventory entries without rescanning. An entry_id filter returns at most one matching entry in the requested root with no next cursor; an unknown entry or an entry in another root returns an empty page. Requires manage scope.",
         "responses": {
           "200": {
             "description": "Successful operation",
@@ -1322,6 +1323,15 @@
             "in": "query",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "entry_id",
+            "in": "query",
+            "description": "Exact inventory entry ID. Cannot be combined with cursor. Empty or malformed UUIDs are rejected.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
             }
           }
         ]

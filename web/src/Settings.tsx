@@ -3,6 +3,7 @@ import { IconKey, IconPlugConnected, IconAdjustmentsHorizontal, IconDatabase } f
 import { Integrations } from './Integrations';
 import { Storage } from './Storage';
 import { useI18n, preference, savePreference } from './i18n';
+import { setPrintableShortcuts, usePrintableShortcuts } from './shortcuts';
 import { post, request, type Schema } from './lib/api/client';
 import {
   Button,
@@ -126,6 +127,8 @@ function useServerVersion() {
 function General() {
   const { t } = useI18n();
   const languageId = useId();
+  const shortcutsId = useId();
+  const printableShortcuts = usePrintableShortcuts();
   const version = useServerVersion();
   return (
     <section>
@@ -137,6 +140,22 @@ function General() {
           description={t('interfaceLanguageHint')}
           htmlFor={languageId}
           control={(describedBy) => <LanguageSelect id={languageId} describedBy={describedBy} />}
+        />
+        <SettingRow
+          label={t('printableShortcuts')}
+          description={t('printableShortcutsHint')}
+          htmlFor={shortcutsId}
+          control={(describedBy) => (
+            <select
+              id={shortcutsId}
+              aria-describedby={describedBy}
+              value={String(printableShortcuts)}
+              onChange={(event) => setPrintableShortcuts(event.target.value === 'true')}
+            >
+              <option value="false">{t('disabled')}</option>
+              <option value="true">{t('enabled')}</option>
+            </select>
+          )}
         />
         <SettingRow
           label={t('about')}

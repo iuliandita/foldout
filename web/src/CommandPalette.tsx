@@ -16,6 +16,12 @@ import { type Schema, request } from './lib/api/client';
 import { type MessageKey, useI18n } from './i18n';
 import { Cover } from './Cover';
 import { Button, Icon, IconButton } from './ui';
+import {
+  printableShortcutsEnabled,
+  setPrintableShortcuts,
+  subscribePrintableShortcuts,
+  usePrintableShortcuts,
+} from './shortcuts';
 import './styles/palette.css';
 
 type Mode = 'commands' | 'help';
@@ -97,14 +103,25 @@ export function CommandPalette({ canManage }: { canManage: boolean }) {
   }, [mode]);
   useEffect(() => {
     let pendingG = 0;
+    const unsubscribe = subscribePrintableShortcuts(() => {
+      pendingG = 0;
+    });
     function onKeyDown(event: globalThis.KeyboardEvent) {
       if (event.defaultPrevented || event.isComposing) return;
       if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
+        pendingG = 0;
         event.preventDefault();
         setMode((current) => (current ? null : 'commands'));
         return;
       }
-      if (openRef.current || event.ctrlKey || event.metaKey || event.altKey || event.repeat) return;
+      if (openRef.current || event.ctrlKey || event.metaKey || event.altKey || event.repeat) {
+        pendingG = 0;
+        return;
+      }
+      if (!printableShortcutsEnabled()) {
+        pendingG = 0;
+        return;
+      }
       if (isTyping(event.target) || document.querySelector('[role="menu"]')) {
         pendingG = 0;
         return;
@@ -137,6 +154,7 @@ export function CommandPalette({ canManage }: { canManage: boolean }) {
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener(openEvent, onOpen);
     return () => {
+      unsubscribe();
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener(openEvent, onOpen);
     };
@@ -158,6 +176,7 @@ function PaletteDialog({
   canManage: boolean;
 }) {
   const { t } = useI18n();
+  const printableShortcuts = usePrintableShortcuts();
   const dialog = useRef<HTMLDialogElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const base = useId();
@@ -210,7 +229,7 @@ function PaletteDialog({
       id: `go-${jump.key}`,
       label: t(jump.section),
       icon: jump.icon,
-      shortcut: `g ${jump.key}`,
+      shortcut: printableShortcuts ? `g ${jump.key}` : undefined,
       run: () => go(jump.href),
     }))
     .filter((command) => match(command.label));
@@ -218,7 +237,7 @@ function PaletteDialog({
     ...(canManage
       ? [{ id: 'add', label: t('addPublication'), icon: IconPlus, run: () => go('#/new') }]
       : []),
-    { id: 'help', label: t('shortcutsTitle'), icon: IconKeyboard, shortcut: '?', run: () => setMode('help') },
+    { id: 'help', label: t('shortcutsTitle'), icon: IconKeyboard, shortcut: printableShortcuts ? '?' : undefined, run: () => setMode('help') },
   ].filter((command) => match(command.label));
   /* While a new search runs, the previous results stay visible instead of flickering away. */
   const current = found.query === q ? found : undefined;
@@ -311,29 +330,39 @@ function PaletteDialog({
               </dt>
               <dd>{t('shortcutPalette')}</dd>
             </div>
+            {printableShortcuts && (
+              <>
+                <div>
+                  <dt>
+                    <kbd>/</kbd>
+                  </dt>
+                  <dd>{t('shortcutSearch')}</dd>
+                </div>
+                {jumps.map((jump) => (
+                  <div key={jump.key}>
+                    <dt>
+                      <kbd>g</kbd> <kbd>{jump.key}</kbd>
+                    </dt>
+                    <dd>{t('shortcutGoTo').replace('{section}', t(jump.section))}</dd>
+                  </div>
+                ))}
+                <div>
+                  <dt>
+                    <kbd>?</kbd>
+                  </dt>
+                  <dd>{t('shortcutHelp')}</dd>
+                </div>
+                <div>
+                  <dt>
+                    <kbd>j</kbd> <kbd>k</kbd>
+                  </dt>
+                  <dd>{t('shortcutRowMove')}</dd>
+                </div>
+              </>
+            )}
             <div>
               <dt>
-                <kbd>/</kbd>
-              </dt>
-              <dd>{t('shortcutSearch')}</dd>
-            </div>
-            {jumps.map((jump) => (
-              <div key={jump.key}>
-                <dt>
-                  <kbd>g</kbd> <kbd>{jump.key}</kbd>
-                </dt>
-                <dd>{t('shortcutGoTo').replace('{section}', t(jump.section))}</dd>
-              </div>
-            ))}
-            <div>
-              <dt>
-                <kbd>?</kbd>
-              </dt>
-              <dd>{t('shortcutHelp')}</dd>
-            </div>
-            <div>
-              <dt>
-                <kbd>j</kbd> <kbd>k</kbd>
+                <kbd>{t('keyUp')}</kbd> <kbd>{t('keyDown')}</kbd>
               </dt>
               <dd>{t('shortcutRowMove')}</dd>
             </div>
@@ -343,12 +372,14 @@ function PaletteDialog({
               </dt>
               <dd>{t('shortcutRowOpen')}</dd>
             </div>
-            <div>
-              <dt>
-                <kbd>f</kbd>
-              </dt>
-              <dd>{t('shortcutRowFind')}</dd>
-            </div>
+            {printableShortcuts && (
+              <div>
+                <dt>
+                  <kbd>f</kbd>
+                </dt>
+                <dd>{t('shortcutRowFind')}</dd>
+              </div>
+            )}
             <div>
               <dt>
                 <kbd>Esc</kbd>
@@ -356,8 +387,11 @@ function PaletteDialog({
               <dd>{t('shortcutClose')}</dd>
             </div>
           </dl>
-          <p className="palette-note">{t('shortcutsNote')}</p>
+          <p className="palette-note">{t(printableShortcuts ? 'shortcutsNote' : 'printableShortcutsDisabled')}</p>
           <div className="actions">
+            {!printableShortcuts && (
+              <Button onClick={() => setPrintableShortcuts(true)}>{t('enablePrintableShortcuts')}</Button>
+            )}
             <Button icon={IconSearch} onClick={() => setMode('commands')}>
               {t('paletteOpen')}
             </Button>

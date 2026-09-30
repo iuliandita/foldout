@@ -118,7 +118,9 @@ function itemHref(item: ReviewItem): string {
     case 'direct_acquisition_needs_review':
       return `#/direct-acquisition/${encodeURIComponent(item.id)}`;
     case 'file_to_link':
-      return '#/settings?section=storage';
+      return item.root_id && item.entry_id
+        ? `#/settings?section=storage&root_id=${encodeURIComponent(item.root_id)}&entry_id=${encodeURIComponent(item.entry_id)}&from=review`
+        : '#/settings?section=storage';
     case 'job_failed':
       return `#/job/${encodeURIComponent(item.job_id ?? item.id)}`;
     case 'monitor_needs_review':

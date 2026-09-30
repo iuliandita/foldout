@@ -31,12 +31,60 @@ type Root = Schema['LibraryRoot'];
 type Entry = Schema['InventoryEntry'];
 type Preview = Schema['ImportPreview'];
 type FileView = Schema['LibraryFile'];
+function storageTarget() {
+  const params = new URLSearchParams(location.hash.split('?')[1] ?? '');
+  return {
+    rootId: params.get('root_id'),
+    entryId: params.get('entry_id'),
+    fromReview: params.get('from') === 'review',
+  };
+}
+function clearStorageTarget() {
+  const [path, search = ''] = location.hash.split('?');
+  const params = new URLSearchParams(search);
+  for (const name of ['root_id', 'entry_id', 'from']) params.delete(name);
+  history.replaceState(history.state, '', `${path}?${params}`);
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
+}
 export function Storage() {
   const { t } = useI18n();
   const roots = useResource<Root[]>('/library/roots');
   const [adding, setAdding] = useState(false);
   const [selected, setSelected] = useState<string>();
-  const root = roots.data?.find((root) => root.id === selected) ?? roots.data?.[0];
+  const [target, setTarget] = useState(storageTarget);
+  useEffect(() => {
+    const update = () => setTarget(storageTarget());
+    window.addEventListener('hashchange', update);
+    return () => window.removeEventListener('hashchange', update);
+  }, []);
+  const targeted = target.rootId !== null || target.entryId !== null;
+  const root = targeted
+    ? roots.data?.find((root) => root.id === target.rootId)
+    : roots.data?.find((root) => root.id === selected) ?? roots.data?.[0];
+  function selectRoot(id: string) {
+    setSelected(id);
+    clearStorageTarget();
+  }
+  function closeTarget() {
+    if (target.fromReview) location.hash = '/review';
+    else {
+      setSelected(root?.id);
+      clearStorageTarget();
+    }
+  }
+  function inventory(current: Root) {
+    return targeted ? (
+      <SelectedAssociation
+        key={`${current.id}:${target.entryId}`}
+        root={current}
+        entryId={target.entryId}
+        fromReview={target.fromReview}
+        close={closeTarget}
+      />
+    ) : (
+      <Inventory key={current.id} root={current} />
+    );
+  }
   return (
     <section>
       <SectionHeader
@@ -72,24 +120,79 @@ export function Storage() {
         <Loading />
       ) : roots.error ? (
         <ErrorNotice error={roots.error} retry={roots.reload} />
+      ) : targeted && (!root || !target.entryId) ? (
+        <div className="notice" role="status">
+          <p>{t('storageSelectedUnavailable')}</p>
+          <Button onClick={closeTarget}>{t(target.fromReview ? 'backToReview' : 'inventory')}</Button>
+        </div>
       ) : roots.data?.length && root ? (
         roots.data.length > 1 ? (
           <Tabs
             label={t('roots')}
             items={roots.data.map((item) => ({ id: item.id, label: item.label }))}
             selected={root.id}
-            onSelect={setSelected}
+            onSelect={selectRoot}
           >
             {(id) => {
               const current = roots.data?.find((item) => item.id === id);
-              return current && <Inventory key={current.id} root={current} />;
+              return current && inventory(current);
             }}
           </Tabs>
         ) : (
-          <Inventory key={root.id} root={root} />
+          inventory(root)
         )
       ) : (
         <p className="empty-inline">{t('noRoots')}</p>
+      )}
+    </section>
+  );
+}
+function SelectedAssociation({
+  root,
+  entryId,
+  fromReview,
+  close,
+}: {
+  root: Root;
+  entryId: string | null;
+  fromReview: boolean;
+  close: () => void;
+}) {
+  const { t } = useI18n();
+  const entry = useResource<Schema['InventoryPage']>(
+    entryId ? `/library/roots/${encodeURIComponent(root.id)}/entries?entry_id=${encodeURIComponent(entryId)}` : null,
+  );
+  const selected = entry.data?.items.find((item) => item.id.toLowerCase() === entryId?.toLowerCase());
+  return (
+    <section className="inventory">
+      {fromReview ? (
+        <a className="back" href="#/review">{t('backToReview')}</a>
+      ) : (
+        <Button variant="ghost" onClick={close}>{t('inventory')}</Button>
+      )}
+      <h3>{root.label}</h3>
+      {entry.loading ? (
+        <Loading />
+      ) : entry.error ? (
+        <ErrorNotice error={entry.error} retry={entry.reload} />
+      ) : selected?.state === 'pending_association' ? (
+        <Association
+          key={selected.id}
+          entry={selected}
+          close={close}
+          closeLabel={fromReview ? 'backToReview' : 'inventory'}
+        />
+      ) : (
+        <div className="notice" role="status">
+          {selected && (
+            <p><PathText path={selected.relative_path} /></p>
+          )}
+          <p>{t('storageSelectedUnavailable')}</p>
+          {selected && (
+            <p className="inventory-status"><EntryStatus entry={selected} /></p>
+          )}
+          <Button onClick={close}>{t(fromReview ? 'backToReview' : 'inventory')}</Button>
+        </div>
       )}
     </section>
   );
@@ -388,8 +491,18 @@ function Inventory({ root }: { root: Root }) {
     </section>
   );
 }
-function Association({ entry, close }: { entry: Entry; close: () => void }) {
+function Association({
+  entry,
+  close,
+  closeLabel = 'inventory',
+}: {
+  entry: Entry;
+  close: () => void;
+  closeLabel?: MessageKey;
+}) {
   const { t, locale } = useI18n();
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => heading.current?.focus(), []);
   const [unit, setUnit] = useState<{ id: string; label: string }>();
   const [preview, setPreview] = useState<Preview>();
   const [file, setFile] = useState<FileView>();
@@ -397,7 +510,7 @@ function Association({ entry, close }: { entry: Entry; close: () => void }) {
   const [busy, setBusy] = useState(false);
   return (
     <div className="association">
-      <h3>{t('associate')}</h3>
+      <h3 ref={heading} tabIndex={-1}>{t('associate')}</h3>
       <p className="path">
         <PathText path={entry.relative_path} />
       </p>
@@ -412,7 +525,7 @@ function Association({ entry, close }: { entry: Entry; close: () => void }) {
           <p>
             {file.format.toUpperCase()}, {formatSize(file.size_bytes, locale)}
           </p>
-          <button onClick={close}>{t('inventory')}</button>
+          <button onClick={close}>{t(closeLabel)}</button>
         </div>
       ) : (
         <>

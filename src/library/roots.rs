@@ -135,9 +135,20 @@ impl Library {
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<InventoryEntryPage, LibraryError> {
+        self.inventory_entries_filtered(root_id, cursor, limit, None)
+            .await
+    }
+
+    pub(crate) async fn inventory_entries_filtered(
+        &self,
+        root_id: &str,
+        cursor: Option<&str>,
+        limit: u32,
+        entry_id: Option<&str>,
+    ) -> Result<InventoryEntryPage, LibraryError> {
         self.root(root_id).await?;
         let limit = limit.clamp(1, 100);
-        let rows = sqlx::query(
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
             "SELECT e.id, e.relative_path, e.format, e.size_bytes, e.state, e.reason,
                 (SELECT COUNT(*) FROM library_files f
                  JOIN file_coverage c ON c.library_file_id = f.id
@@ -146,13 +157,24 @@ impl Library {
                    AND f.signature = e.signature AND f.size_bytes = e.size_bytes
                 ) AS associated_unit_count
              FROM scan_entries e JOIN library_roots r ON r.id = e.root_id
-             WHERE e.root_id = ? AND e.id > ? ORDER BY e.id LIMIT ?",
-        )
-        .bind(root_id)
-        .bind(cursor.unwrap_or_default())
-        .bind(i64::from(limit) + 1)
-        .fetch_all(self.store.reader())
-        .await?;
+             WHERE e.root_id = ",
+        );
+        query.push_bind(root_id);
+        if let Some(entry_id) = entry_id {
+            query.push(" AND e.id = ").push_bind(entry_id);
+        } else {
+            query
+                .push(" AND e.id > ")
+                .push_bind(cursor.unwrap_or_default());
+        }
+        query
+            .push(" ORDER BY e.id LIMIT ")
+            .push_bind(if entry_id.is_some() {
+                1
+            } else {
+                i64::from(limit) + 1
+            });
+        let rows = query.build().fetch_all(self.store.reader()).await?;
         let mut items: Vec<InventoryEntry> = rows
             .into_iter()
             .map(|row| InventoryEntry {

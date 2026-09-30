@@ -30,6 +30,7 @@ import {
 } from '@tabler/icons-react';
 import { ApiError, request } from './lib/api/client';
 import { useI18n } from './i18n';
+import { printableShortcutsEnabled } from './shortcuts';
 
 const cx = (...names: (string | false | null | undefined)[]) => names.filter(Boolean).join(' ');
 
@@ -85,6 +86,7 @@ export function useRowKeys(container: { current: HTMLElement | null }, keys: rea
       const root = container.current;
       if (!root || event.defaultPrevented || event.isComposing) return;
       if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.key.length === 1 && !printableShortcutsEnabled()) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"]')) return;
       const rows = Array.from(root.querySelectorAll<HTMLElement>('[data-row]'));

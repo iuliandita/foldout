@@ -354,6 +354,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Lists persisted inventory entries without rescanning. An entry_id filter returns at most one matching entry in the requested root with no next cursor; an unknown entry or an entry in another root returns an empty page. Requires manage scope. */
         get: operations["listInventory"];
         put?: never;
         post?: never;
@@ -3088,6 +3089,8 @@ export interface operations {
             query?: {
                 limit?: number;
                 cursor?: string;
+                /** @description Exact inventory entry ID. Cannot be combined with cursor. Empty or malformed UUIDs are rejected. */
+                entry_id?: string;
             };
             header?: never;
             path: {

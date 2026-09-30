@@ -31,6 +31,226 @@ async fn call(
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&bytes).unwrap())
 }
+
+#[tokio::test]
+async fn inventory_entry_lookup_is_exact_scoped_and_preserves_association_truth() {
+    let state = tempfile::Builder::new()
+        .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let store = SqliteStore::open(state.path()).await.unwrap();
+    let auth = AuthService::new(store.clone());
+    auth.setup("owner", "correct horse battery staple")
+        .await
+        .unwrap();
+    let manage = auth
+        .create_key("manage", Scope::Manage)
+        .await
+        .unwrap()
+        .secret;
+    let read = auth.create_key("read", Scope::Read).await.unwrap().secret;
+    let app = app::router(store.clone());
+    let root_id = uuid::Uuid::new_v4().to_string();
+    let other_root_id = uuid::Uuid::new_v4().to_string();
+    let source = state.path().join("unavailable-source");
+    let mut tx = store.begin_write().await.unwrap();
+    for (id, path) in [
+        (&root_id, source.clone()),
+        (&other_root_id, state.path().join("other-source")),
+    ] {
+        sqlx::query("INSERT INTO library_roots(id,label,path) VALUES(?,'Fixture library',?)")
+            .bind(id)
+            .bind(path.to_str().unwrap())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    for index in 1..=61 {
+        sqlx::query("INSERT INTO scan_entries(id,root_id,relative_path,format,signature,size_bytes,mtime_ns,state) VALUES(?,?,?,'cbz','current',1,1,'pending_association')")
+            .bind(uuid::Uuid::from_u128(index).to_string())
+            .bind(&root_id)
+            .bind(format!("{index}.cbz"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    for statement in [
+        "INSERT INTO publications(id,content_type,title,sort_title) VALUES('pub','comic','Fixture comic','Fixture comic')",
+        "INSERT INTO editions(id,publication_id,language) VALUES('ed','pub','en')",
+    ] {
+        sqlx::query(statement).execute(&mut *tx).await.unwrap();
+    }
+    sqlx::query("INSERT INTO library_files(id,path,format,signature,size_bytes) VALUES('file',?,'cbz','current',1)")
+        .bind(source.join("61.cbz").to_str().unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for index in 1..=6 {
+        let unit_id = format!("unit-{index}");
+        sqlx::query(
+            "INSERT INTO units(id,edition_id,label,kind,sort_key) VALUES(?,'ed',?,'issue',?)",
+        )
+        .bind(&unit_id)
+        .bind(index.to_string())
+        .bind(index.to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO file_coverage(library_file_id,unit_id,evidence) VALUES('file',?,'user_confirmed')")
+            .bind(&unit_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    let path = format!("/api/v1/library/roots/{root_id}/entries");
+    let entry_id = uuid::Uuid::from_u128(61).to_string();
+    let exact_path = format!("{path}?entry_id={entry_id}");
+    let (status, first) = call(&app, &manage, "GET", &path, json!(null)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["items"].as_array().unwrap().len(), 50);
+    assert!(
+        first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["id"] != entry_id)
+    );
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let (status, second) = call(
+        &app,
+        &manage,
+        "GET",
+        &format!("{path}?cursor={cursor}"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["items"].as_array().unwrap().len(), 11);
+    assert!(second["next_cursor"].is_null());
+    let library = libraryd::library::roots::Library::new(store.clone());
+    assert_eq!(
+        serde_json::to_value(
+            library
+                .inventory_entries(&root_id, Some(cursor), 50)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        second
+    );
+    let (status, exact) = call(&app, &manage, "GET", &exact_path, json!(null)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(exact["items"], json!([second["items"][10]]));
+    assert!(exact["next_cursor"].is_null());
+    assert_eq!(exact["items"][0]["associated_unit_count"], 6);
+    let units = exact["items"][0]["associated_units"].as_array().unwrap();
+    assert_eq!(units.len(), 5);
+    assert_eq!(units[0]["unit_id"], "unit-1");
+    assert_eq!(units[4]["unit_id"], "unit-5");
+    let (status, canonical) = call(
+        &app,
+        &manage,
+        "GET",
+        &format!("{path}?entry_id={}&limit=1", entry_id.to_uppercase()),
+        json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canonical, exact);
+
+    for missing_path in [
+        format!("{path}?entry_id={}", uuid::Uuid::new_v4()),
+        format!("/api/v1/library/roots/{other_root_id}/entries?entry_id={entry_id}"),
+    ] {
+        let (status, page) = call(&app, &manage, "GET", &missing_path, json!(null)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page, json!({"items": [], "next_cursor": null}));
+    }
+    assert_eq!(
+        call(&app, &read, "GET", &exact_path, json!(null)).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&app, "", "GET", &exact_path, json!(null)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(
+            &app,
+            &manage,
+            "GET",
+            &format!(
+                "/api/v1/library/roots/{}/entries?entry_id={entry_id}",
+                uuid::Uuid::new_v4()
+            ),
+            json!(null)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    for query in [
+        "entry_id=".to_string(),
+        "entry_id=invalid".to_string(),
+        "entry_id=%20".to_string(),
+        format!("entry_id={entry_id}&cursor={cursor}"),
+        format!("entry_id={entry_id}&cursor="),
+        format!("entry_id={entry_id}&limit=0"),
+        format!("entry_id={entry_id}&limit=101"),
+        "cursor=invalid".to_string(),
+    ] {
+        assert_eq!(
+            call(
+                &app,
+                &manage,
+                "GET",
+                &format!("{path}?{query}"),
+                json!(null)
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+
+    for (signature, size, state) in [
+        ("changed", 1, "pending_association"),
+        ("current", 2, "pending_association"),
+        ("current", 1, "missing"),
+    ] {
+        let mut tx = store.begin_write().await.unwrap();
+        sqlx::query(
+            "UPDATE scan_entries SET signature = ?, size_bytes = ?, state = ? WHERE id = ?",
+        )
+        .bind(signature)
+        .bind(size)
+        .bind(state)
+        .bind(&entry_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let (status, changed) = call(&app, &manage, "GET", &exact_path, json!(null)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(changed["items"][0]["associated_unit_count"], 0);
+        assert_eq!(changed["items"][0]["associated_units"], json!([]));
+    }
+    assert!(!source.exists());
+    let scans: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_runs")
+        .fetch_one(store.reader())
+        .await
+        .unwrap();
+    assert_eq!(scans, 0);
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(store.reader())
+        .await
+        .unwrap();
+    assert_eq!(jobs, 0);
+}
+
 #[tokio::test]
 async fn scan_preview_adoption_and_job_redaction_work_end_to_end() {
     let state = tempfile::Builder::new()

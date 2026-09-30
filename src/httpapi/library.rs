@@ -141,6 +141,7 @@ async fn scan(
 struct EntryQuery {
     limit: Option<u32>,
     cursor: Option<String>,
+    entry_id: Option<String>,
 }
 async fn entries(
     State(ctx): State<LibraryContext>,
@@ -161,9 +162,21 @@ async fn entries(
     {
         return Err(ApiError::invalid("Invalid inventory cursor"));
     }
+    let entry_id = query
+        .entry_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| ApiError::invalid("Invalid inventory entry ID"))?
+        .map(|id| id.to_string());
+    if entry_id.is_some() && query.cursor.is_some() {
+        return Err(ApiError::invalid(
+            "Entry ID cannot be combined with a cursor",
+        ));
+    }
     Ok(Json(
         ctx.library
-            .inventory_entries(&id, query.cursor.as_deref(), limit)
+            .inventory_entries_filtered(&id, query.cursor.as_deref(), limit, entry_id.as_deref())
             .await?,
     ))
 }
