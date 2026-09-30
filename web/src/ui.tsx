@@ -30,6 +30,7 @@ import {
 } from '@tabler/icons-react';
 import { ApiError, request } from './lib/api/client';
 import { useI18n } from './i18n';
+import { printableShortcutsEnabled } from './shortcuts';
 
 const cx = (...names: (string | false | null | undefined)[]) => names.filter(Boolean).join(' ');
 
@@ -63,12 +64,12 @@ export function Icon({ icon: Glyph, size = 20 }: { icon: TablerIcon; size?: numb
   return <Glyph className="icon" size={size} stroke={1.75} aria-hidden="true" focusable="false" />;
 }
 
-/** Foldout mark: a page with its top-right corner folded over, in the accent color. */
+/** Foldout mark: an opened three-panel spread. */
 export function BrandMark() {
   return (
     <svg className="brand-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path className="brand-mark-page" d="M6 3h9l6 6v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
-      <path className="brand-mark-fold" d="M15 3v4a2 2 0 0 0 2 2h4z" />
+      <path className="brand-mark-page" d="M2 4l6 3v14l-6-3zM15 3l7 4v14l-7-4z" />
+      <path className="brand-mark-fold" d="M8 7l7-4v14l-7 4z" />
     </svg>
   );
 }
@@ -85,6 +86,7 @@ export function useRowKeys(container: { current: HTMLElement | null }, keys: rea
       const root = container.current;
       if (!root || event.defaultPrevented || event.isComposing) return;
       if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.key.length === 1 && !printableShortcutsEnabled()) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"]')) return;
       const rows = Array.from(root.querySelectorAll<HTMLElement>('[data-row]'));
@@ -279,6 +281,7 @@ export function Tabs<T extends string>({
     onSelect?.(id);
   }
   function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') return;
     const next = nextIndex(event.key, index, items.length);
     if (next === undefined) return;
     event.preventDefault();
@@ -288,7 +291,7 @@ export function Tabs<T extends string>({
   if (active === undefined) return null;
   return (
     <div className="tabs">
-      <div role="tablist" aria-label={label}>
+      <div role="tablist" aria-label={label} aria-orientation="horizontal">
         {items.map((item, index) => (
           <button
             key={item.id}
@@ -834,14 +837,15 @@ export function Loading() {
 export function Field({
   label,
   hint,
+  showRequiredMark = true,
   ...props
-}: InputHTMLAttributes<HTMLInputElement> & { label: string; hint?: string }) {
+}: InputHTMLAttributes<HTMLInputElement> & { label: string; hint?: string; showRequiredMark?: boolean }) {
   const { t } = useI18n();
   const id = props.id ?? props.name;
   return (
     <label className="field" htmlFor={id}>
       <span>
-        {label} {props.required ? '*' : <small>({t('optional')})</small>}
+        {label} {props.required ? (showRequiredMark ? '*' : null) : <small>({t('optional')})</small>}
       </span>
       <input {...props} id={id} aria-describedby={hint ? `${id}-hint` : undefined} />
       {hint && <small id={`${id}-hint`}>{hint}</small>}

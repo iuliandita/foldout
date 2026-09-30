@@ -30,3 +30,19 @@ export function formatUnitDate(unit: Schema['Unit'], locale: string) {
     ...(precision === 'month' ? { year: 'numeric', month: 'long' } : { dateStyle: 'medium' }),
   }).format(date);
 }
+
+export function unitDisplay(unit: Schema['Unit'], locale: string) {
+  const date = formatUnitDate(unit, locale);
+  if (!date) return { label: unit.label, date: undefined };
+  const normalize = (value: string) => value.trim().toLowerCase().replace(/\s+/g, ' ');
+  const label = normalize(unit.label);
+  const dates = [...new Set([normalize(unit.date!), ...[locale, 'en', 'es'].map((language) => normalize(formatUnitDate(unit, language)!))])];
+  if (label === normalize(unit.date!) || dates.includes(label)) return { label: date, date: undefined };
+  if (/^\d{4}(?:-\d{2}){0,2}$/.test(label)) return { label: unit.label, date };
+  const containsDate = dates.some((value) => {
+    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const boundary = /^\d{4}(?:-\d{2}){0,2}$/.test(value) ? '[\\p{L}\\p{N}-]' : '[\\p{L}\\p{N}]';
+    return new RegExp(`(?<!${boundary})${escaped}(?!${boundary})`, 'u').test(label);
+  });
+  return { label: unit.label, date: containsDate ? undefined : date };
+}

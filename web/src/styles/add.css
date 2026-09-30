@@ -1,4 +1,13 @@
 /* Add publication: one page, progressive steps. */
+.add-draft {
+  max-width: 48rem;
+}
+.add-draft > h2 {
+  margin-bottom: var(--space-3);
+}
+.add-draft > .actions {
+  margin-block: var(--space-4);
+}
 .add-steps {
   list-style: none;
   margin: 0;
@@ -19,6 +28,10 @@
   background: var(--line);
 }
 .add-step:last-child::before {
+  display: none;
+}
+.add-step.upcoming,
+.add-step.current::before {
   display: none;
 }
 .add-step.done::before {

@@ -11,6 +11,7 @@ import { type Schema, request } from './lib/api/client';
 import { en } from './locales/en';
 import { useI18n, type MessageKey } from './i18n';
 import { RelativeTime } from './Activity';
+import { unitDisplay } from './format';
 import { EmptyState, ErrorNotice, Icon, Loading, PageHeader, domId } from './ui';
 import './styles/review.css';
 
@@ -96,7 +97,7 @@ function jobKindLabel(t: (key: MessageKey) => string, kind: string | null): stri
   if (kind === 'acquisition.pipeline') return t('activityDownload');
   return t('activityTask');
 }
-function itemMeta(t: (key: MessageKey) => string, item: ReviewItem): string | undefined {
+function itemMeta(t: (key: MessageKey) => string, item: ReviewItem, locale: string): string | undefined {
   switch (item.kind) {
     case 'file_to_link':
       return item.relative_path ?? undefined;
@@ -104,9 +105,14 @@ function itemMeta(t: (key: MessageKey) => string, item: ReviewItem): string | un
       return jobKindLabel(t, item.job_kind);
     case 'acquisition_needs_review':
     case 'direct_acquisition_needs_review':
-      return item.unit_id ? `${t('unitIdentity')}: ${item.unit_id}` : undefined;
-    case 'monitor_needs_review':
-      return item.unit_id ? `${t('unitIdentity')}: ${item.unit_id}` : undefined;
+    case 'monitor_needs_review': {
+      if (!item.unit) return item.publication_title ?? undefined;
+      const display = unitDisplay(item.unit, locale);
+      const kind = t(item.unit.kind);
+      const label = display.label.toLocaleLowerCase(locale);
+      const namesKind = label.includes(kind.toLocaleLowerCase(locale)) || label.includes(item.unit.kind);
+      return [item.publication_title, namesKind ? undefined : kind, display.label, display.date].filter(Boolean).join(' ');
+    }
     default:
       return undefined;
   }
@@ -118,7 +124,9 @@ function itemHref(item: ReviewItem): string {
     case 'direct_acquisition_needs_review':
       return `#/direct-acquisition/${encodeURIComponent(item.id)}`;
     case 'file_to_link':
-      return '#/settings?section=storage';
+      return item.root_id && item.entry_id
+        ? `#/settings?section=storage&root_id=${encodeURIComponent(item.root_id)}&entry_id=${encodeURIComponent(item.entry_id)}&from=review`
+        : '#/settings?section=storage';
     case 'job_failed':
       return `#/job/${encodeURIComponent(item.job_id ?? item.id)}`;
     case 'monitor_needs_review':
@@ -163,7 +171,7 @@ function buildSections(items: readonly ReviewItem[], totals: ReviewTotals) {
 }
 
 export function Review() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { data, error, loading, reload } = useReviewFeed();
   const sections = data ? buildSections(data.items, data.totals) : [];
   return (
@@ -188,39 +196,63 @@ export function Review() {
               </p>
             )}
             <ul className="review-list">
-              {section.items.map((item) => (
-                <li key={`${item.kind}:${item.id}`}>
-                  <a
-                    className="review-row"
-                    href={itemHref(item)}
-                    aria-labelledby={domId('review', item.kind, item.id, 'title')}
-                    aria-describedby={[
-                      itemMeta(t, item) && domId('review', item.kind, item.id, 'meta'),
-                      domId('review', item.kind, item.id, 'time'),
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
-                  >
-                    <span className="review-icon">
-                      <Icon icon={section.icon} />
-                    </span>
-                    <span className="review-main">
-                      <strong id={domId('review', item.kind, item.id, 'title')}>{whatHappened(t, item)}</strong>
-                      {itemMeta(t, item) && (
-                        <span className="review-meta" id={domId('review', item.kind, item.id, 'meta')}>
-                          {itemMeta(t, item)}
-                        </span>
-                      )}
-                    </span>
-                    <span className="review-time" id={domId('review', item.kind, item.id, 'time')}>
-                      {item.created_at !== null ? <RelativeTime seconds={item.created_at} /> : t('unavailable')}
-                    </span>
-                    <span className="review-chevron">
-                      <Icon icon={IconChevronRight} size={18} />
-                    </span>
-                  </a>
-                </li>
-              ))}
+              {section.items.map((item) => {
+                const reason = whatHappened(t, item);
+                const meta = itemMeta(t, item, locale);
+                const diagnostics = item.unit_id ? `${t('unitIdentity')}: ${item.unit_id}` : undefined;
+                const original = item.unit && [item.publication_title, item.unit.label].filter(Boolean).join(' ');
+                const title = (item.kind === 'file_to_link' ? meta?.split('/').at(-1) : meta) || reason;
+                const showPath = item.kind === 'file_to_link' && !!meta && meta !== title;
+                const showReason = title !== reason;
+                return (
+                  <li key={`${item.kind}:${item.id}`}>
+                    <a
+                      className="review-row"
+                      href={itemHref(item)}
+                      aria-labelledby={domId('review', item.kind, item.id, 'title')}
+                      aria-describedby={[
+                        showPath && domId('review', item.kind, item.id, 'path'),
+                        showReason && domId('review', item.kind, item.id, 'reason'),
+                        diagnostics && domId('review', item.kind, item.id, 'diagnostics'),
+                        domId('review', item.kind, item.id, 'time'),
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                    >
+                      <span className="review-icon">
+                        <Icon icon={section.icon} />
+                      </span>
+                      <span className="review-main">
+                        <strong id={domId('review', item.kind, item.id, 'title')} title={[meta || title, original, diagnostics].filter(Boolean).join('\n')}>
+                          {title}
+                        </strong>
+                        {showPath && (
+                          <span className="sr-only" id={domId('review', item.kind, item.id, 'path')}>
+                            {meta}
+                          </span>
+                        )}
+                        {diagnostics && (
+                          <span className="sr-only" id={domId('review', item.kind, item.id, 'diagnostics')}>
+                            {diagnostics}
+                          </span>
+                        )}
+                        {showReason && (
+                          <span className="review-meta" id={domId('review', item.kind, item.id, 'reason')}>
+                            {reason}
+                          </span>
+                        )}
+                      </span>
+                      <span className="review-time" id={domId('review', item.kind, item.id, 'time')}>
+                        {item.created_at !== null ? <RelativeTime seconds={item.created_at} /> : t('unavailable')}
+                      </span>
+                      <span className="review-action">
+                        {t('reviewAction')}
+                        <Icon icon={IconChevronRight} size={18} />
+                      </span>
+                    </a>
+                  </li>
+                );
+              })}
             </ul>
           </section>
         ))
@@ -229,10 +261,10 @@ export function Review() {
           title={t('reviewEmptyTitle')}
           action={
             <>
-              <a className="button" href="#/wanted">
+              <a className="button primary" href="#/wanted">
                 {t('reviewSeeMissing')}
               </a>
-              <a className="button" href="#/activity">
+              <a className="button ghost" href="#/activity">
                 {t('reviewSeeActivity')}
               </a>
             </>

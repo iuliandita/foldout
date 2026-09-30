@@ -3,7 +3,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use serde::Serialize;
+use base64::Engine;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use thiserror::Error;
 use uuid::Uuid;
@@ -59,6 +60,101 @@ pub struct AssociatedUnit {
 pub struct InventoryEntryPage {
     pub items: Vec<InventoryEntry>,
     pub next_cursor: Option<String>,
+    pub total: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InventoryFilters {
+    pub q: Option<String>,
+    pub attention: bool,
+}
+
+impl InventoryFilters {
+    fn normalize(mut self) -> Result<Self, LibraryError> {
+        if let Some(q) = self.q {
+            if q.len() > 512 || q.chars().any(char::is_control) {
+                return Err(LibraryError::InvalidInventory("Invalid inventory search"));
+            }
+            self.q = Some(q.trim().to_ascii_lowercase()).filter(|q| !q.is_empty());
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InventoryCursor {
+    owner: String,
+    root_id: String,
+    filters: InventoryFilters,
+    last_id: String,
+}
+
+const ASSOCIATED_COUNT_SQL: &str = "(SELECT COUNT(*) FROM library_files f
+    JOIN file_coverage c ON c.library_file_id = f.id
+    WHERE e.state = 'pending_association'
+      AND f.path = rtrim(r.path, '/') || '/' || e.relative_path
+      AND f.signature = e.signature AND f.size_bytes = e.size_bytes)";
+
+fn inventory_predicates(
+    query: &mut sqlx::QueryBuilder<sqlx::Sqlite>,
+    root_id: &str,
+    entry_id: Option<&str>,
+    filters: &InventoryFilters,
+) {
+    query
+        .push(" FROM scan_entries e JOIN library_roots r ON r.id = e.root_id WHERE e.root_id = ")
+        .push_bind(root_id);
+    if let Some(entry_id) = entry_id {
+        query.push(" AND e.id = ").push_bind(entry_id);
+    }
+    if let Some(q) = &filters.q {
+        query
+            .push(" AND instr(lower(e.relative_path), ")
+            .push_bind(q)
+            .push(") > 0");
+    }
+    if filters.attention {
+        query
+            .push(" AND (e.state != 'pending_association' OR ")
+            .push(ASSOCIATED_COUNT_SQL)
+            .push(" = 0)");
+    }
+}
+
+fn inventory_cursor(
+    owner: &str,
+    root_id: &str,
+    filters: &InventoryFilters,
+    cursor: Option<&str>,
+) -> Result<String, LibraryError> {
+    let invalid = || LibraryError::InvalidInventory("Invalid inventory cursor");
+    let Some(cursor) = cursor else {
+        return Ok(String::new());
+    };
+    if cursor.len() > 8 * 1024 {
+        return Err(invalid());
+    }
+    if Uuid::parse_str(cursor).is_ok() {
+        return if *filters == InventoryFilters::default() {
+            Ok(cursor.into())
+        } else {
+            Err(invalid())
+        };
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| invalid())?;
+    let value: InventoryCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if value.owner != owner
+        || value.root_id != root_id
+        || value.filters.normalize()? != *filters
+        || Uuid::parse_str(&value.last_id).is_err()
+    {
+        return Err(invalid());
+    }
+    Ok(value.last_id)
 }
 
 #[derive(Debug, Error)]
@@ -69,6 +165,8 @@ pub enum LibraryError {
     RootNotFound,
     #[error("library record conflicts with existing data")]
     Conflict,
+    #[error("{0}")]
+    InvalidInventory(&'static str),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     #[error("library inventory I/O failed")]
@@ -135,24 +233,58 @@ impl Library {
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<InventoryEntryPage, LibraryError> {
+        self.inventory_entries_filtered(
+            root_id,
+            "",
+            InventoryFilters::default(),
+            cursor,
+            limit,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn inventory_entries_filtered(
+        &self,
+        root_id: &str,
+        owner: &str,
+        filters: InventoryFilters,
+        cursor: Option<&str>,
+        limit: u32,
+        entry_id: Option<&str>,
+    ) -> Result<InventoryEntryPage, LibraryError> {
         self.root(root_id).await?;
         let limit = limit.clamp(1, 100);
-        let rows = sqlx::query(
-            "SELECT e.id, e.relative_path, e.format, e.size_bytes, e.state, e.reason,
-                (SELECT COUNT(*) FROM library_files f
-                 JOIN file_coverage c ON c.library_file_id = f.id
-                 WHERE e.state = 'pending_association'
-                   AND f.path = rtrim(r.path, '/') || '/' || e.relative_path
-                   AND f.signature = e.signature AND f.size_bytes = e.size_bytes
-                ) AS associated_unit_count
-             FROM scan_entries e JOIN library_roots r ON r.id = e.root_id
-             WHERE e.root_id = ? AND e.id > ? ORDER BY e.id LIMIT ?",
-        )
-        .bind(root_id)
-        .bind(cursor.unwrap_or_default())
-        .bind(i64::from(limit) + 1)
-        .fetch_all(self.store.reader())
-        .await?;
+        let filters = filters.normalize()?;
+        if entry_id.is_some() && (cursor.is_some() || filters != InventoryFilters::default()) {
+            return Err(LibraryError::InvalidInventory(
+                "Entry ID cannot be combined with inventory filters or a cursor",
+            ));
+        }
+        let last_id = inventory_cursor(owner, root_id, &filters, cursor)?;
+        let mut transaction = self.store.reader().begin().await?;
+        let mut count = sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT COUNT(*)");
+        inventory_predicates(&mut count, root_id, entry_id, &filters);
+        let total = count
+            .build_query_scalar::<i64>()
+            .fetch_one(&mut *transaction)
+            .await?;
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT e.id, e.relative_path, e.format, e.size_bytes, e.state, e.reason, ",
+        );
+        query
+            .push(ASSOCIATED_COUNT_SQL)
+            .push(" AS associated_unit_count");
+        inventory_predicates(&mut query, root_id, entry_id, &filters);
+        query.push(" AND e.id > ").push_bind(&last_id);
+        query
+            .push(" ORDER BY e.id LIMIT ")
+            .push_bind(if entry_id.is_some() {
+                1
+            } else {
+                i64::from(limit) + 1
+            });
+        let rows = query.build().fetch_all(&mut *transaction).await?;
         let mut items: Vec<InventoryEntry> = rows
             .into_iter()
             .map(|row| InventoryEntry {
@@ -168,7 +300,21 @@ impl Library {
             .collect();
         let next_cursor = if items.len() > limit as usize {
             items.truncate(limit as usize);
-            items.last().map(|entry| entry.id.clone())
+            items.last().map(|entry| {
+                if filters == InventoryFilters::default() {
+                    entry.id.clone()
+                } else {
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                        serde_json::to_vec(&InventoryCursor {
+                            owner: owner.into(),
+                            root_id: root_id.into(),
+                            filters: filters.clone(),
+                            last_id: entry.id.clone(),
+                        })
+                        .expect("cursor is serializable"),
+                    )
+                }
+            })
         } else {
             None
         };
@@ -203,7 +349,7 @@ impl Library {
             .bind(root_id)
             .bind(serde_json::to_string(&ids).expect("ids are serializable"))
             .bind(ASSOCIATED_UNITS_LIMIT)
-            .fetch_all(self.store.reader())
+            .fetch_all(&mut *transaction)
             .await?;
             for row in rows {
                 let entry_id: String = row.get("entry_id");
@@ -218,7 +364,12 @@ impl Library {
                 }
             }
         }
-        Ok(InventoryEntryPage { items, next_cursor })
+        transaction.commit().await?;
+        Ok(InventoryEntryPage {
+            items,
+            next_cursor,
+            total,
+        })
     }
 
     pub(crate) async fn root(&self, id: &str) -> Result<Root, LibraryError> {

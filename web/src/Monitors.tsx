@@ -27,7 +27,29 @@ import {
 } from './ui';
 import { RelativeTime, usePolled } from './Activity';
 import type { UnitSelection } from './Storage';
+import { editionLabel, unitDisplay } from './format';
 import './styles/wanted.css';
+
+export function releaseSourceSupports(source: Schema['IntegrationChoice'], kind: Schema['Publication']['content_type']) {
+  return source.content_types.includes(kind) &&
+    (source.release_search || source.kind === 'getcomics' || source.kind === 'internetarchive');
+}
+
+export function monitorSources(sources: Schema['IntegrationChoice'][], kind: Schema['Publication']['content_type']) {
+  return sources.filter((source) => source.kind === 'prowlarr' && source.release_search && source.content_types.includes(kind));
+}
+
+export function monitorUnit(context: Schema['UnitContext'], locale: Locale): UnitSelection {
+  const { publication, edition, unit } = context;
+  return {
+    id: unit.id,
+    contentType: publication.content_type,
+    title: publication.title,
+    language: edition.language,
+    label: [publication.title, publication.run_label, unitDisplay(unit, locale).label, editionLabel(edition, locale)]
+      .filter(Boolean).join(', '),
+  };
+}
 
 function formatInterval(seconds: number, locale: Locale) {
   const [amount, unit] =
@@ -46,18 +68,19 @@ const monitorStates: Record<Schema['MonitorView']['last_state'], StatusKind> = {
   source_error: 'error',
 };
 /* Explains that monitors need a Prowlarr source, with a way to add one. */
-function NeedsSource() {
+function NeedsSource({ isAdmin }: { isAdmin: boolean }) {
   const { t } = useI18n();
   return (
     <EmptyState
       title={t('monitorsNeedSourceTitle')}
       action={
-        <a className="button" href="#/settings?section=sources">
+        isAdmin ? <a className="button" href="#/settings?section=sources">
           {t('monitorsOpenSources')}
-        </a>
+        </a> : undefined
       }
     >
       {t('monitorsNeedSourceText')}
+      {!isAdmin && <> {t('monitorsAskAdminSource')}</>}
     </EmptyState>
   );
 }
@@ -67,10 +90,14 @@ export function Monitors({
   unit,
   sources,
   select,
+  isAdmin = false,
+  changed,
 }: {
   unit: UnitSelection;
   sources: Schema['IntegrationChoice'][];
-  select: Selection;
+  select?: Selection;
+  isAdmin?: boolean;
+  changed?: () => void;
 }) {
   const { t } = useI18n();
   const [cursor, setCursor] = useState<string>();
@@ -78,6 +105,10 @@ export function Monitors({
   const list = useResource<Schema['MonitorPage']>(
     `/monitors?limit=20&unit_id=${encodeURIComponent(unit.id)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
   );
+  const reload = () => {
+    list.reload();
+    changed?.();
+  };
   return (
     <section>
       <header className="section-header">
@@ -92,43 +123,17 @@ export function Monitors({
         )}
       </header>
       {creating && (
-        <SaveForm
+        <CreateMonitorForm
           key={unit.id}
-          label={t('createMonitor')}
+          unit={unit}
+          sources={sources}
           cancel={() => setCreating(false)}
-          submit={async (data) => {
-            const input: Schema['CreateMonitor'] = {
-              unit_id: unit.id,
-              integration_id: value(data, 'monitor_source'),
-              query: value(data, 'monitor_query'),
-              interval_seconds: Number(value(data, 'interval')),
-              enabled: value(data, 'monitor_enabled') === 'true',
-              selection_policy: 'review_only',
-            };
-            await post<Schema['MonitorView']>('/monitors', input);
+          saved={() => {
             setCreating(false);
             setCursor(undefined);
-            list.reload();
+            reload();
           }}
-        >
-          <p>
-            <strong>{unit.label}</strong> / {t(unit.contentType)}
-          </p>
-          <label className="field">
-            <span>{t('source')} *</span>
-            <select required name="monitor_source" defaultValue="">
-              <option value="" disabled>
-                {t('chooseSource')}
-              </option>
-              {sources.map((source) => (
-                <option key={source.id} value={source.id}>
-                  {source.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <MonitorFields query={unit.title} interval={3600} enabled={false} />
-        </SaveForm>
+        />
       )}
       {list.loading ? (
         <Loading />
@@ -137,13 +142,13 @@ export function Monitors({
       ) : (
         list.data && (
           <>
-            {list.data.items.length === 0 && !cursor && !sources.length && <NeedsSource />}
+            {list.data.items.length === 0 && !cursor && !sources.length && <NeedsSource isAdmin={isAdmin} />}
             <ul className="monitor-list">
               {list.data.items.map((item) => (
                 <MonitorRow
                   key={`${item.id}:${item.revision}`}
                   item={item}
-                  reload={list.reload}
+                  reload={reload}
                   select={select}
                   canManage
                 />
@@ -166,20 +171,55 @@ export function Monitors({
     </section>
   );
 }
+function CreateMonitorForm({
+  unit,
+  sources,
+  cancel,
+  saved,
+}: {
+  unit: UnitSelection;
+  sources: Schema['IntegrationChoice'][];
+  cancel: () => void;
+  saved: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <SaveForm
+      label={t('createMonitor')}
+      cancel={cancel}
+      submit={async (data) => {
+        const input: Schema['CreateMonitor'] = {
+          unit_id: unit.id,
+          integration_id: value(data, 'monitor_source'),
+          query: value(data, 'monitor_query'),
+          interval_seconds: Number(value(data, 'interval')),
+          enabled: value(data, 'monitor_enabled') === 'true',
+          selection_policy: 'review_only',
+        };
+        await post<Schema['MonitorView']>('/monitors', input);
+        saved();
+      }}
+    >
+      <p><strong>{unit.label}</strong></p>
+      <label className="field">
+        <span>{t('source')} *</span>
+        <select required name="monitor_source" defaultValue="">
+          <option value="" disabled>{t('chooseSource')}</option>
+          {sources.map((source) => <option key={source.id} value={source.id}>{source.label}</option>)}
+        </select>
+      </label>
+      <MonitorFields query={unit.title} interval={3600} enabled={false} />
+    </SaveForm>
+  );
+}
 function PublicationMonitorScope({ id }: { id: string }) {
   const publication = usePolled<Schema['Publication']>(`/publications/${encodeURIComponent(id)}`, false);
   return publication.data ? (
     <>{[publication.data.title, publication.data.run_label].filter(Boolean).join(', ')}</>
   ) : null;
 }
-function UnitMonitorScope({ id }: { id: string }) {
-  const context = usePolled<Schema['UnitContext']>(`/units/${encodeURIComponent(id)}`, false);
-  if (!context.data) return null;
-  const { publication, unit } = context.data;
-  return <>{`${publication.title} ${unit.label}`}</>;
-}
-export function AllMonitors({ query, canManage }: { query: URLSearchParams; canManage: boolean }) {
-  const { t } = useI18n();
+export function AllMonitors({ query, canManage, isAdmin }: { query: URLSearchParams; canManage: boolean; isAdmin: boolean }) {
+  const { t, locale } = useI18n();
   const cursor = query.get('cursor');
   const publicationId = query.get('publication_id')?.trim();
   const unitId = query.get('unit_id')?.trim();
@@ -188,12 +228,19 @@ export function AllMonitors({ query, canManage }: { query: URLSearchParams; canM
   if (unitId) params.set('unit_id', unitId);
   if (cursor) params.set('cursor', cursor);
   const list = usePolled<Schema['MonitorPage']>(`/monitors?${params}`);
+  const context = usePolled<Schema['UnitContext']>(unitId ? `/units/${encodeURIComponent(unitId)}` : null, false);
+  const [creatingFor, setCreatingFor] = useState<string>();
   const empty = list.data?.items.length === 0 && !cursor;
   const choices = usePolled<Schema['IntegrationChoiceList']>(
-    empty && canManage ? '/search/integrations' : null,
+    (empty || unitId) && canManage ? '/search/integrations' : null,
     false,
   );
-  const hasSource = choices.data?.items.some((choice) => choice.kind === 'prowlarr');
+  const availableSources = !choices.error && choices.data
+    ? context.data ? monitorSources(choices.data.items, context.data.publication.content_type)
+      : choices.data.items.filter((choice) => choice.kind === 'prowlarr' && choice.release_search)
+    : [];
+  const canCreate = canManage && !!context.data && availableSources.length > 0;
+  const creating = canCreate && creatingFor === unitId;
   const href = (nextCursor?: string | null) => {
     const target = new URLSearchParams();
     if (publicationId) target.set('publication_id', publicationId);
@@ -208,7 +255,7 @@ export function AllMonitors({ query, canManage }: { query: URLSearchParams; canM
         title={t('monitors')}
         meta={
           unitId ? (
-            <UnitMonitorScope key={unitId} id={unitId} />
+            context.data ? monitorUnit(context.data, locale).label : undefined
           ) : publicationId ? (
             <PublicationMonitorScope key={publicationId} id={publicationId} />
           ) : (
@@ -222,7 +269,12 @@ export function AllMonitors({ query, canManage }: { query: URLSearchParams; canM
                 {t('clearMonitorScope')}
               </a>
             )}
-            {canManage && unitId && (
+            {canCreate && (
+              <Button icon={IconPlus} disabled={creating} onClick={() => setCreatingFor(unitId)}>
+                {t('createMonitor')}
+              </Button>
+            )}
+            {canManage && unitId && context.data && !choices.error && choices.data?.items.some((choice) => releaseSourceSupports(choice, context.data!.publication.content_type)) && (
               <a className="button" href={`#/search?unit=${encodeURIComponent(unitId)}`}>
                 <Icon icon={IconSearch} size={18} />
                 {t('wantedFindReleases')}
@@ -231,24 +283,32 @@ export function AllMonitors({ query, canManage }: { query: URLSearchParams; canM
           </>
         }
       />
+      {unitId && <ErrorNotice error={context.error} retry={context.reload} />}
+      {canManage && <ErrorNotice error={choices.error} retry={choices.reload} />}
+      {creating && context.data && (
+        <CreateMonitorForm
+          key={context.data.unit.id}
+          unit={monitorUnit(context.data, locale)}
+          sources={availableSources}
+          cancel={() => setCreatingFor(undefined)}
+          saved={() => { setCreatingFor(undefined); list.reload(); }}
+        />
+      )}
       {list.loading ? (
         <Loading />
       ) : !list.data ? (
         <ErrorNotice error={list.error} retry={list.reload} />
       ) : empty ? (
-        choices.loading ? (
+        choices.loading || (unitId && context.loading) ? (
           <Loading />
-        ) : canManage && choices.data && !hasSource ? (
-          <NeedsSource />
+        ) : (canManage && choices.error) || (unitId && context.error) ? null
+        : canManage && choices.data && !availableSources.length ? (
+          <NeedsSource isAdmin={isAdmin} />
         ) : (
           <EmptyState
             title={t('monitorsEmptyTitle')}
             action={
-              canManage && unitId ? (
-                <a className="button primary" href={`#/search?unit=${encodeURIComponent(unitId)}`}>
-                  {t('monitorsCreate')}
-                </a>
-              ) : !unitId ? (
+              !unitId ? (
                 <a className="button" href="#/wanted">
                   {t('monitorsOpenWanted')}
                 </a>

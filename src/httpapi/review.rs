@@ -6,7 +6,11 @@ use super::{
     auth::{AuthContext, authorize},
     errors::ApiError,
 };
-use crate::{auth::Scope, store::sqlite::SqliteStore};
+use crate::{
+    auth::Scope,
+    catalog::{DatePrecision, Unit, UnitKind},
+    store::sqlite::SqliteStore,
+};
 use axum::{
     Json, Router,
     extract::State,
@@ -39,7 +43,9 @@ pub struct ReviewItem {
     pub state: String,
     pub reason: Option<String>,
     pub publication_id: Option<String>,
+    pub publication_title: Option<String>,
     pub unit_id: Option<String>,
+    pub unit: Option<Unit>,
     pub acquisition_id: Option<String>,
     pub job_id: Option<String>,
     pub job_kind: Option<String>,
@@ -72,6 +78,7 @@ macro_rules! acquisition_filter {
     JOIN jobs j ON j.id = i.job_id
     JOIN units u ON u.id = a.unit_id
     JOIN editions e ON e.id = u.edition_id
+    JOIN publications p ON p.id = e.publication_id
     WHERE i.caller = ? AND (a.state = 'needs_review' OR j.state IN ('needs_review', 'failed'))"
     };
 }
@@ -80,6 +87,7 @@ macro_rules! direct_filter {
         "FROM direct_acquisitions d
     JOIN units u ON u.id = d.unit_id
     JOIN editions e ON e.id = u.edition_id
+    JOIN publications p ON p.id = e.publication_id
     WHERE d.owner = ? AND d.state = 'needs_review'"
     };
 }
@@ -108,6 +116,7 @@ macro_rules! monitor_filter {
         "FROM monitors m
     JOIN units u ON u.id = m.unit_id
     JOIN editions e ON e.id = u.edition_id
+    JOIN publications p ON p.id = e.publication_id
     WHERE m.owner = ? AND m.deleted_at IS NULL AND m.last_state = 'needs_review'"
     };
 }
@@ -119,6 +128,25 @@ fn item(kind: &'static str, row: &SqliteRow) -> Result<ReviewItem, sqlx::Error> 
             other => other,
         }
     };
+    let unit_id = optional("unit_id")?;
+    let unit = unit_id
+        .as_ref()
+        .map(|id| {
+            Ok::<_, sqlx::Error>(Unit {
+                id: id.clone(),
+                edition_id: row.try_get("edition_id")?,
+                label: row.try_get("unit_label")?,
+                kind: UnitKind::parse(row.try_get("unit_kind")?)
+                    .map_err(|error| sqlx::Error::Decode(error.into()))?,
+                sort_key: optional("unit_sort_key")?,
+                date: optional("unit_date")?,
+                date_precision: optional("unit_date_precision")?
+                    .map(DatePrecision::parse)
+                    .transpose()
+                    .map_err(|error| sqlx::Error::Decode(error.into()))?,
+            })
+        })
+        .transpose()?;
     Ok(ReviewItem {
         kind,
         id: row.try_get("id")?,
@@ -126,7 +154,9 @@ fn item(kind: &'static str, row: &SqliteRow) -> Result<ReviewItem, sqlx::Error> 
         state: row.try_get("state")?,
         reason: optional("reason")?,
         publication_id: optional("publication_id")?,
-        unit_id: optional("unit_id")?,
+        publication_title: optional("publication_title")?,
+        unit_id,
+        unit,
         acquisition_id: optional("acquisition_id")?,
         job_id: optional("job_id")?,
         job_kind: optional("job_kind")?,
@@ -187,7 +217,7 @@ pub async fn review_feed(
         store,
         "acquisition_needs_review",
         queries!(
-            "a.id, a.created_at, a.state, COALESCE(a.reason, j.reason) AS reason, e.publication_id, a.unit_id, a.id AS acquisition_id, j.id AS job_id, j.kind AS job_kind",
+            "a.id, a.created_at, a.state, COALESCE(a.reason, j.reason) AS reason, e.publication_id, p.title AS publication_title, a.unit_id, u.edition_id, u.label AS unit_label, u.kind AS unit_kind, u.sort_key AS unit_sort_key, u.date AS unit_date, u.date_precision AS unit_date_precision, a.id AS acquisition_id, j.id AS job_id, j.kind AS job_kind",
             acquisition_filter,
             "a.created_at DESC, a.id DESC"
         ),
@@ -201,7 +231,7 @@ pub async fn review_feed(
                 store,
                 "direct_acquisition_needs_review",
                 queries!(
-                    "d.id, d.created_at, d.state, d.reason, e.publication_id, d.unit_id, d.id AS acquisition_id",
+                    "d.id, d.created_at, d.state, d.reason, e.publication_id, p.title AS publication_title, d.unit_id, u.edition_id, u.label AS unit_label, u.kind AS unit_kind, u.sort_key AS unit_sort_key, u.date AS unit_date, u.date_precision AS unit_date_precision, d.id AS acquisition_id",
                     direct_filter,
                     "d.created_at DESC, d.id DESC"
                 ),
@@ -247,7 +277,7 @@ pub async fn review_feed(
         store,
         "monitor_needs_review",
         queries!(
-            "m.id, COALESCE(m.last_run_at, m.updated_at) AS created_at, m.last_state AS state, m.reason, e.publication_id, m.unit_id, m.id AS monitor_id",
+            "m.id, COALESCE(m.last_run_at, m.updated_at) AS created_at, m.last_state AS state, m.reason, e.publication_id, p.title AS publication_title, m.unit_id, u.edition_id, u.label AS unit_label, u.kind AS unit_kind, u.sort_key AS unit_sort_key, u.date AS unit_date, u.date_precision AS unit_date_precision, m.id AS monitor_id",
             monitor_filter,
             "COALESCE(m.last_run_at, m.updated_at) DESC, m.id DESC"
         ),

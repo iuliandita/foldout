@@ -251,6 +251,7 @@ function Manager() {
                     name="setupToken"
                     type="password"
                     required
+                    showRequiredMark={false}
                     autoComplete="off"
                     maxLength={43}
                     hint={t('setupTokenHint')}
@@ -260,6 +261,7 @@ function Manager() {
                   label={t('username')}
                   name="username"
                   required
+                  showRequiredMark={false}
                   autoComplete="username"
                   autoFocus
                   maxLength={100}
@@ -269,6 +271,7 @@ function Manager() {
                   name="password"
                   type="password"
                   required
+                  showRequiredMark={false}
                   autoComplete={auth === 'setup' ? 'new-password' : 'current-password'}
                   minLength={auth === 'setup' ? 12 : undefined}
                   maxLength={1024}
@@ -277,11 +280,15 @@ function Manager() {
               </SaveForm>
             </>
           )}
-          <Appearance />
+          <details className="auth-appearance">
+            <summary>{t('appearance')}</summary>
+            <Appearance />
+          </details>
         </div>
       </main>
     );
   const canManage = session?.scope !== 'read';
+  const isAdmin = session?.scope === 'admin';
   if (/^\/reader\/[^/]+$/.test(route.path))
     return (
       <ReaderLoadBoundary key={route.path}>
@@ -313,9 +320,9 @@ function Manager() {
     }
   }
   const brand = (
-    <a className="brand" href="#/">
+    <a className="brand" href="#/" aria-label={t('app')}>
       <BrandMark />
-      {t('app')}
+      <span className="brand-name">{t('app')}</span>
     </a>
   );
   return (
@@ -346,7 +353,6 @@ function Manager() {
       </header>
       <aside className="sidebar">
         {brand}
-        <p className="brand-caption">{t('brandCaption')}</p>
         <PaletteButton />
         <nav aria-label={t('mainNavigation')}>
           {navItems.map((item) => (
@@ -372,7 +378,7 @@ function Manager() {
                 <Icon icon={item.icon} size={22} />
                 {item.id === 'review' && <NavBadge count={reviewTotal} />}
               </span>
-              {t(item.id)}
+              <span className="tab-label">{t(item.id)}</span>
             </a>
           ))}
         <Menu
@@ -384,7 +390,7 @@ function Manager() {
               <span className="tab-icon">
                 <Icon icon={IconDots} size={22} />
               </span>
-              {t('more')}
+              <span className="tab-label">{t('more')}</span>
             </>
           }
           items={[
@@ -404,13 +410,13 @@ function Manager() {
         {!canManage && <p className="notice">{t('readOnly')}</p>}
         <Suspense fallback={<Loading />}>
         {route.path === '/' ? (
-          <Library query={route.query} canManage={canManage} />
+          <Library query={route.query} canManage={canManage} isAdmin={isAdmin} />
         ) : route.path === '/search' && canManage ? (
           <Search query={route.query} userId={session!.user_id} />
         ) : route.path === '/wanted' ? (
-          <Wanted query={route.query} canManage={canManage} />
+          <Wanted query={route.query} canManage={canManage} isAdmin={isAdmin} />
         ) : route.path === '/monitors' ? (
-          <AllMonitors query={route.query} canManage={canManage} />
+          <AllMonitors query={route.query} canManage={canManage} isAdmin={isAdmin} />
         ) : /^\/direct-acquisition\/[^/]+$/.test(route.path) && canManage ? (
           <DirectAcquisitionDetail key={route.path} id={route.path.split('/')[2]} />
         ) : /^\/acquisition\/[^/]+$/.test(route.path) ? (
@@ -426,9 +432,9 @@ function Manager() {
         ) : route.path === '/review' ? (
           <Review />
         ) : route.path === '/settings' ? (
-          <Settings isAdmin={session?.scope === 'admin'} />
+          <Settings isAdmin={isAdmin} />
         ) : route.path === '/new' && canManage ? (
-          <AddPublication query={route.query} />
+          <AddPublication query={route.query} isAdmin={isAdmin} userId={session!.user_id} />
         ) : /^\/publication\/[^/]+$/.test(route.path) ? (
           <PublicationDetail
             key={route.path}

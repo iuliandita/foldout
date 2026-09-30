@@ -5,7 +5,7 @@ import { Icon } from './ui';
 
 const typeIcons = { comic: IconBook, manga: IconBook2, magazine: IconNews } as const;
 
-/** Cover thumbnail at a fixed 5:7 aspect; falls back to a neutral tile shaped by content type (comic trim, manga tankobon with spine, magazine masthead) with the initial and type icon (the visible title sits outside). */
+/** Cover thumbnail at a fixed 5:7 aspect; falls back to a neutral tile with the title or initial and a type icon. */
 export function Cover({
   fileId,
   title,
@@ -16,13 +16,13 @@ export function Cover({
   fileId?: string | null;
   title: string;
   contentType: Schema['PublicationSummary']['content_type'];
-  /** 40 and 120 are fixed sizes; 'fill' takes the container width. */
-  width?: 40 | 120 | 'fill';
+  /** Numeric widths are fixed sizes; 'fill' takes the container width. */
+  width?: 40 | 56 | 120 | 'fill';
   /** Decorative next to a visible title: empty alt. */
   decorative?: boolean;
 }) {
   const [failed, setFailed] = useState<string | null>(null);
-  const size = width === 'fill' ? 'fill' : width === 120 ? 'lg' : 'sm';
+  const size = width === 'fill' ? 'fill' : width === 120 ? 'lg' : width === 56 ? 'md' : 'sm';
   const alt = decorative ? '' : title;
   if (fileId && failed !== fileId)
     return (
@@ -46,7 +46,7 @@ export function Cover({
       aria-label={decorative ? undefined : title}
       aria-hidden={decorative ? true : undefined}
     >
-      <span className="cover-initial">{initial}</span>
+      {size === 'fill' ? <span className="cover-title">{title}</span> : <span className="cover-initial">{initial}</span>}
       <Icon icon={typeIcons[contentType]} size={size === 'fill' ? 24 : size === 'sm' ? 14 : 20} />
     </span>
   );

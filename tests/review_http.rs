@@ -270,7 +270,9 @@ async fn review_feed_keeps_each_source_access_rule() {
         items[3],
         serde_json::json!({"kind": "acquisition_needs_review", "id": "acq-own", "created_at": 3000,
             "state": "needs_review", "reason": "uncertain_submission", "publication_id": "pub",
-            "unit_id": "en-2", "acquisition_id": "acq-own", "job_id": "job-own",
+            "publication_title": "Two editions", "unit_id": "en-2",
+            "unit": {"id":"en-2","edition_id":"ed-en","label":"2","kind":"volume","sort_key":"2","date":null,"date_precision":null},
+            "acquisition_id": "acq-own", "job_id": "job-own",
             "job_kind": "acquisition", "root_id": null, "entry_id": null, "relative_path": null,
             "monitor_id": null})
     );
@@ -278,7 +280,8 @@ async fn review_feed_keeps_each_source_access_rule() {
         items[5],
         serde_json::json!({"kind": "file_to_link", "id": "entry-new", "created_at": 1000,
             "state": "pending_association", "reason": null, "publication_id": null,
-            "unit_id": null, "acquisition_id": null, "job_id": null, "job_kind": null,
+            "publication_title": null, "unit_id": null, "unit": null,
+            "acquisition_id": null, "job_id": null, "job_kind": null,
             "root_id": "root", "entry_id": "entry-new", "relative_path": "new.cbz",
             "monitor_id": null})
     );
@@ -296,4 +299,66 @@ async fn review_feed_keeps_each_source_access_rule() {
     assert!(feed["items"].as_array().unwrap().iter().all(|item| {
         item["kind"] != "file_to_link" && item["kind"] != "direct_acquisition_needs_review"
     }));
+}
+
+#[tokio::test]
+async fn review_catalog_identities_include_unit_kind_and_date_precision() {
+    let fixture = Fixture::new().await;
+    fixture.exec(CATALOG).await;
+    fixture.exec(REVIEW).await;
+    fixture.exec(&[
+        "UPDATE units SET label='May 2026', kind='issue', date='2026-05', date_precision='month' WHERE id='en-2'",
+        "UPDATE units SET label='8', kind='chapter', date='2026', date_precision='year' WHERE id='fr-1'",
+        "UPDATE units SET label='12', kind='volume', date='2026-05-14', date_precision='day' WHERE id='en-3'",
+    ]).await;
+    let feed = fixture.json("/api/v1/review", &fixture.manage).await;
+    for (kind, unit_id, label, unit_kind, date, precision) in [
+        (
+            "acquisition_needs_review",
+            "en-2",
+            "May 2026",
+            "issue",
+            "2026-05",
+            "month",
+        ),
+        (
+            "direct_acquisition_needs_review",
+            "fr-1",
+            "8",
+            "chapter",
+            "2026",
+            "year",
+        ),
+        (
+            "monitor_needs_review",
+            "en-3",
+            "12",
+            "volume",
+            "2026-05-14",
+            "day",
+        ),
+    ] {
+        let item = feed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["kind"] == kind)
+            .unwrap();
+        assert_eq!(item["publication_title"], "Two editions");
+        assert_eq!(item["unit_id"], unit_id);
+        assert_eq!(item["unit"]["id"], unit_id);
+        assert_eq!(item["unit"]["label"], label);
+        assert_eq!(item["unit"]["kind"], unit_kind);
+        assert_eq!(item["unit"]["date"], date);
+        assert_eq!(item["unit"]["date_precision"], precision);
+    }
+    for item in feed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["kind"] == "job_failed" || item["kind"] == "file_to_link")
+    {
+        assert!(item["publication_title"].is_null());
+        assert!(item["unit"].is_null());
+    }
 }

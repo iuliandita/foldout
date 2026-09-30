@@ -22,7 +22,7 @@ import {
   IconRefresh,
 } from '@tabler/icons-react';
 import { ApiError, request, requestImage, type Schema } from './lib/api/client';
-import { useI18n } from './i18n';
+import { preference, savePreference, useI18n } from './i18n';
 import {
   Button,
   ErrorNotice,
@@ -385,6 +385,9 @@ function ReaderDocument({
   const [loadedPage, setLoadedPage] = useState<number>();
   const [pageFailed, setPageFailed] = useState(false);
   const [displayOpen, setDisplayOpen] = useState(false);
+  const coarsePointer = useMediaQuery('(any-pointer: coarse)');
+  const [showTouchGuide, setShowTouchGuide] = useState(() => preference('library.reader-touch-guide', '') !== 'seen');
+  const touchGuide = coarsePointer && showTouchGuide;
   const stage = useRef<HTMLDivElement>(null);
   const gesture = useRef<{ id: number; x: number; y: number; left: number; top: number } | null>(
     null,
@@ -392,7 +395,7 @@ function ReaderDocument({
   const currentPage = useRef(page);
   currentPage.current = page;
   const writer = useProgressWriter(manifest.file_id, manifest.signature, initial, canSave);
-  const chrome = useChrome(displayOpen || pageFailed || !!writer.error);
+  const chrome = useChrome(touchGuide || displayOpen || pageFailed || !!writer.error);
   const turn = useCallback(
     (delta: number) => setPage((value) => Math.max(0, Math.min(total - 1, value + delta))),
     [total],
@@ -563,6 +566,19 @@ function ReaderDocument({
             }}
           />
         </header>
+        {touchGuide && !displayOpen && (
+          <div className="reader-touch-guide">
+            <div>
+              <strong>{t('readerTouchTitle')}</strong>
+              <p>{t('readerTouchCenter')}</p>
+              <p>{t(direction === 'rtl' ? 'readerTouchRtl' : direction === 'vertical' ? 'readerTouchVertical' : 'readerTouchLtr')}</p>
+            </div>
+            <Button onClick={() => {
+              savePreference('library.reader-touch-guide', 'seen');
+              setShowTouchGuide(false);
+            }}>{t('readerTouchDismiss')}</Button>
+          </div>
+        )}
         {canSave && writer.resetRequired && !writer.error && (
           <div className="notice reader-notice">
             <p>{t('resetProgressHint')}</p>
@@ -721,15 +737,18 @@ function DisplayPanel({
               ]}
             />
           </div>
-          <div className="reader-option">
-            <span aria-hidden="true">{t('zoom')}</span>
-            <SegmentedControl<Zoom>
-              label={t('zoom')}
+          <label className="reader-option">
+            <span>{t('zoom')}</span>
+            <select
               value={zoom}
-              onChange={onZoom}
-              options={zooms.map((value) => ({ value, label: `${value}%` }))}
-            />
-          </div>
+              onChange={(event) => {
+                const next = zooms.find((value) => value === event.target.value);
+                if (next) onZoom(next);
+              }}
+            >
+              {zooms.map((value) => <option key={value} value={value}>{value}%</option>)}
+            </select>
+          </label>
           {finePointer && (
             <p className="reader-keys">
               <Icon icon={IconKeyboard} size={18} />
@@ -744,6 +763,12 @@ function DisplayPanel({
                 )}
               </span>
             </p>
+          )}
+          {!finePointer && (
+            <div className="reader-touch-help">
+              <p>{t('readerTouchCenter')}</p>
+              <p>{t(fit === 'width' && Number(zoom) > 100 ? 'readerTouchZoom' : direction === 'rtl' ? 'readerTouchRtl' : direction === 'vertical' ? 'readerTouchVertical' : 'readerTouchLtr')}</p>
+            </div>
           )}
         </div>
       )}

@@ -22,6 +22,9 @@
 .cover.sm {
   width: 40px;
 }
+.cover.md {
+  width: 56px;
+}
 .cover.lg {
   width: 120px;
   border-radius: var(--radius-panel);
@@ -34,7 +37,7 @@
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 .cover.placeholder {
   display: flex;
@@ -56,16 +59,29 @@
 }
 .cover.fill.placeholder {
   gap: var(--space-2);
+  align-items: flex-start;
+  padding: 16px;
   background: color-mix(in oklch, var(--text) 6%, var(--surface));
 }
-.cover.fill .cover-initial {
-  color: var(--muted);
-  font-size: clamp(1.5rem, 28cqi, 3rem);
+.cover.fill .cover-title {
+  align-self: stretch;
+  min-height: 0;
+  margin-block: auto;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 7;
+  line-clamp: 7;
+  color: var(--text);
+  font-size: clamp(1rem, 10cqi, 1.5rem);
+  font-weight: 600;
+  line-height: 1.25;
 }
 .cover.sm .icon {
   display: none;
 }
-/* Placeholder shapes per content type, drawn in tinted neutrals behind the initial. */
+/* Fixed-size placeholder shapes per content type, drawn behind the initial. */
 .cover.placeholder > * {
   position: relative;
 }
@@ -74,9 +90,6 @@
   position: absolute;
   background: color-mix(in oklch, var(--text) 12%, var(--surface));
 }
-.cover.placeholder.comic {
-  aspect-ratio: 2 / 3;
-}
 .cover.placeholder.comic::before {
   top: 7%;
   left: 9%;
@@ -84,17 +97,11 @@
   height: 13%;
   border-radius: 2px;
 }
-.cover.placeholder.manga {
-  aspect-ratio: 7 / 10;
-}
 .cover.placeholder.manga::before {
   top: 0;
   right: 0;
   bottom: 0;
   width: 13%;
-}
-.cover.placeholder.magazine {
-  aspect-ratio: 3 / 4;
 }
 .cover.placeholder.magazine::before {
   top: 0;
@@ -103,8 +110,69 @@
   height: 18%;
   border-bottom: 2px solid color-mix(in oklch, var(--accent) 45%, transparent);
 }
+.cover.fill.placeholder::before,
+.cover.fill.placeholder::after {
+  content: none;
+}
 
 /* Library toolbar */
+.library-start {
+  max-width: 46rem;
+  padding: var(--space-3) 0 var(--space-6);
+}
+.library-start h2 {
+  margin: 0;
+  font-size: var(--text-xl);
+}
+.library-start > p {
+  max-width: 38rem;
+  color: var(--muted);
+  line-height: var(--leading-md);
+}
+.library-start-options {
+  list-style: none;
+  padding: 0;
+  margin: var(--space-5) 0 var(--space-4);
+  border-top: 1px solid var(--line);
+}
+.library-start-options a {
+  display: grid;
+  grid-template-columns: 2.5rem minmax(0, 1fr) 1.25rem;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 5.5rem;
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  text-decoration: none;
+}
+.library-start-options a:hover {
+  background: var(--hover);
+}
+.library-start-options a > .icon:first-child {
+  color: var(--accent);
+}
+.library-start-options a > .icon:last-child {
+  color: var(--muted);
+}
+.library-start-options a span {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.library-start-options a strong {
+  font-size: var(--text-md);
+}
+.library-start-options a span span {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.library-start .library-start-source {
+  margin-top: var(--space-4);
+  font-size: var(--text-sm);
+}
+
 .library-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -140,6 +208,7 @@
     flex-direction: column;
     align-items: stretch;
     gap: var(--space-2);
+    margin-bottom: var(--space-2);
   }
   .library-toolbar .search-field {
     flex: none;
@@ -154,11 +223,12 @@
 
 /* Library rows */
 .library-list {
+  max-width: 56rem;
   border-top: 1px solid var(--line);
 }
 .library-row {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) 20px;
+  grid-template-columns: 56px minmax(0, 1fr) 20px;
   grid-template-areas:
     'cover main chevron'
     'cover status chevron';
@@ -220,15 +290,8 @@
 }
 @media (min-width: 48rem) {
   .library-row {
-    grid-template-columns: 40px minmax(0, 1fr) 17rem 20px;
-    grid-template-areas: 'cover main status chevron';
     padding-block: var(--space-1);
-    gap: var(--space-4);
-  }
-  /* One right-aligned cluster in a fixed-width column so rows line up. */
-  .library-row-status {
-    justify-content: flex-end;
-    text-align: right;
+    column-gap: var(--space-4);
   }
   .library-row-monitoring {
     flex: none;
@@ -238,7 +301,7 @@
 /* Cover grid */
 .library-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(clamp(10rem, 12vw, 14rem), 1fr));
   gap: var(--space-5) var(--space-4);
 }
 .library-tile {
@@ -256,12 +319,11 @@
   background: var(--hover);
   color: var(--text);
 }
-/* Covers and per-type placeholder shapes keep their own proportions but sit on one baseline,
-   so titles line up across a row. 2:3 is the tallest shape used. */
+/* Every cover uses the same ratio, keeping titles aligned across a row. */
 .library-shelf {
   display: flex;
   align-items: flex-end;
-  aspect-ratio: 2 / 3;
+  aspect-ratio: 5 / 7;
   margin-bottom: var(--space-1);
 }
 .library-shelf > .cover {
@@ -286,7 +348,7 @@
 }
 @media (max-width: 47.99rem) {
   .library-grid {
-    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 10rem), 1fr));
     gap: var(--space-4) var(--space-3);
   }
 }
@@ -406,17 +468,14 @@
 .edition-group:empty {
   display: none;
 }
-/* Inline help next to a control: the toggle sits in the row, the opened text wraps onto its own line. */
-.publication-monitoring .help-tip,
-.edition-group .help-tip {
+/* Help opens below the shared control row. */
+.publication-controls > .help-tip {
   display: contents;
 }
-.publication-monitoring .help-tip-toggle,
-.edition-group .help-tip-toggle {
+.publication-controls > .help-tip > .help-tip-toggle {
   margin-left: 0;
 }
-.publication-monitoring .help-tip-body,
-.edition-group .help-tip-body {
+.publication-controls > .help-tip > .help-tip-body {
   flex-basis: 100%;
 }
 .edition-bar .skeleton.line {
@@ -436,6 +495,7 @@
 
 /* Units */
 .units {
+  max-width: 48rem;
   margin-top: var(--space-4);
 }
 .units .section-header {
@@ -533,6 +593,9 @@
     grid-template-areas: 'main status actions';
     min-height: 3.5rem;
     padding-block: var(--space-1);
+  }
+  .unit-actions > :is(button, .button) {
+    min-width: 9.5rem;
   }
 }
 
@@ -774,6 +837,19 @@
 }
 .library-select select {
   width: auto;
+}
+.page-header:has(.library-sort) > .actions {
+  min-width: 0;
+  max-width: 100%;
+}
+.library-sort {
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.library-sort select {
+  flex: 1 1 auto;
+  max-width: 100%;
 }
 
 /* The mobile top bar carries Add on every page; avoid a second Add control here. */

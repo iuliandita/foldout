@@ -354,6 +354,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Lists persisted inventory entries without rescanning. Search and attention filters apply to the complete root inventory before pagination. Total counts all matching entries regardless of cursor, from the same database snapshot as the page. An entry_id filter returns at most one matching entry in the requested root with no next cursor; an unknown entry or an entry in another root returns an empty page. Requires manage scope. */
         get: operations["listInventory"];
         put?: never;
         post?: never;
@@ -1199,6 +1200,8 @@ export interface components {
         InventoryPage: {
             items: components["schemas"]["InventoryEntry"][];
             next_cursor: string | null;
+            /** @description All entries matching the root and filters, independent of cursor, from the page database snapshot. */
+            total: number;
         };
         PreviewInput: {
             entry_id: string;
@@ -2055,6 +2058,10 @@ export interface components {
             /** @description Inventory entry path relative to its library root. */
             relative_path: string | null;
             monitor_id: string | null;
+            /** @description Current catalog publication title for acquisition and monitor items; null for items without catalog identity. */
+            publication_title: string | null;
+            /** @description Current catalog unit identity, including kind and date precision. Diagnostic unit_id remains available separately. */
+            unit: components["schemas"]["Unit"] | null;
         };
         /** @description Total matching records per kind; items hold at most the 100 newest of each. Null means the credential scope cannot read that source (manage scope required). */
         ReviewTotals: {
@@ -3087,7 +3094,14 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                /** @description Unfiltered pages use legacy UUID cursors. Filtered pages use an opaque cursor bound to the caller, root, and normalized filters; mismatches are rejected. */
                 cursor?: string;
+                /** @description Exact inventory entry ID. Cannot be combined with cursor, a nonempty search, or attention=true. Empty or malformed UUIDs are rejected. */
+                entry_id?: string;
+                /** @description Literal substring of the relative filename or path. Trimmed, ASCII case-insensitive, at most 512 UTF-8 bytes; control characters are rejected. Empty search means all paths. Percent, underscore, and backslash are literal characters. */
+                q?: string;
+                /** @description Include unassociated pending entries plus missing, error, and skipped entries. Association is checked against the scanned path, signature, and size; faults remain included even when a catalog file association exists. */
+                attention?: boolean;
             };
             header?: never;
             path: {

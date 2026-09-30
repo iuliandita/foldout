@@ -1,4 +1,29 @@
 /* General settings: label and description on the left, control on the right; stacked on narrow screens. */
+@media (max-width: 47.99rem) {
+  .settings-tabs .tabs [role='tablist'] {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 var(--space-2);
+    overflow: visible;
+  }
+  .settings-tabs .tabs [role='tab'] {
+    justify-content: flex-start;
+    min-width: 0;
+    min-height: var(--control-height);
+    padding: var(--space-2) var(--space-3);
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    text-align: left;
+    white-space: normal;
+  }
+  .settings-tabs .tabs [role='tab'][aria-selected='true'] {
+    border-bottom-color: var(--accent);
+  }
+  .settings-tabs .tab-panel {
+    padding-top: var(--space-4);
+  }
+}
 .setting-list {
   max-width: 40rem;
   margin: 0;
@@ -73,6 +98,23 @@
   font-size: var(--text-sm);
   font-weight: 600;
 }
+.inventory-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+.inventory-filters .search-field {
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+.inventory-filter-hint,
+.inventory-count {
+  margin: var(--space-2) 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
 /* One ellipsis only, in the middle: the folder name at the end never shrinks. */
 .root-path {
   display: flex;
@@ -108,20 +150,54 @@
   display: none;
 }
 
-/* Start options in the empty Sources state: one button and one line each. */
-.source-starts {
-  display: grid;
-  gap: var(--space-4);
-  width: min(100%, 32rem);
-  text-align: start;
+/* Start options in the empty Sources state. */
+.sources-empty {
+  padding-top: var(--space-4);
 }
-.source-starts li {
-  display: grid;
-  justify-items: start;
-  gap: var(--space-1);
-}
-.empty-state .source-starts p {
+.sources-empty h3 {
   margin: 0;
+  font-size: var(--text-md);
+}
+.sources-empty > p {
+  margin: var(--space-1) 0 var(--space-4);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+.source-starts {
+  width: min(100%, 38rem);
+  border-top: 1px solid var(--line);
+}
+.source-starts button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 1.25rem;
+  gap: var(--space-1);
+  justify-content: stretch;
+  width: 100%;
+  min-height: 4.5rem;
+  padding: var(--space-3);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+.source-starts button:hover {
+  background: var(--hover);
+}
+.source-starts button strong {
+  grid-column: 1;
+  font-size: var(--text-sm);
+}
+.source-starts button span {
+  grid-column: 1;
+  color: var(--muted);
   font-size: var(--text-sm);
   line-height: var(--leading-sm);
+  font-weight: 400;
+}
+.source-starts button > .icon {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: var(--muted);
 }

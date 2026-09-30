@@ -1,4 +1,4 @@
-/* Reader: always a near-black tinted canvas, whatever the app theme is. styles.css
+/* Reader: always a near-black canvas, whatever the app theme is. styles.css
    declares its light-dark() tokens on .reader-view too, so with color-scheme: dark
    here they resolve to their dark values. */
 .reader-view {
@@ -6,8 +6,8 @@
   accent-color: var(--accent);
   caret-color: var(--accent);
   scrollbar-color: var(--control) transparent;
-  --reader-canvas: oklch(14.5% 0.006 165);
-  --reader-chrome: oklch(19% 0.008 165);
+  --reader-canvas: #101012;
+  --reader-chrome: #171719;
   position: fixed;
   inset: 0;
   overflow: hidden;
@@ -204,6 +204,33 @@
   line-height: var(--leading-sm);
   font-weight: 600;
   color: var(--muted);
+}
+.reader-option select {
+  width: 100%;
+}
+.reader-touch-guide {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.reader-touch-guide > div {
+  flex: 1 1 18rem;
+}
+.reader-touch-guide p,
+.reader-touch-help p {
+  margin: var(--space-1) 0 0;
+  color: var(--muted);
+}
+.reader-touch-help {
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
 }
 .reader-display-panel .segmented {
   display: flex;

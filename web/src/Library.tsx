@@ -18,7 +18,7 @@ import {
   IconListSearch,
 } from '@tabler/icons-react';
 import { Cover } from './Cover';
-import { editionName, formatUnitDate } from './format';
+import { editionName, unitDisplay } from './format';
 import { FileList, ReadButton, readerHref } from './UnitFiles';
 import { unitStatus } from './status';
 import { ApiError, type Schema, post, request } from './lib/api/client';
@@ -99,7 +99,7 @@ function metaLine(t: Translate, item: Schema['PublicationSummary']) {
   return [t(typeNames[item.content_type]), item.run_label].filter(Boolean).join(', ');
 }
 
-export function Library({ query, canManage }: { query: URLSearchParams; canManage: boolean }) {
+export function Library({ query, canManage, isAdmin }: { query: URLSearchParams; canManage: boolean; isAdmin: boolean }) {
   const { t, locale } = useI18n();
   const kind = contentTypes.find((kind) => kind === query.get('kind'));
   const cursor = query.get('cursor');
@@ -123,8 +123,8 @@ export function Library({ query, canManage }: { query: URLSearchParams; canManag
   const [filtersOpen, setFiltersOpen] = useState(false);
   const listRef = useRef<HTMLUListElement>(null);
   useRowKeys(listRef);
-  /* Content type and view stay visible; availability and sort sit behind the Filters disclosure. */
-  const activeFilters = [availability !== 'all', sort !== 'title'].filter(Boolean).length;
+  /* Content type, view, and sort stay visible; availability sits behind the Filters disclosure. */
+  const activeFilters = availability !== 'all' ? 1 : 0;
   const filtersId = useId();
   useEffect(() => setPrevious([]), [kind, q, sort, availability]);
   /* Defaults stay out of the URL; any change without an explicit cursor starts from the first page. */
@@ -157,16 +157,34 @@ export function Library({ query, canManage }: { query: URLSearchParams; canManag
       <PageHeader
         title={t('library')}
         actions={
-          canManage &&
           !emptyLibrary && (
-            <a className="button primary library-add" href={`#/new${kind ? `?kind=${kind}` : ''}`}>
-              <Icon icon={IconPlus} size={18} />
-              {t('add')}
-            </a>
+            <>
+              <label className="library-select library-sort">
+                <span>{t('librarySort')}</span>
+                <select
+                  value={sort}
+                  onChange={(event) =>
+                    go(libraryHref({ sort: sorts.find((value) => value === event.target.value) ?? 'title' }), false)
+                  }
+                >
+                  {sorts.map((value) => (
+                    <option key={value} value={value}>
+                      {t(sortNames[value])}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {canManage && (
+                <a className="button primary library-add" href={`#/new${kind ? `?kind=${kind}` : ''}`}>
+                  <Icon icon={IconPlus} size={18} />
+                  {t('add')}
+                </a>
+              )}
+            </>
           )
         }
       />
-      <div className="library-toolbar">
+      {!emptyLibrary && <div className="library-toolbar">
         <SearchField
           label={t('searchPublications')}
           value={q}
@@ -233,23 +251,8 @@ export function Library({ query, canManage }: { query: URLSearchParams; canManag
               ))}
             </select>
           </label>
-          <label className="library-select">
-            <span>{t('librarySort')}</span>
-            <select
-              value={sort}
-              onChange={(event) =>
-                go(libraryHref({ sort: sorts.find((value) => value === event.target.value) ?? 'title' }), false)
-              }
-            >
-              {sorts.map((value) => (
-                <option key={value} value={value}>
-                  {t(sortNames[value])}
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
-      </div>
+      </div>}
       {result.loading || staleCursor ? (
         <Loading />
       ) : result.error ? (
@@ -257,7 +260,40 @@ export function Library({ query, canManage }: { query: URLSearchParams; canManag
       ) : (
         result.data && (
           <>
-            {items.length === 0 ? (
+            {emptyLibrary ? (
+              <section className="library-start" aria-labelledby="library-start-title">
+                <h2 id="library-start-title">{t('emptyLibrary')}</h2>
+                {canManage && <p>{t(isAdmin ? 'libraryStartIntro' : 'libraryStartManageIntro')}</p>}
+                {canManage ? (
+                  <>
+                    <ul className="library-start-options">
+                      {([
+                        ...(isAdmin ? [{ href: '#/settings?section=storage', icon: IconFiles, title: 'libraryStartScan', hint: 'libraryStartScanHint' }] as const : []),
+                        { href: '#/new', icon: IconSearch, title: 'libraryStartFind', hint: 'libraryStartFindHint' },
+                        { href: '#/new?manual=1', icon: IconPencil, title: 'libraryStartManual', hint: 'libraryStartManualHint' },
+                      ] as const).map((option) => (
+                        <li key={option.href}>
+                          <a href={option.href}>
+                            <Icon icon={option.icon} size={22} />
+                            <span>
+                              <strong>{t(option.title)}</strong>
+                              <span>{t(option.hint)}</span>
+                            </span>
+                            <Icon icon={IconChevronRight} size={18} />
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="library-start-source">
+                      {isAdmin ? <>
+                        {t('libraryStartSourceHint')}{' '}
+                        <a href="#/settings?section=sources">{t('addSetUpSource')}</a>
+                      </> : t('libraryStartAdminHint')}
+                    </p>
+                  </>
+                ) : <p>{t('libraryStartManagerHint')}</p>}
+              </section>
+            ) : items.length === 0 ? (
               <EmptyState
                 title={t(
                   q
@@ -277,14 +313,7 @@ export function Library({ query, canManage }: { query: URLSearchParams; canManag
                     <a className="button" href={libraryHref({ kind: null, availability: 'all' })}>
                       {t(availability !== 'all' ? 'resetFilters' : 'clearFilters')}
                     </a>
-                  ) : (
-                    canManage && (
-                      <a className="button primary" href="#/new">
-                        <Icon icon={IconPlus} size={18} />
-                        {t('addPublication')}
-                      </a>
-                    )
-                  )
+                  ) : undefined
                 }
               >
                 {!q && !filtered ? t('emptyHint') : undefined}
@@ -335,6 +364,7 @@ export function Library({ query, canManage }: { query: URLSearchParams; canManag
                         fileId={item.cover_file_id}
                         title={item.title}
                         contentType={item.content_type}
+                        width={56}
                       />
                       <span className="library-row-main">
                         <strong className="library-row-title" id={domId('row', item.id, 'title')} title={item.title}>
@@ -697,9 +727,10 @@ function BulkMonitor({
               const locked = running || finished(id);
               const query = queryOf(unit);
               const invalid = showInvalid && !excluded.has(id) && !finished(id) && !queryValid(query);
+              const display = unitDisplay(unit.context.unit, locale);
               const meta = [
                 t(unit.context.unit.kind),
-                formatUnitDate(unit.context.unit, locale),
+                display.date,
                 editions.size > 1 ? editionName(unit.context.edition, locale) : null,
               ]
                 .filter(Boolean)
@@ -719,7 +750,9 @@ function BulkMonitor({
                       }}
                     />
                     <span className="bulk-unit">
-                      <strong>{unit.context.unit.label}</strong>
+                      <strong title={display.label !== unit.context.unit.label ? unit.context.unit.label : undefined}>
+                        {display.label}
+                      </strong>
                       <span className="unit-meta">{meta}</span>
                     </span>
                   </label>
@@ -1079,7 +1112,7 @@ export function PublicationDetail({
     setSelected(editionId);
     setEditingEdition(false);
   }
-  /* With one edition its actions join the publication menu instead of a separate icon-only menu. */
+  /* Management actions share one menu; edition selection stays beside the content. */
   const multiEdition = visibleEditions.length > 1 || !!editions.next;
   const singleEdition = !multiEdition && !editions.error && !(editions.loading && !retainedEdition);
   const publicationItems: MenuItem[] = [
@@ -1095,7 +1128,7 @@ export function PublicationDetail({
             },
           },
         ]),
-    ...(singleEdition ? editionItems : []),
+    ...editionItems,
   ];
   /* A manga view filtered to volumes or chapters that shows no files says where the files are. */
   const hasFilesIn = (kind: 'volume' | 'chapter') =>
@@ -1160,8 +1193,11 @@ export function PublicationDetail({
                 </>
               }
             />
-            <HelpTip>{t('monitoringHelp')}</HelpTip>
           </div>
+          <HelpTip label={t('publicationHelp')}>
+            <p>{t('monitoringHelp')}</p>
+            <p>{t('editionHelp')}</p>
+          </HelpTip>
           {!(singleEdition && visibleEditions.length === 1) && (
             <div className="edition-bar">
               <div className="edition-group">
@@ -1191,19 +1227,6 @@ export function PublicationDetail({
                   </select>
                 </label>
               )}
-              {editionItems.length > 0 && multiEdition && (
-                <Menu
-                  label={t('editionActions')}
-                  items={editionItems}
-                  renderTrigger={
-                    <>
-                      {t('editionActions')}
-                      <Icon icon={IconChevronDown} size={16} />
-                    </>
-                  }
-                />
-              )}
-              {visibleEditions.length > 1 && <HelpTip>{t('editionHelp')}</HelpTip>}
               </div>
               {editions.next && (
                 <Button
@@ -1592,8 +1615,9 @@ function Units({
                 const state = wantedUnit && unitStatus(wantedUnit);
                 const findHref = `#/search?unit=${encodeURIComponent(unit.id)}`;
                 const monitored = (wanted.byUnit.get(unit.id)?.enabled_monitor_count ?? 0) > 0;
+                const display = unitDisplay(unit, locale);
                 const meta = [
-                  formatUnitDate(unit, locale),
+                  display.date,
                   unit.kind === 'special' || unit.kind === 'combined' ? t(unit.kind) : null,
                   monitored ? t('statusMonitored') : null,
                 ]
@@ -1637,7 +1661,7 @@ function Units({
                     tabIndex={-1}
                   >
                     <div className="unit-main">
-                      <strong>{unit.label}</strong>
+                      <strong title={display.label !== unit.label ? unit.label : undefined}>{display.label}</strong>
                       {meta && <span className="unit-meta">{meta}</span>}
                     </div>
                     <div className="unit-status">
