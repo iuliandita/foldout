@@ -1112,7 +1112,7 @@ export function PublicationDetail({
     setSelected(editionId);
     setEditingEdition(false);
   }
-  /* With one edition its actions join the publication menu instead of a separate icon-only menu. */
+  /* Management actions share one menu; edition selection stays beside the content. */
   const multiEdition = visibleEditions.length > 1 || !!editions.next;
   const singleEdition = !multiEdition && !editions.error && !(editions.loading && !retainedEdition);
   const publicationItems: MenuItem[] = [
@@ -1128,7 +1128,7 @@ export function PublicationDetail({
             },
           },
         ]),
-    ...(singleEdition ? editionItems : []),
+    ...editionItems,
   ];
   /* A manga view filtered to volumes or chapters that shows no files says where the files are. */
   const hasFilesIn = (kind: 'volume' | 'chapter') =>
@@ -1193,8 +1193,11 @@ export function PublicationDetail({
                 </>
               }
             />
-            <HelpTip label={t('aboutMonitoring')}>{t('monitoringHelp')}</HelpTip>
           </div>
+          <HelpTip label={t('publicationHelp')}>
+            <p>{t('monitoringHelp')}</p>
+            <p>{t('editionHelp')}</p>
+          </HelpTip>
           {!(singleEdition && visibleEditions.length === 1) && (
             <div className="edition-bar">
               <div className="edition-group">
@@ -1224,19 +1227,6 @@ export function PublicationDetail({
                   </select>
                 </label>
               )}
-              {editionItems.length > 0 && multiEdition && (
-                <Menu
-                  label={t('editionActions')}
-                  items={editionItems}
-                  renderTrigger={
-                    <>
-                      {t('editionActions')}
-                      <Icon icon={IconChevronDown} size={16} />
-                    </>
-                  }
-                />
-              )}
-              {visibleEditions.length > 1 && <HelpTip label={t('aboutEditions')}>{t('editionHelp')}</HelpTip>}
               </div>
               {editions.next && (
                 <Button

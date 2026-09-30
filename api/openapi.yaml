@@ -1277,7 +1277,7 @@
     "/api/v1/library/roots/{id}/entries": {
       "get": {
         "operationId": "listInventory",
-        "description": "Lists persisted inventory entries without rescanning. An entry_id filter returns at most one matching entry in the requested root with no next cursor; an unknown entry or an entry in another root returns an empty page. Requires manage scope.",
+        "description": "Lists persisted inventory entries without rescanning. Search and attention filters apply to the complete root inventory before pagination. Total counts all matching entries regardless of cursor, from the same database snapshot as the page. An entry_id filter returns at most one matching entry in the requested root with no next cursor; an unknown entry or an entry in another root returns an empty page. Requires manage scope.",
         "responses": {
           "200": {
             "description": "Successful operation",
@@ -1323,15 +1323,34 @@
             "in": "query",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Unfiltered pages use legacy UUID cursors. Filtered pages use an opaque cursor bound to the caller, root, and normalized filters; mismatches are rejected."
           },
           {
             "name": "entry_id",
             "in": "query",
-            "description": "Exact inventory entry ID. Cannot be combined with cursor. Empty or malformed UUIDs are rejected.",
+            "description": "Exact inventory entry ID. Cannot be combined with cursor, a nonempty search, or attention=true. Empty or malformed UUIDs are rejected.",
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Literal substring of the relative filename or path. Trimmed, ASCII case-insensitive, at most 512 UTF-8 bytes; control characters are rejected. Empty search means all paths. Percent, underscore, and backslash are literal characters.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "attention",
+            "in": "query",
+            "description": "Include unassociated pending entries plus missing, error, and skipped entries. Association is checked against the scanned path, signature, and size; faults remain included even when a catalog file association exists.",
+            "schema": {
+              "type": "boolean",
+              "default": false
             }
           }
         ]
@@ -6499,11 +6518,17 @@
               "string",
               "null"
             ]
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "All entries matching the root and filters, independent of cursor, from the page database snapshot."
           }
         },
         "required": [
           "items",
-          "next_cursor"
+          "next_cursor",
+          "total"
         ]
       },
       "PreviewInput": {
@@ -9660,6 +9685,24 @@
               "string",
               "null"
             ]
+          },
+          "publication_title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Current catalog publication title for acquisition and monitor items; null for items without catalog identity."
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Unit"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Current catalog unit identity, including kind and date precision. Diagnostic unit_id remains available separately."
           }
         },
         "additionalProperties": false,
@@ -9677,7 +9720,9 @@
           "root_id",
           "entry_id",
           "relative_path",
-          "monitor_id"
+          "monitor_id",
+          "publication_title",
+          "unit"
         ]
       },
       "ReviewTotals": {

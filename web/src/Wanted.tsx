@@ -28,6 +28,7 @@ import {
 } from './ui';
 import { usePolled } from './Activity';
 import { unitStatus } from './status';
+import { Monitors, monitorSources, monitorUnit, releaseSourceSupports } from './Monitors';
 import './styles/wanted.css';
 
 type WantedUnit = Schema['WantedUnit'];
@@ -180,7 +181,7 @@ function PublicationScope({ id, clear }: { id: string; clear: () => void }) {
   );
 }
 
-export function Wanted({ query, canManage }: { query: URLSearchParams; canManage: boolean }) {
+export function Wanted({ query, canManage, isAdmin }: { query: URLSearchParams; canManage: boolean; isAdmin: boolean }) {
   const { t } = useI18n();
   const kind = contentTypes.find((value) => value === query.get('kind')) ?? 'all';
   const publicationId = query.get('publication_id')?.trim() ?? '';
@@ -207,12 +208,9 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
   const result = usePolled<Schema['WantedPage']>(path, false);
   /* Indexer (Prowlarr), direct, and archive sources all serve Find releases; monitors need an indexer. */
   const sources = usePolled<Schema['IntegrationChoiceList']>(canManage ? '/search/integrations' : null, false);
-  const hasIndexer = sources.data?.items.some((item) => item.kind === 'prowlarr' && item.release_search);
-  const noSource =
-    !!sources.data &&
-    !sources.data.items.some(
-      (item) => item.release_search || item.kind === 'getcomics' || item.kind === 'internetarchive',
-    );
+  const sourceItems = !sources.error ? sources.data?.items : undefined;
+  const canSearch = (type: Schema['Publication']['content_type']) =>
+    !!sourceItems?.some((source) => releaseSourceSupports(source, type));
   /* "Load more" appends pages for the current filters; a filter change (new path) starts over. */
   const [more, setMore] = useState<{
     path: string | null;
@@ -231,6 +229,7 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
     path: null,
     ids: new Set(),
   });
+  const [setup, setSetup] = useState<{ path: string | null; targets: WantedUnit[] }>();
   const groupsRef = useRef<HTMLUListElement>(null);
   useRowKeys(groupsRef, ['f']);
   const nextCursor = extra?.pages ? extra.next : (result.data?.next_cursor ?? null);
@@ -300,6 +299,13 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
   }));
   const atDefaults =
     kind === 'all' && !publicationId && !q && availability === 'attention' && monitoring === defaultMonitoring;
+  const catalog = usePolled<Schema['WantedPage']>(
+    atDefaults && result.data?.items.length === 0 && !cursor
+      ? '/wanted?limit=1&monitoring=all&availability=all' : null,
+    false,
+  );
+  const unsupportedTypes = [...new Set(groups.map((group) => group.publication.content_type))]
+    .filter((type) => !canSearch(type));
   /* Monitoring and availability sit behind the Filters disclosure; content type stays visible. */
   const activeFilters = [
     !!monitoring && !!defaultMonitoring && monitoring !== defaultMonitoring,
@@ -321,6 +327,12 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
   const runnable = (item: WantedUnit) => needsFile(item) && item.enabled_monitor_count > 0;
   const runTargets = groups.flatMap((group) => group.items.filter(runnable));
   const selectedTargets = allItems.filter((item) => selected.has(item.context.unit.id) && runnable(item));
+  const setupTargets = allItems.filter((item) => selected.has(item.context.unit.id) && needsFile(item) && !item.enabled_monitor_count);
+  const activeSetup = setup?.path === path ? setup.targets.filter((item) => selected.has(item.context.unit.id)) : [];
+  const hasIndexer = (targets: WantedUnit[]) => sourceItems
+    ? targets.every((item) => monitorSources(sourceItems, item.context.publication.content_type).length > 0)
+    : undefined;
+  const needsIndexer = runTargets.length > 0 && hasIndexer(runTargets) === false;
   const filtersId = domId('wanted', 'filters');
   const filterSummaryId = domId('wanted', 'filters', 'summary');
 
@@ -333,7 +345,7 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
           canManage && result.data && runTargets.length > 0 ? (
             <RunMonitored
               targets={runTargets}
-              hasSource={hasIndexer}
+              hasSource={hasIndexer(runTargets)}
               label={t('wantedRunMonitored')}
               confirm="wantedRunConfirm"
               none="wantedRunNoneShown"
@@ -395,9 +407,17 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
           </FilterGroup>
         </div>
       </div>
-      {canManage && noSource && groups.length > 0 && runTargets.length === 0 && (
+      {canManage && groups.length > 0 && sources.loading && (
+        <p className="wanted-default-note" role="status">{t('wantedSourcesLoading')}</p>
+      )}
+      {canManage && sourceItems && (unsupportedTypes.length > 0 || needsIndexer) && (
         <p className="wanted-default-note wanted-source-note">
-          {t('wantedSetupTitle')} <a href="#/settings?section=sources">{t('openSourceSettings')}</a>
+          {unsupportedTypes.length > 0
+            ? t('wantedSourcesUnavailable').replace('{types}', unsupportedTypes.map((type) => t(typeNames[type])).join(', '))
+            : t('wantedRunNeedsSource')}{' '}
+          {isAdmin ? (
+            <a className="wanted-source-link" href="#/settings?section=sources">{t('openSourceSettings')}</a>
+          ) : t('wantedAskAdminSources')}
         </p>
       )}
       {groups.length > 0 && monitoring === 'all' && !requestedMonitoring && defaultMonitoring === 'all' && (
@@ -418,6 +438,7 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
                 items={items}
                 totals={totals.get(publication.id)}
                 canManage={canManage}
+                canSearch={canSearch(publication.content_type)}
                 selected={selected}
                 setSelected={setSelected}
                 expanded={expanded.has(publication.id)}
@@ -448,11 +469,16 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
                   </span>
                   <RunMonitored
                     targets={selectedTargets}
-                    hasSource={hasIndexer}
+                    hasSource={hasIndexer(selectedTargets)}
                     label={t('wantedRunSelected')}
                     confirm="wantedRunConfirmSelected"
                     none="wantedRunNoneSelected"
                   />
+                  {setupTargets.length > 0 && (
+                    <Button icon={IconBell} onClick={() => setSetup({ path, targets: setupTargets })}>
+                      {t('wantedSetupMonitoring').replace('{count}', String(setupTargets.length))}
+                    </Button>
+                  )}
                   <Button
                     variant="ghost"
                     icon={IconX}
@@ -462,9 +488,43 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
                   </Button>
                 </div>
               )}
+              {activeSetup.length > 0 && (
+                <SelectedMonitoringSetup
+                  key={path}
+                  targets={activeSetup}
+                  sources={sourceItems}
+                  sourcesError={sources.error}
+                  retrySources={sources.reload}
+                  isAdmin={isAdmin}
+                  close={() => setSetup(undefined)}
+                  changed={result.reload}
+                />
+              )}
             </>
           )}
         </>
+      ) : atDefaults && !cursor && catalog.loading ? (
+        <Loading />
+      ) : atDefaults && !cursor && catalog.error ? (
+        <ErrorNotice error={catalog.error} retry={catalog.reload} />
+      ) : atDefaults && !cursor && catalog.data?.items.length === 0 ? (
+        <EmptyState
+          title={t('wantedCatalogEmptyTitle')}
+          action={
+            <>
+              <a className="button" href="#/">{t('wantedOpenLibrary')}</a>
+              {isAdmin && (
+                <>
+                  <a className="button ghost" href="#/settings?section=storage">{t('libraryStartScan')}</a>
+                  <a className="button ghost" href="#/settings?section=sources">{t('openSourceSettings')}</a>
+                </>
+              )}
+            </>
+          }
+        >
+          {t('wantedCatalogEmptyText')}
+          {canManage && <> {t('wantedCatalogSetupText')}</>}
+        </EmptyState>
       ) : atDefaults && monitoring === 'monitored' ? (
         <EmptyState
           title={t('wantedEmptyMonitoredTitle')}
@@ -475,7 +535,7 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
       ) : atDefaults ? (
         <EmptyState
           title={t('wantedEmptyTitle')}
-          action={canManage ? <a className="button" href="#/">{t('wantedOpenLibrary')}</a> : undefined}
+          action={<Button onClick={() => update({ availability: 'all' })}>{t('wantedShowAll')}</Button>}
         >
           {t('wantedEmptyText')}
         </EmptyState>
@@ -488,6 +548,59 @@ export function Wanted({ query, canManage }: { query: URLSearchParams; canManage
         </EmptyState>
       )}
     </>
+  );
+}
+
+function SelectedMonitoringSetup({
+  targets,
+  sources,
+  sourcesError,
+  retrySources,
+  isAdmin,
+  close,
+  changed,
+}: {
+  targets: WantedUnit[];
+  sources: Schema['IntegrationChoice'][] | undefined;
+  sourcesError: unknown;
+  retrySources: () => void;
+  isAdmin: boolean;
+  close: () => void;
+  changed: () => void;
+}) {
+  const { t, locale } = useI18n();
+  const [unitId, setUnitId] = useState(targets[0].context.unit.id);
+  const target = targets.find((item) => item.context.unit.id === unitId) ?? targets[0];
+  const unit = monitorUnit(target.context, locale);
+  return (
+    <section className="wanted-monitor-setup" aria-label={t('wantedSetupMonitoringTitle')}>
+      <header className="section-header">
+        <div>
+          <h2>{t('wantedSetupMonitoringTitle')}</h2>
+          <p className="wanted-meta">{t('wantedSetupMonitoringText').replace('{count}', String(targets.length))}</p>
+        </div>
+        <IconButton icon={IconX} aria-label={t('wantedCloseMonitoringSetup')} onClick={close} />
+      </header>
+      <label className="field">
+        <span>{t('wantedSetupMonitoringUnit')}</span>
+        <select value={unit.id} onChange={(event) => setUnitId(event.target.value)}>
+          {targets.map((item) => (
+            <option key={item.context.unit.id} value={item.context.unit.id}>{monitorUnit(item.context, locale).label}</option>
+          ))}
+        </select>
+      </label>
+      {sourcesError ? (
+        <ErrorNotice error={sourcesError} retry={retrySources} />
+      ) : !sources ? <Loading /> : (
+        <Monitors
+          key={unit.id}
+          unit={unit}
+          sources={monitorSources(sources, unit.contentType)}
+          isAdmin={isAdmin}
+          changed={changed}
+        />
+      )}
+    </section>
   );
 }
 
@@ -549,6 +662,7 @@ function WantedGroup({
   items,
   totals,
   canManage,
+  canSearch,
   selected,
   setSelected,
   expanded,
@@ -558,6 +672,7 @@ function WantedGroup({
   items: WantedUnit[];
   totals: Totals | undefined;
   canManage: boolean;
+  canSearch: boolean;
   selected: ReadonlySet<string>;
   setSelected: (ids: string[], checked: boolean) => void;
   expanded: boolean;
@@ -607,6 +722,8 @@ function WantedGroup({
     .join('. ');
   const first = items.find(needsFile) ?? items[0];
   const findHref = `#/search?unit=${encodeURIComponent(first.context.unit.id)}`;
+  const findUnit = [unitDisplay(first.context.unit, locale).label,
+    editions.size > 1 ? editionLabel(first.context.edition, locale) : undefined].filter(Boolean).join(', ');
   const ids = items.map((item) => item.context.unit.id);
   const selectedCount = ids.filter((id) => selected.has(id)).length;
   return (
@@ -626,20 +743,20 @@ function WantedGroup({
           contentType={publication.content_type}
         />
         <div className="wanted-group-main">
-          <h2 id={titleId}>
-            <a
-              href={`#/publication/${encodeURIComponent(publication.id)}`}
-              aria-describedby={`${metaId} ${summaryId}`}
-              data-row
-              data-row-f={canManage ? findHref : undefined}
-              title={publication.title}
-            >
-              {publication.title}
-            </a>
-          </h2>
-          <p className="wanted-meta" id={metaId}>
-            {[t(typeNames[publication.content_type]), publication.run_label].filter(Boolean).join(', ')}
-          </p>
+          <a
+            className="wanted-publication-link"
+            href={`#/publication/${encodeURIComponent(publication.id)}`}
+            aria-labelledby={titleId}
+            aria-describedby={`${metaId} ${summaryId}`}
+            data-row
+            data-row-f={canManage && canSearch ? findHref : undefined}
+            title={publication.title}
+          >
+            <h2 id={titleId}>{publication.title}</h2>
+            <p className="wanted-meta" id={metaId}>
+              {[t(typeNames[publication.content_type]), publication.run_label].filter(Boolean).join(', ')}
+            </p>
+          </a>
           <p className="wanted-group-summary" id={summaryId}>
             {summary}
           </p>
@@ -656,10 +773,10 @@ function WantedGroup({
           )}
         </div>
         <div className="wanted-group-actions">
-          {canManage && (
+          {canManage && canSearch && (
             <a className="button ghost sm" href={findHref} aria-describedby={titleId}>
               <Icon icon={IconSearch} size={16} />
-              {t('wantedFindReleases')}
+              {t('wantedFindReleasesFor').replace('{unit}', findUnit)}
             </a>
           )}
           <Button
@@ -702,7 +819,7 @@ function WantedGroup({
                   {item.enabled_monitor_count > 0 && <StatusBadge kind="monitored" />}
                 </div>
                 <div className="wanted-unit-actions">
-                  {canManage && (
+                  {canManage && canSearch && (
                     <a className="button ghost sm" href={`#/search?unit=${encodeURIComponent(unit.id)}`}>
                       <Icon icon={IconSearch} size={16} />
                       {t('wantedFindReleases')}
@@ -781,9 +898,7 @@ function RunMonitored({
     loaded && !targets.length ? (
       t(none)
     ) : loaded && !hasSource ? (
-      <>
-        {t('wantedRunNeedsSource')} <a href="#/settings?section=sources">{t('openSourceSettings')}</a>
-      </>
+      t('wantedRunNeedsSource')
     ) : undefined;
   return (
     <div className="wanted-run">

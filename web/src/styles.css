@@ -356,6 +356,10 @@ table {
   border-bottom: 1px solid var(--line);
 }
 @media (max-width: 24rem) {
+  .topbar .brand {
+    min-width: var(--control-height);
+    justify-content: center;
+  }
   .topbar .brand-name {
     display: none;
   }

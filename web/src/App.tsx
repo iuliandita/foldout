@@ -414,9 +414,9 @@ function Manager() {
         ) : route.path === '/search' && canManage ? (
           <Search query={route.query} userId={session!.user_id} />
         ) : route.path === '/wanted' ? (
-          <Wanted query={route.query} canManage={canManage} />
+          <Wanted query={route.query} canManage={canManage} isAdmin={isAdmin} />
         ) : route.path === '/monitors' ? (
-          <AllMonitors query={route.query} canManage={canManage} />
+          <AllMonitors query={route.query} canManage={canManage} isAdmin={isAdmin} />
         ) : /^\/direct-acquisition\/[^/]+$/.test(route.path) && canManage ? (
           <DirectAcquisitionDetail key={route.path} id={route.path.split('/')[2]} />
         ) : /^\/acquisition\/[^/]+$/.test(route.path) ? (
@@ -434,7 +434,7 @@ function Manager() {
         ) : route.path === '/settings' ? (
           <Settings isAdmin={isAdmin} />
         ) : route.path === '/new' && canManage ? (
-          <AddPublication query={route.query} isAdmin={isAdmin} />
+          <AddPublication query={route.query} isAdmin={isAdmin} userId={session!.user_id} />
         ) : /^\/publication\/[^/]+$/.test(route.path) ? (
           <PublicationDetail
             key={route.path}

@@ -205,6 +205,33 @@
   font-weight: 600;
   color: var(--muted);
 }
+.reader-option select {
+  width: 100%;
+}
+.reader-touch-guide {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
+.reader-touch-guide > div {
+  flex: 1 1 18rem;
+}
+.reader-touch-guide p,
+.reader-touch-help p {
+  margin: var(--space-1) 0 0;
+  color: var(--muted);
+}
+.reader-touch-help {
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+}
 .reader-display-panel .segmented {
   display: flex;
   width: 100%;

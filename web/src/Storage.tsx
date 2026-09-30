@@ -354,7 +354,13 @@ function CopyPath({ path }: { path: string }) {
 function Inventory({ root }: { root: Root }) {
   const { t, locale } = useI18n();
   const [cursor, setCursor] = useState<string>();
-  const entriesPath = `/library/roots/${root.id}/entries?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+  const [q, setQuery] = useState('');
+  const [attention, setAttention] = useState(false);
+  const params = new URLSearchParams({ limit: '50' });
+  if (q) params.set('q', q);
+  if (attention) params.set('attention', 'true');
+  if (cursor) params.set('cursor', cursor);
+  const entriesPath = `/library/roots/${encodeURIComponent(root.id)}/entries?${params}`;
   const entries = useResource<Schema['InventoryPage']>(entriesPath);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
@@ -411,10 +417,33 @@ function Inventory({ root }: { root: Root }) {
       )}
       <ErrorNotice error={error} />
       {!entry && (
-        <div className="inventory-list-head">
-          <h4>{t('files')}</h4>
-          <IconButton icon={IconRefresh} aria-label={t('storageRefreshList')} onClick={reload} />
-        </div>
+        <>
+          <div className="inventory-list-head">
+            <h4>{t('files')}</h4>
+            <IconButton icon={IconRefresh} aria-label={t('storageRefreshList')} onClick={reload} />
+          </div>
+          <div className="inventory-filters">
+            <SearchField
+              label={t('storageSearch')}
+              placeholder={t('storageSearch')}
+              value={q}
+              onChange={(query) => {
+                setQuery(query.trim());
+                setCursor(undefined);
+              }}
+            />
+            <SegmentedControl
+              label={t('storageView')}
+              value={attention ? 'attention' : 'all'}
+              options={[{ value: 'all', label: t('all') }, { value: 'attention', label: t('statusAttention') }]}
+              onChange={(view) => {
+                setAttention(view === 'attention');
+                setCursor(undefined);
+              }}
+            />
+          </div>
+          {attention && <p className="inventory-filter-hint muted">{t('storageAttentionHint')}</p>}
+        </>
       )}
       {entry ? (
         <Association
@@ -431,6 +460,11 @@ function Inventory({ root }: { root: Root }) {
       ) : (
         page && (
           <>
+            <p className="inventory-count muted">
+              {t('storageMatchingCount')
+                .replace('{shown}', new Intl.NumberFormat(locale).format(page.items.length))
+                .replace('{count}', new Intl.NumberFormat(locale).format(page.total))}
+            </p>
             {page.items.length ? (
               <ul className="inventory-list">
                 {page.items.map((entry) => (
@@ -473,7 +507,9 @@ function Inventory({ root }: { root: Root }) {
                 ))}
               </ul>
             ) : (
-              <p className="empty-inline">{t('noEntries')}</p>
+              <p className="empty-inline">
+                {t(page.total > 0 ? 'storagePageEmpty' : q || attention ? 'storageNoMatches' : 'noEntries')}
+              </p>
             )}
             <div className="actions">
               {cursor && (

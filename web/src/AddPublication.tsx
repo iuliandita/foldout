@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import {
   IconBook,
   IconBook2,
@@ -12,23 +12,11 @@ import { ApiError, post, request, type Schema } from './lib/api/client';
 import { useI18n, type MessageKey } from './i18n';
 import { Picker } from './Storage';
 import { Button, ErrorNotice, Field, Icon, Loading, PageHeader, useResource } from './ui';
+import { clearDraft, commonLanguages, emptyDetails, readDraft, saveDraft, validId, type AddDraft, type Details, type Kind, type Origin, type Recovery, type Step } from './addDraft';
 import './styles/add.css';
 
-type Kind = Schema['NewPublication']['content_type'];
 type Candidate = Schema['MetadataCandidate'];
 type Choice = Schema['IntegrationChoice'];
-type Step = 1 | 2 | 3 | 4 | 5;
-type Origin = { manual: true } | { manual: false; candidate: Candidate };
-type Details = {
-  title: string;
-  run_label: string;
-  sort_title: string;
-  known_unit_count: string;
-  language: string;
-  region: string;
-  publisher: string;
-};
-
 const kinds: readonly Kind[] = ['comic', 'manga', 'magazine'];
 const kindIcons = { comic: IconBook, manga: IconBook2, magazine: IconNews } as const;
 const providerNames: Record<Candidate['provider'], string> = {
@@ -43,15 +31,6 @@ const editionHints: Record<Kind, MessageKey> = {
   manga: 'addEditionHintManga',
   magazine: 'addEditionHintMagazine',
 };
-const emptyDetails: Details = {
-  title: '',
-  run_label: '',
-  sort_title: '',
-  known_unit_count: '',
-  language: '',
-  region: '',
-  publisher: '',
-};
 
 /* Content type, source and query live in the hash so a reload keeps the search. */
 function syncUrl(params: Record<string, string | undefined>) {
@@ -63,7 +42,7 @@ function syncUrl(params: Record<string, string | undefined>) {
 const isUncertain = (error: unknown) =>
   !(error instanceof ApiError) || error.status === 0 || error.status >= 500 || error.code === 'invalid_response';
 
-export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isAdmin: boolean }) {
+export function AddPublication({ query, isAdmin, userId }: { query: URLSearchParams; isAdmin: boolean; userId: string }) {
   const { t } = useI18n();
   const choices = useResource<Schema['IntegrationChoiceList']>('/search/integrations');
   const [kind, setKind] = useState<Kind | undefined>(() => kinds.find((item) => item === query.get('kind')));
@@ -72,12 +51,30 @@ export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isA
   const [search, setSearch] = useState({ q: query.get('q') ?? '', source: query.get('source') ?? '' });
   const [origin, setOrigin] = useState<Origin | undefined>(kind && manualPath ? { manual: true } : undefined);
   const [details, setDetails] = useState<Details>(emptyDetails);
+  const [recovery, setRecovery] = useState<Recovery>({ editionDone: false });
+  const [autoLink, setAutoLink] = useState(false);
+  const [stored] = useState(() => {
+    try { return { draft: readDraft(userId, sessionStorage), failed: false }; }
+    catch { return { draft: undefined, failed: true }; }
+  });
+  const [pendingDraft, setPendingDraft] = useState(stored.draft);
+  const [invalidDraft, setInvalidDraft] = useState(stored.failed);
+  const [storageFailed, setStorageFailed] = useState(stored.failed);
+  const [discarding, setDiscarding] = useState(false);
+  const snapshot = useRef<AddDraft>({ version: 2, userId, kind, manualPath, step, search, origin, details, recovery });
+  snapshot.current = { version: 2, userId, kind, manualPath, step, search, origin, details, recovery };
   const heading = useRef<HTMLDivElement>(null);
   const moved = useRef(false);
 
   useEffect(() => {
+    if (pendingDraft || invalidDraft) return;
     syncUrl({ kind, source: search.source, q: search.q, manual: manualPath ? '1' : undefined });
-  }, [kind, search, manualPath]);
+  }, [kind, search, manualPath, pendingDraft, invalidDraft]);
+  useEffect(() => {
+    const next = snapshot.current;
+    if (pendingDraft || invalidDraft || next.recovery.complete) return;
+    if (next.kind || next.search.q || next.recovery.attempted || next.recovery.publicationId) persist(next);
+  }, [kind, manualPath, step, search, origin, details, recovery, pendingDraft, invalidDraft]);
   useEffect(() => {
     if (!moved.current) {
       moved.current = true;
@@ -91,6 +88,69 @@ export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isA
     ? items.filter((choice) => choice.metadata_lookup && choice.content_types.includes(kind))
     : [];
   const hasProwlarr = items.some((choice) => choice.kind === 'prowlarr' && choice.release_search);
+  const locked = Boolean(recovery.publicationId || recovery.attempted);
+
+  function persist(next: AddDraft) {
+    snapshot.current = next;
+    try {
+      saveDraft(next, sessionStorage);
+      setStorageFailed(false);
+      return true;
+    } catch {
+      setStorageFailed(true);
+      return false;
+    }
+  }
+  function rememberDetails(next: Details) {
+    persist({ ...snapshot.current, details: next });
+    setDetails(next);
+  }
+  function rememberRecovery(next: Recovery) {
+    const saved = persist({ ...snapshot.current, step: 4, recovery: next });
+    setRecovery(next);
+    return saved;
+  }
+  function linkExisting(publication: Schema['Publication']) {
+    if (snapshot.current.recovery.publicationId || snapshot.current.recovery.attempted) return true;
+    const next: Recovery = { publicationId: publication.id, editionDone: false, existingLink: true, existingTitle: publication.title };
+    const previous = snapshot.current;
+    if (!persist({ ...previous, step: 4, recovery: next })) {
+      snapshot.current = previous;
+      return false;
+    }
+    setRecovery(next);
+    setAutoLink(true);
+    setStep(4);
+    return true;
+  }
+  function discard() {
+    try {
+      clearDraft(userId, sessionStorage);
+      setPendingDraft(undefined);
+      setInvalidDraft(false);
+      setStorageFailed(false);
+      setDiscarding(false);
+      setKind(undefined);
+      setManualPath(false);
+      setOrigin(undefined);
+      setDetails(emptyDetails);
+      setSearch({ q: '', source: '' });
+      setRecovery({ editionDone: false });
+      setAutoLink(false);
+      setStep(1);
+    } catch { setStorageFailed(true); }
+  }
+  function resume(draft: AddDraft) {
+    setAutoLink(false);
+    setKind(draft.kind);
+    setManualPath(draft.manualPath);
+    setSearch(draft.search);
+    setOrigin(draft.origin);
+    setDetails(draft.details);
+    setRecovery(draft.recovery);
+    setStep(draft.step);
+    setPendingDraft(undefined);
+  }
 
   function chooseKind(next: Kind) {
     if (next !== kind) {
@@ -118,7 +178,7 @@ export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isA
       ? t('addManualEntry')
       : `${providerNames[origin.candidate.provider]} #${origin.candidate.external_id}`
     : '';
-  const totalSteps = manualPath ? 4 : 5;
+  const totalSteps = manualPath ? 3 : 4;
   const shownStep = (index: Step) => manualPath && index > 2 ? index - 1 : index;
 
   return (
@@ -129,9 +189,31 @@ export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isA
       </a>
       <PageHeader
         title={t('addPublication')}
-        meta={t('addStepProgress').replace('{n}', String(shownStep(step))).replace('{total}', String(totalSteps))}
+        meta={!pendingDraft && !invalidDraft ? t('addStepProgress').replace('{n}', String(shownStep(step))).replace('{total}', String(totalSteps)) : undefined}
       />
-      <div ref={heading}>
+      {storageFailed && <p className="notice error" role="alert">{t('addDraftStorageFailed')}</p>}
+      {pendingDraft || invalidDraft ? (
+        <section className="add-draft" aria-labelledby="add-draft-title">
+          <h2 id="add-draft-title">{t('addDraftFound')}</h2>
+          {pendingDraft?.details.title && <p><strong>{pendingDraft.details.title}</strong></p>}
+          <p>{t('addDraftBody')}</p>
+          {Boolean(pendingDraft?.recovery.publicationId || pendingDraft?.recovery.attempted) && <p>{t('addDraftDiscardRecovery')}</p>}
+          <div className="actions">
+            {pendingDraft && <Button variant="primary" onClick={() => resume(pendingDraft)}>{t('addDraftResume')}</Button>}
+            <Button onClick={() => {
+              if (invalidDraft || pendingDraft?.recovery.publicationId || pendingDraft?.recovery.attempted) setDiscarding(true);
+              else discard();
+            }}>{t('addDraftDiscard')}</Button>
+          </div>
+          {discarding && <div className="notice">
+            <p>{t('addDraftDiscardRecovery')}</p>
+            <div className="actions">
+              <Button variant="danger" onClick={discard}>{t('addDraftDiscard')}</Button>
+              <Button onClick={() => setDiscarding(false)}>{t('cancel')}</Button>
+            </div>
+          </div>}
+        </section>
+      ) : <div ref={heading}>
         <ol className="add-steps">
           <StepSection
             index={1}
@@ -140,7 +222,7 @@ export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isA
             step={step}
             title={t('addStepType')}
             done={kind ? t(kind) : undefined}
-            change={() => setStep(1)}
+            change={locked ? undefined : () => setStep(1)}
           >
             <KindPicker value={kind} choose={chooseKind} />
           </StepSection>
@@ -152,7 +234,7 @@ export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isA
             step={step}
             title={t('addStepFind')}
             done={originText || undefined}
-            change={() => setStep(2)}
+            change={locked ? undefined : () => setStep(2)}
           >
             {kind &&
               (choices.loading ? (
@@ -182,7 +264,7 @@ export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isA
             step={step}
             title={t('addStepEdition')}
             done={details.title ? [details.title, details.run_label, editionText].filter(Boolean).join(' / ') : undefined}
-            change={() => setStep(3)}
+            change={locked ? undefined : () => setStep(3)}
           >
             {manualPath && (
               <Button variant="ghost" icon={IconSearch} onClick={() => {
@@ -198,6 +280,8 @@ export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isA
                 kind={kind}
                 origin={origin}
                 details={details}
+                remember={rememberDetails}
+                linkExisting={linkExisting}
                 back={() => setStep(manualPath ? 1 : 2)}
                 save={(next) => {
                   setDetails(next);
@@ -207,31 +291,7 @@ export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isA
             )}
           </StepSection>
 
-          <StepSection
-            index={4}
-            number={shownStep(4)}
-            total={totalSteps}
-            step={step}
-            title={t('addStepMonitor')}
-            done={t('addMonitorLater')}
-            change={() => setStep(4)}
-          >
-            <p>{t('addMonitorBody')}</p>
-            {!choices.loading && !hasProwlarr && (
-              <p className="notice info">
-                {t('addMonitorNeedsProwlarr')}{' '}
-                {isAdmin ? <a href="#/settings?section=sources">{t('addSetUpSource')}</a> : t('addAskAdminSource')}
-              </p>
-            )}
-            <div className="actions">
-              <Button variant="primary" onClick={() => setStep(5)}>
-                {t('addContinue')}
-              </Button>
-              <Button onClick={() => setStep(3)}>{t('addBack')}</Button>
-            </div>
-          </StepSection>
-
-          <StepSection index={5} number={shownStep(5)} total={totalSteps} step={step} title={t('addStepSummary')}>
+          <StepSection index={4} number={shownStep(4)} total={totalSteps} step={step} title={t(recovery.existingLink ? 'addLinkExisting' : 'addStepSummary')}>
             {kind && origin && (
               <Summary
                 kind={kind}
@@ -239,12 +299,21 @@ export function AddPublication({ query, isAdmin }: { query: URLSearchParams; isA
                 details={details}
                 originText={originText}
                 editionText={editionText}
-                back={() => setStep(4)}
+                recovery={recovery}
+                autoLink={autoLink}
+                rememberRecovery={rememberRecovery}
+                complete={() => {
+                  try { clearDraft(userId, sessionStorage); return true; }
+                  catch { setStorageFailed(true); return false; }
+                }}
+                back={() => setStep(3)}
+                monitorHint={!choices.loading && !hasProwlarr}
+                isAdmin={isAdmin}
               />
             )}
           </StepSection>
         </ol>
-      </div>
+      </div>}
     </>
   );
 }
@@ -567,19 +636,24 @@ function EditionForm({
   kind,
   origin,
   details,
+  remember,
+  linkExisting,
   back,
   save,
 }: {
   kind: Kind;
   origin: Origin;
   details: Details;
+  remember: (details: Details) => void;
+  linkExisting: (publication: Schema['Publication']) => boolean;
   back: () => void;
   save: (details: Details) => void;
 }) {
   const { t } = useI18n();
   const [linking, setLinking] = useState(false);
   const [linkError, setLinkError] = useState<unknown>();
-  const [linkBusy, setLinkBusy] = useState(false);
+  const edit = (field: keyof Details) => (event: ChangeEvent<HTMLInputElement>) =>
+    remember({ ...details, [field]: event.target.value });
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -598,26 +672,21 @@ function EditionForm({
     <Field
       name="run_label"
       label={kind === 'comic' ? t('runLabel') : t('addStartYear')}
-      defaultValue={details.run_label}
+      value={details.run_label}
+      onChange={edit('run_label')}
       maxLength={1000}
     />
   );
   const languageField = (
-    <Field
-      name="language"
-      label={t('language')}
-      hint={t('languageHint')}
-      defaultValue={details.language}
-      required
-      maxLength={100}
-    />
+    <LanguagePicker value={details.language} change={(language) => remember({ ...details, language })} />
   );
   const regionField = (
     <Field
       name="region"
       label={t('region')}
       hint={t('addRegionHint')}
-      defaultValue={details.region}
+      value={details.region}
+      onChange={edit('region')}
       maxLength={100}
     />
   );
@@ -632,7 +701,7 @@ function EditionForm({
         </p>
       )}
       <form className="editor add-edition" onSubmit={onSubmit}>
-        <Field name="title" label={t('title')} defaultValue={details.title} required maxLength={1000} />
+        <Field name="title" label={t('title')} value={details.title} onChange={edit('title')} required maxLength={1000} />
         {kind === 'comic' && runField}
         {kind === 'magazine' ? (
           <>
@@ -646,15 +715,16 @@ function EditionForm({
           </>
         )}
         {kind === 'manga' && runField}
-        <Field name="publisher" label={t('publisher')} defaultValue={details.publisher} maxLength={1000} />
+        <Field name="publisher" label={t('publisher')} value={details.publisher} onChange={edit('publisher')} maxLength={1000} />
         <details className="add-more" open={Boolean(details.sort_title || details.known_unit_count)}>
           <summary>{t('addMoreDetails')}</summary>
-          <Field name="sort_title" label={t('sortTitle')} defaultValue={details.sort_title} maxLength={1000} />
+          <Field name="sort_title" label={t('sortTitle')} value={details.sort_title} onChange={edit('sort_title')} maxLength={1000} />
           <Field
             name="known_unit_count"
             label={kind === 'manga' ? t('addCountVolumes') : t('addCountIssues')}
             hint={t('addCountHint')}
-            defaultValue={details.known_unit_count}
+            value={details.known_unit_count}
+            onChange={edit('known_unit_count')}
             type="number"
             min="0"
             step="1"
@@ -677,23 +747,9 @@ function EditionForm({
                 path="/publications"
                 label={t('choosePublication')}
                 text={(item) => [item.title, item.run_label, t(item.content_type)].filter(Boolean).join(' / ')}
-                select={async (publication) => {
-                  if (linkBusy) return;
-                  setLinkBusy(true);
+                select={(publication) => {
                   setLinkError(undefined);
-                  try {
-                    const input: Schema['NewProviderLink'] = {
-                      provider: origin.candidate.provider,
-                      external_id: origin.candidate.external_id,
-                      publication_id: publication.id,
-                    };
-                    await post<Schema['ProviderLink']>('/provider-links', input);
-                    location.hash = `/publication/${publication.id}`;
-                  } catch (failure) {
-                    setLinkError(failure);
-                  } finally {
-                    setLinkBusy(false);
-                  }
+                  if (!linkExisting(publication)) setLinkError(new Error(t('addDraftStorageFailed')));
                 }}
               />
               <ErrorNotice error={linkError} />
@@ -713,12 +769,49 @@ function EditionForm({
   );
 }
 
+function LanguagePicker({ value, change }: { value: string; change: (language: string) => void }) {
+  const { t, locale } = useI18n();
+  const [other, setOther] = useState(Boolean(value && !commonLanguages.some((code) => code === value)));
+  const names = new Intl.DisplayNames([locale], { type: 'language' });
+  return (
+    <div className="add-language">
+      <label className="field" htmlFor="add-language-choice">
+        <span>{t('language')} *</span>
+        <select
+          id="add-language-choice"
+          value={other ? 'other' : value}
+          required
+          onChange={(event) => {
+            const next = event.target.value;
+            setOther(next === 'other');
+            change(next === 'other' ? '' : next);
+          }}
+        >
+          <option value="">{t('addLanguageChoose')}</option>
+          {commonLanguages.map((code) => <option key={code} value={code}>{names.of(code)}</option>)}
+          <option value="other">{t('addLanguageOther')}</option>
+        </select>
+      </label>
+      {other ? (
+        <Field name="language" label={t('addLanguageCode')} hint={t('languageHint')} value={value}
+          onChange={(event) => change(event.target.value)} required maxLength={100} />
+      ) : <input type="hidden" name="language" value={value} />}
+    </div>
+  );
+}
+
 function Summary({
   kind,
   origin,
   details,
   originText,
   editionText,
+  recovery,
+  autoLink,
+  rememberRecovery,
+  complete,
+  monitorHint,
+  isAdmin,
   back,
 }: {
   kind: Kind;
@@ -726,16 +819,24 @@ function Summary({
   details: Details;
   originText: string;
   editionText: string;
+  recovery: Recovery;
+  autoLink: boolean;
+  rememberRecovery: (recovery: Recovery) => boolean;
+  complete: () => boolean;
+  monitorHint: boolean;
+  isAdmin: boolean;
   back: () => void;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
-  const [uncertain, setUncertain] = useState(false);
-  const created = useRef<Schema['Publication'] | undefined>(undefined);
-  const editionDone = useRef(false);
-  const [partial, setPartial] = useState<{ id: string; retry: boolean }>();
-  const rows: [string, string][] = [
+  const active = useRef(false);
+  const uncertain = recovery.attempted === 'publication';
+  const partial = recovery.publicationId ? { id: recovery.publicationId, retry: !recovery.attempted && !recovery.complete } : undefined;
+  const rows: [string, string][] = recovery.existingLink ? [
+    [t('title'), recovery.existingTitle ?? ''],
+    [t('addMetadata'), originText],
+  ] : [
     [t('contentType'), t(kind)],
     [t('title'), details.title],
     ...(details.run_label ? ([[kind === 'comic' ? t('runLabel') : t('addStartYear'), details.run_label]] as [string, string][]) : []),
@@ -747,14 +848,40 @@ function Summary({
       : []),
     [t('addStepMonitor'), t('addMonitorLater')],
   ];
+  useEffect(() => {
+    if (autoLink && recovery.existingLink) void create();
+    // Only an explicit picker choice starts a link; restoring a draft never submits it.
+  }, []);
 
   async function create() {
-    if (busy) return;
+    if (active.current || recovery.attempted || recovery.complete) return;
+    active.current = true;
     setBusy(true);
     setError(undefined);
-    let publication = created.current;
+    let progress = { ...recovery };
+    const checkpoint = (next: Recovery) => {
+      progress = next;
+      if (!rememberRecovery(next)) throw new Error(t('addDraftStorageFailed'));
+    };
+    async function attempt(operation: NonNullable<Recovery['attempted']>, work: () => Promise<void>) {
+      const previous = progress;
+      progress = { ...progress, attempted: operation };
+      if (!rememberRecovery(progress)) {
+        progress = previous;
+        rememberRecovery(previous);
+        throw new Error(t('addDraftStorageFailed'));
+      }
+      try { await work(); }
+      catch (failure) {
+        if (!isUncertain(failure)) {
+          progress = { ...progress, attempted: undefined };
+          rememberRecovery(progress);
+        }
+        throw failure;
+      }
+    }
     try {
-      if (!publication) {
+      if (!progress.publicationId && !progress.existingLink) {
         const input: Schema['NewPublication'] = {
           title: details.title,
           content_type: kind,
@@ -762,42 +889,46 @@ function Summary({
           run_label: details.run_label || null,
           known_unit_count: details.known_unit_count ? Number(details.known_unit_count) : null,
         };
-        try {
-          publication = await post<Schema['Publication']>('/publications', input);
-        } catch (failure) {
-          if (isUncertain(failure)) setUncertain(true);
-          throw failure;
-        }
-        created.current = publication;
+        await attempt('publication', async () => {
+          const publication = await post<Schema['Publication']>('/publications', input);
+          if (!publication || !validId(publication.id)) throw new ApiError(200, 'invalid_response', '');
+          checkpoint({ publicationId: publication.id, editionDone: false });
+        });
       }
-      const id = publication.id;
-      try {
-        if (!editionDone.current) {
+      const id = progress.publicationId!;
+      if (!progress.editionDone && !progress.existingLink) {
+        await attempt('edition', async () => {
           const edition: Schema['NewEdition'] = {
             publication_id: id,
             language: details.language,
             region: details.region || null,
             publisher: details.publisher || null,
           };
-          await post<Schema['Edition']>('/editions', edition);
-          editionDone.current = true;
-        }
-        if (!origin.manual) {
+          const saved = await post<Schema['Edition']>('/editions', edition);
+          if (!saved || !validId(saved.id) || saved.publication_id !== id) throw new ApiError(200, 'invalid_response', '');
+          checkpoint({ publicationId: id, editionDone: true });
+        });
+      }
+      if (!origin.manual) {
+        await attempt('link', async () => {
           const link: Schema['NewProviderLink'] = {
             provider: origin.candidate.provider,
             external_id: origin.candidate.external_id,
             publication_id: id,
           };
-          await post<Schema['ProviderLink']>('/provider-links', link);
-        }
-      } catch (failure) {
-        setPartial({ id, retry: !isUncertain(failure) });
-        throw failure;
+          const saved = await post<Schema['ProviderLink']>('/provider-links', link);
+          if (!saved || !validId(saved.id) || saved.publication_id !== id || saved.provider !== link.provider || saved.external_id !== link.external_id)
+            throw new ApiError(200, 'invalid_response', '');
+          checkpoint({ ...progress, publicationId: id, attempted: undefined, complete: true });
+        });
+      } else {
+        checkpoint({ publicationId: id, editionDone: true, complete: true });
       }
-      location.hash = `/publication/${id}`;
+      if (complete()) location.hash = `/publication/${id}`;
     } catch (failure) {
       setError(failure);
     } finally {
+      active.current = false;
       setBusy(false);
     }
   }
@@ -812,7 +943,12 @@ function Summary({
           </div>
         ))}
       </dl>
-      {uncertain ? (
+      {!recovery.existingLink && <p className="muted">{t('addMonitorBody')}</p>}
+      {!recovery.existingLink && monitorHint && <p className="notice info">
+        {t('addMonitorNeedsProwlarr')}{' '}
+        {isAdmin ? <a href="#/settings?section=sources">{t('addSetUpSource')}</a> : t('addAskAdminSource')}
+      </p>}
+      {busy ? <Loading /> : uncertain ? (
         <div className="notice error" role="alert">
           <p>{t('addCreateUncertain')}</p>
           <a className="button" href={`#/?${new URLSearchParams({ q: details.title })}`}>
@@ -821,7 +957,8 @@ function Summary({
         </div>
       ) : partial ? (
         <>
-          <ErrorNotice error={error} context={t('addPartial')} />
+          {!recovery.complete && <p className="notice error" role="alert">{t(recovery.existingLink ? 'addExistingLinkRecovery' : 'addPartial')}</p>}
+          <ErrorNotice error={error} />
           <div className="actions">
             <a className="button" href={`#/publication/${partial.id}`}>
               {t('openPublication')}

@@ -468,17 +468,14 @@
 .edition-group:empty {
   display: none;
 }
-/* Inline help next to a control: the toggle sits in the row, the opened text wraps onto its own line. */
-.publication-monitoring .help-tip,
-.edition-group .help-tip {
+/* Help opens below the shared control row. */
+.publication-controls > .help-tip {
   display: contents;
 }
-.publication-monitoring .help-tip-toggle,
-.edition-group .help-tip-toggle {
+.publication-controls > .help-tip > .help-tip-toggle {
   margin-left: 0;
 }
-.publication-monitoring .help-tip-body,
-.edition-group .help-tip-body {
+.publication-controls > .help-tip > .help-tip-body {
   flex-basis: 100%;
 }
 .edition-bar .skeleton.line {

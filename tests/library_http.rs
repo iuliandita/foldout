@@ -110,6 +110,7 @@ async fn inventory_entry_lookup_is_exact_scoped_and_preserves_association_truth(
     let (status, first) = call(&app, &manage, "GET", &path, json!(null)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(first["items"].as_array().unwrap().len(), 50);
+    assert_eq!(first["total"], 61);
     assert!(
         first["items"]
             .as_array()
@@ -128,6 +129,7 @@ async fn inventory_entry_lookup_is_exact_scoped_and_preserves_association_truth(
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(second["items"].as_array().unwrap().len(), 11);
+    assert_eq!(second["total"], 61);
     assert!(second["next_cursor"].is_null());
     let library = libraryd::library::roots::Library::new(store.clone());
     assert_eq!(
@@ -144,6 +146,7 @@ async fn inventory_entry_lookup_is_exact_scoped_and_preserves_association_truth(
     assert_eq!(status, StatusCode::OK);
     assert_eq!(exact["items"], json!([second["items"][10]]));
     assert!(exact["next_cursor"].is_null());
+    assert_eq!(exact["total"], 1);
     assert_eq!(exact["items"][0]["associated_unit_count"], 6);
     let units = exact["items"][0]["associated_units"].as_array().unwrap();
     assert_eq!(units.len(), 5);
@@ -166,7 +169,7 @@ async fn inventory_entry_lookup_is_exact_scoped_and_preserves_association_truth(
     ] {
         let (status, page) = call(&app, &manage, "GET", &missing_path, json!(null)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(page, json!({"items": [], "next_cursor": null}));
+        assert_eq!(page, json!({"items": [], "next_cursor": null, "total": 0}));
     }
     assert_eq!(
         call(&app, &read, "GET", &exact_path, json!(null)).await.0,
@@ -199,6 +202,11 @@ async fn inventory_entry_lookup_is_exact_scoped_and_preserves_association_truth(
         format!("entry_id={entry_id}&cursor="),
         format!("entry_id={entry_id}&limit=0"),
         format!("entry_id={entry_id}&limit=101"),
+        format!("entry_id={entry_id}&q=61"),
+        format!("entry_id={entry_id}&attention=true"),
+        "attention=invalid".to_string(),
+        "q=%00".to_string(),
+        format!("q={}", "x".repeat(513)),
         "cursor=invalid".to_string(),
     ] {
         assert_eq!(
@@ -216,10 +224,158 @@ async fn inventory_entry_lookup_is_exact_scoped_and_preserves_association_truth(
         );
     }
 
+    let (status, searched) = call(
+        &app,
+        &manage,
+        "GET",
+        &format!("{path}?q=61.CBZ"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(searched, exact);
+    let (_, linked_attention) = call(
+        &app,
+        &manage,
+        "GET",
+        &format!("{path}?q=61&attention=true"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(
+        linked_attention,
+        json!({"items": [], "next_cursor": null, "total": 0})
+    );
+    let (_, attention) = call(
+        &app,
+        &manage,
+        "GET",
+        &format!("{path}?attention=true"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(attention["total"], 60);
+    assert_eq!(attention["items"].as_array().unwrap().len(), 50);
+    assert!(
+        attention["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["id"] != entry_id)
+    );
+    let (_, filtered_first) = call(
+        &app,
+        &manage,
+        "GET",
+        &format!("{path}?q=.cbz&limit=50"),
+        json!(null),
+    )
+    .await;
+    let filtered_cursor = filtered_first["next_cursor"].as_str().unwrap();
+    assert!(uuid::Uuid::parse_str(filtered_cursor).is_err());
+    let (status, filtered_second) = call(
+        &app,
+        &manage,
+        "GET",
+        &format!("{path}?q=%20.CBZ%20&cursor={filtered_cursor}"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(filtered_second, second);
+    let (_, exhausted) = call(
+        &app,
+        &manage,
+        "GET",
+        &format!("{path}?cursor={entry_id}"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(
+        exhausted,
+        json!({"items": [], "next_cursor": null, "total": 61})
+    );
+    for invalid_path in [
+        format!("{path}?q=.cbz&cursor={cursor}"),
+        format!("{path}?q=61&cursor={filtered_cursor}"),
+        format!("{path}?q=.cbz&attention=true&cursor={filtered_cursor}"),
+        format!("/api/v1/library/roots/{other_root_id}/entries?q=.cbz&cursor={filtered_cursor}"),
+        format!("{path}?cursor={filtered_cursor}"),
+    ] {
+        assert_eq!(
+            call(&app, &manage, "GET", &invalid_path, json!(null))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST,
+            "{invalid_path}"
+        );
+    }
+    use base64::Engine;
+    let encoding = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let mut other_owner: Value =
+        serde_json::from_slice(&encoding.decode(filtered_cursor).unwrap()).unwrap();
+    other_owner["owner"] = json!("another-user");
+    let other_cursor = encoding.encode(serde_json::to_vec(&other_owner).unwrap());
+    assert_eq!(
+        call(
+            &app,
+            &manage,
+            "GET",
+            &format!("{path}?q=.cbz&cursor={other_cursor}"),
+            json!(null)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let literal_path = "nested/50%_\\issue.CBZ";
+    let mut tx = store.begin_write().await.unwrap();
+    sqlx::query("UPDATE scan_entries SET relative_path = ? WHERE id = ?")
+        .bind(literal_path)
+        .bind(&entry_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE library_files SET path = ? WHERE id = 'file'")
+        .bind(source.join(literal_path).to_str().unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    for query in ["q=50%25_%5C", "q=NESTED%2F", "q=%5Cissue"] {
+        let (status, literal) = call(
+            &app,
+            &manage,
+            "GET",
+            &format!("{path}?{query}"),
+            json!(null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(literal["total"], 1);
+        assert_eq!(literal["items"][0]["id"], entry_id);
+        assert_eq!(literal["items"][0]["associated_unit_count"], 6);
+    }
+    let (_, no_match) = call(
+        &app,
+        &manage,
+        "GET",
+        &format!("{path}?q=not-found"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(
+        no_match,
+        json!({"items": [], "next_cursor": null, "total": 0})
+    );
+
     for (signature, size, state) in [
         ("changed", 1, "pending_association"),
         ("current", 2, "pending_association"),
         ("current", 1, "missing"),
+        ("current", 1, "error"),
+        ("current", 1, "skipped"),
     ] {
         let mut tx = store.begin_write().await.unwrap();
         sqlx::query(
@@ -237,6 +393,17 @@ async fn inventory_entry_lookup_is_exact_scoped_and_preserves_association_truth(
         assert_eq!(status, StatusCode::OK);
         assert_eq!(changed["items"][0]["associated_unit_count"], 0);
         assert_eq!(changed["items"][0]["associated_units"], json!([]));
+        let (status, attention) = call(
+            &app,
+            &manage,
+            "GET",
+            &format!("{path}?q=nested&attention=true"),
+            json!(null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(attention["total"], 1);
+        assert_eq!(attention["items"][0], changed["items"][0]);
     }
     assert!(!source.exists());
     let scans: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_runs")

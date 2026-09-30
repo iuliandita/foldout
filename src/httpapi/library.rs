@@ -9,7 +9,7 @@ use crate::{
     jobs::Jobs,
     library::{
         LibraryFile, LibraryFormat,
-        roots::{InventoryEntryPage, Library, LibraryError, Root},
+        roots::{InventoryEntryPage, InventoryFilters, Library, LibraryError, Root},
     },
     store::sqlite::SqliteStore,
 };
@@ -54,6 +54,7 @@ impl From<LibraryError> for ApiError {
                 "root_conflict",
                 "Library root already exists",
             ),
+            LibraryError::InvalidInventory(message) => Self::invalid(message),
             LibraryError::Io(_) => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "source_unavailable",
@@ -142,6 +143,8 @@ struct EntryQuery {
     limit: Option<u32>,
     cursor: Option<String>,
     entry_id: Option<String>,
+    q: Option<String>,
+    attention: Option<bool>,
 }
 async fn entries(
     State(ctx): State<LibraryContext>,
@@ -149,18 +152,11 @@ async fn entries(
     Path(id): Path<String>,
     ApiQuery(query): ApiQuery<EntryQuery>,
 ) -> Result<Json<InventoryEntryPage>, ApiError> {
-    authorize(&ctx.auth, &headers, &Method::GET, Scope::Manage).await?;
+    let principal = authorize(&ctx.auth, &headers, &Method::GET, Scope::Manage).await?;
     ctx.library.root(&id).await?;
     let limit = query.limit.unwrap_or(50);
     if !(1..=100).contains(&limit) {
         return Err(ApiError::invalid("Limit must be 1 to 100"));
-    }
-    if query
-        .cursor
-        .as_ref()
-        .is_some_and(|cursor| uuid::Uuid::parse_str(cursor).is_err())
-    {
-        return Err(ApiError::invalid("Invalid inventory cursor"));
     }
     let entry_id = query
         .entry_id
@@ -176,7 +172,17 @@ async fn entries(
     }
     Ok(Json(
         ctx.library
-            .inventory_entries_filtered(&id, query.cursor.as_deref(), limit, entry_id.as_deref())
+            .inventory_entries_filtered(
+                &id,
+                &principal.user_id,
+                InventoryFilters {
+                    q: query.q,
+                    attention: query.attention.unwrap_or(false),
+                },
+                query.cursor.as_deref(),
+                limit,
+                entry_id.as_deref(),
+            )
             .await?,
     ))
 }
