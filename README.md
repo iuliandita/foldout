@@ -46,4 +46,4 @@ For API development, `cargo run --locked` works without frontend assets; `/` ret
 
 SIGINT and SIGTERM initiate bounded HTTP draining and database closure. A newer database schema is rejected before migrations. `libraryd backup DESTINATION` snapshots the database and encryption key; `libraryd restore BACKUP FRESH_STATE` restores into a new directory. See [operations](docs/operations.md) for recovery and container instructions. There is no released upgrade history yet; use disposable state for development.
 
-See [format validation](docs/formats.md) and [integration status](docs/integrations.md) for current evidence and remaining work.
+See [format validation](docs/formats.md) and [integration status](docs/integrations.md) for current evidence and remaining work. See [documentation maintenance](docs/MAINTENANCE.md) for the source map and change-review obligations.
