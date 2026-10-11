@@ -55,6 +55,8 @@ cosign verify ghcr.io/iuliandita/foldout:nightly \
 
 There are no tagged releases yet.
 
+The state volume must stay on local storage.
+
 ## Initial administrator
 
 Fresh instances require a setup token before an administrator
