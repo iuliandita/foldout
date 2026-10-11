@@ -1,6 +1,43 @@
-use std::{env, fs, path::Path};
+use std::{env, fs, path::Path, process::Command};
+
+fn build_commit() -> String {
+    println!("cargo:rerun-if-env-changed=FOLDOUT_BUILD_COMMIT");
+    let commit = env::var("FOLDOUT_BUILD_COMMIT").ok().unwrap_or_else(|| {
+        // Resolve Git paths rather than assuming .git is a directory (worktrees).
+        for name in ["HEAD", "refs", "packed-refs"] {
+            if let Ok(output) = Command::new("git")
+                .args(["rev-parse", "--git-path", name])
+                .output()
+                && output.status.success()
+            {
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                );
+            }
+        }
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .unwrap_or_default()
+    });
+    let commit = commit.trim();
+    if (7..=40).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        commit[..7].to_ascii_lowercase()
+    } else {
+        "unknown".into()
+    }
+}
 
 fn main() {
+    let commit = build_commit();
+    println!(
+        "cargo:rustc-env=FOLDOUT_BUILD_VERSION={} ({commit})",
+        env::var("CARGO_PKG_VERSION").unwrap()
+    );
     println!("cargo:rerun-if-changed=web/dist");
     println!("cargo:rerun-if-changed=migrations");
     let enabled = env::var_os("CARGO_FEATURE_EMBEDDED_UI").is_some();

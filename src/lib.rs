@@ -1,3 +1,6 @@
+/// Package version and the short source commit captured at compile time.
+pub const BUILD_VERSION: &str = env!("FOLDOUT_BUILD_VERSION");
+
 pub mod acquisition;
 pub mod app;
 pub mod auth;

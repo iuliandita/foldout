@@ -32,7 +32,7 @@ pub async fn dispatch(args: Vec<OsString>) -> Result<bool, Box<dyn std::error::E
     match parse(&args)? {
         Command::Serve => return Ok(true),
         Command::Help => println!("{HELP}"),
-        Command::Version => println!("libraryd {}", env!("CARGO_PKG_VERSION")),
+        Command::Version => println!("libraryd {}", crate::BUILD_VERSION),
         Command::Backup(destination) => {
             let config = Config::from_env()?;
             if !config.state_dir.join("library.sqlite3").is_file() {

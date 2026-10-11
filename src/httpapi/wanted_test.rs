@@ -350,7 +350,7 @@ async fn about_requires_read_access_and_reports_only_name_and_version() {
     )
     .await;
     let key = json(response).await["secret"].as_str().unwrap().to_owned();
-    let expected = json!({"name":"Foldout","version":env!("CARGO_PKG_VERSION")});
+    let expected = json!({"name":"Foldout","version":crate::BUILD_VERSION});
     for credential in [&session, &key] {
         let response = request(&app, "GET", "/api/v1/about", Some(credential), json!(null)).await;
         assert_eq!(response.status(), StatusCode::OK);

@@ -17,6 +17,8 @@ FROM rust:1.98.1-alpine3.23@sha256:94a43bda4fd9b71fa3a74621c0982a646f83c7d1a3ba5
 ARG TARGETARCH
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ARG FOLDOUT_BUILD_COMMIT=unknown
+ENV FOLDOUT_BUILD_COMMIT=${FOLDOUT_BUILD_COMMIT}
 RUN apk add --no-cache musl-dev pkgconf
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./

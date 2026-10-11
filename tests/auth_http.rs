@@ -57,6 +57,20 @@ async fn setup_cookie_requires_origin_for_writes_and_logout_invalidates_it() {
     let cookie = cookie.split(';').next().unwrap();
     let response = request(
         &app,
+        "GET",
+        "/api/v1/about",
+        Some(cookie),
+        None,
+        json!(null),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let about: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(about["version"], libraryd::BUILD_VERSION);
+    let response = request(
+        &app,
         "POST",
         "/api/v1/auth/keys",
         Some(cookie),

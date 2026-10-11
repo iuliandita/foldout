@@ -215,7 +215,7 @@ async fn about(
     authorize(&context, &headers, &Method::GET, Scope::Read).await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(serde_json::json!({"name": "Foldout", "version": env!("CARGO_PKG_VERSION")})),
+        Json(serde_json::json!({"name": "Foldout", "version": crate::BUILD_VERSION})),
     )
         .into_response())
 }
