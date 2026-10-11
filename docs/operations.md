@@ -42,6 +42,8 @@ their versions are not locked. Rebuild regularly for security updates.
 shutdown and keeps bounded logs. Do not use `docker compose down --volumes` on
 state you need to retain.
 
+`GET /health/live` only checks HTTP liveness and exposes no library or credential data.
+
 A development image for amd64 and arm64 is published from every `develop` push as
 `ghcr.io/iuliandita/foldout:nightly` (and `:nightly-<short sha>`). It is a moving,
 unreleased channel: expect breaking changes and keep a verified backup. The image
