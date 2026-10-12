@@ -1,6 +1,18 @@
 use std::{env, fs, path::Path};
 
 fn main() {
+    // Source exports and Docker builds need an explicit build revision.
+    println!("cargo:rerun-if-env-changed=LIBRARY_BUILD_COMMIT");
+    let revision = env::var("LIBRARY_BUILD_COMMIT").unwrap_or_default();
+    let revision = revision.trim();
+    let commit = if (7..=40).contains(&revision.len())
+        && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        revision[..7].to_ascii_lowercase()
+    } else {
+        "unknown".to_owned()
+    };
+    println!("cargo:rustc-env=LIBRARY_BUILD_COMMIT={commit}");
     println!("cargo:rerun-if-changed=web/dist");
     println!("cargo:rerun-if-changed=migrations");
     let enabled = env::var_os("CARGO_FEATURE_EMBEDDED_UI").is_some();

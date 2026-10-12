@@ -1,3 +1,11 @@
+/// Package version and immutable build revision, shared by the CLI and About API.
+pub const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("LIBRARY_BUILD_COMMIT"),
+    ")"
+);
+
 pub mod acquisition;
 pub mod app;
 pub mod auth;

@@ -25,8 +25,9 @@ COPY build.rs ./
 COPY migrations ./migrations
 COPY --exclude=**/.verify --exclude=**/target src ./src
 COPY --from=frontend /build/web/dist ./web/dist
+ARG LIBRARY_BUILD_COMMIT=unknown
 RUN --mount=type=cache,id=libraryd-rust-${TARGETARCH},target=/build/target,sharing=locked \
-    cargo build --locked --offline --release --features embedded-ui \
+    LIBRARY_BUILD_COMMIT=${LIBRARY_BUILD_COMMIT} cargo build --locked --offline --release --features embedded-ui \
     && cp /build/target/release/libraryd /build/libraryd
 
 FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS archive
