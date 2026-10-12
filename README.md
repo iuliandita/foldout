@@ -14,6 +14,8 @@ bun install --cwd tools --frozen-lockfile
 cargo run --locked --features embedded-ui
 ```
 
+For an identifiable build, set `LIBRARY_BUILD_COMMIT` to the source commit when invoking Cargo, or pass `--build-arg LIBRARY_BUILD_COMMIT=COMMIT` to Docker. `libraryd --version` and `/api/v1/about` report the package version followed by the first seven commit digits in parentheses. Missing or invalid build metadata reports `unknown`; no Git checkout is required, and runtime environment variables do not change the embedded revision.
+
 Open http://127.0.0.1:8787. The default state directory is `./state`. Keep SQLite state on local storage.
 
 | Environment variable | Default | Purpose |

@@ -1,6 +1,50 @@
 use std::{path::Path, process::Command};
 
 #[test]
+fn build_revision_is_short_and_safe_without_a_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let binary = temp.path().join("revision-check");
+    let compilation = Command::new("rustc")
+        .args(["--edition=2024"])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"))
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(compilation.status.success());
+    for (revision, expected) in [
+        (None, "unknown"),
+        (Some(""), "unknown"),
+        (Some("unknown"), "unknown"),
+        (Some("abcdef"), "unknown"),
+        (Some("abcdefg"), "unknown"),
+        (Some("abcdef0\ncargo:rustc-env=INJECTED=yes"), "unknown"),
+        (Some("6929bbc16a15839fd1ed154aa67dd7801f8d0508"), "6929bbc"),
+        (Some(" ABCDEF0 "), "abcdef0"),
+    ] {
+        let mut command = Command::new(&binary);
+        command
+            .current_dir(temp.path())
+            .env("PROFILE", "debug")
+            .env_remove("CARGO_FEATURE_EMBEDDED_UI")
+            .env_remove("LIBRARY_BUILD_COMMIT");
+        if let Some(revision) = revision {
+            command.env("LIBRARY_BUILD_COMMIT", revision);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            stdout
+                .lines()
+                .any(|line| { line == format!("cargo:rustc-env=LIBRARY_BUILD_COMMIT={expected}") })
+        );
+        assert!(stdout.contains("cargo:rerun-if-env-changed=LIBRARY_BUILD_COMMIT"));
+        assert!(!stdout.contains("INJECTED"));
+    }
+}
+
+#[test]
 fn embedded_build_rejects_missing_assets_and_emits_url_paths() {
     let temp = tempfile::tempdir().unwrap();
     let binary = temp

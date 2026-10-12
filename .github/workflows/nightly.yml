@@ -55,7 +55,9 @@ jobs:
         with:
           context: .
           platforms: linux/${{ matrix.arch }}
-          build-args: CARGO_BUILD_JOBS=4
+          build-args: |
+            CARGO_BUILD_JOBS=4
+            LIBRARY_BUILD_COMMIT=${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
