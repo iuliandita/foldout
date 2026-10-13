@@ -37,6 +37,21 @@ are retained under `/usr/share/licenses/7zip/`. Runtime
 package updates come from the pinned Alpine release's repositories at build time;
 their versions are not locked. Rebuild regularly for security updates.
 
+Alpine remains the default image. For hosts where musl causes compatibility
+problems, build the glibc-based Debian variant locally with a distinct tag:
+
+```sh
+docker build --target debian -t libraryd:0.1.0-debian .
+```
+
+The `debian` target pins the Rust 1.98.1 trixie builder and Debian trixie-slim
+runtime by registry manifest digest. It shares the frontend assets and static
+7-Zip executable with Alpine. Debian packages supply `poppler-utils` and
+`util-linux` for the PDF tools and `prlimit`, plus `wget` for the health check.
+Package versions are not locked; rebuild regularly for security updates. Both
+variants use the same UID/GID, state permissions, entrypoint, and readiness check.
+The Debian variant is not currently published by the nightly workflow.
+
 `GET /health/ready` is the container health check. Inspect startup with
 `docker compose logs --tail=100 library`. Compose allows 30 seconds for graceful
 shutdown and keeps bounded logs. Do not use `docker compose down --volumes` on
