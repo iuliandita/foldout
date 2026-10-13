@@ -17,6 +17,123 @@ fn write(root: &Path, name: &str, contents: &[u8]) {
     fs::write(root.join(name), contents).unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn interrupted_scan_restart_reuses_committed_hashes_and_finishes_inventory() {
+    use std::{collections::BTreeMap, sync::Arc};
+
+    use super::scan::ScanCommitGate;
+
+    let (_state, mut library) = library().await;
+    let root = tempdir().unwrap();
+    let fixtures: Vec<String> = (0..65).map(|index| format!("{index:02}.cbz")).collect();
+    for name in &fixtures {
+        write(root.path(), name, name.as_bytes());
+    }
+    std::os::unix::fs::symlink("00.cbz", root.path().join("link.cbz")).unwrap();
+    let registered = library.register_root("restart", root.path()).await.unwrap();
+    let gate = Arc::new(ScanCommitGate {
+        committed: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let (observer, mut first_hashes) = tokio::sync::mpsc::unbounded_channel();
+    library.hash_observer = Some(observer);
+    library.scan_commit_gate = Some(gate.clone());
+    let scan = tokio::spawn({
+        let library = library.clone();
+        let root_id = registered.id.clone();
+        async move { library.scan(&root_id).await }
+    });
+    gate.committed.notified().await;
+    let committed: BTreeMap<String, String> = sqlx::query_as::<_, (String, String)>(
+        "SELECT relative_path, signature FROM scan_entries WHERE root_id = ? AND state = 'pending_association'",
+    )
+    .bind(&registered.id)
+    .fetch_all(library.store.reader())
+    .await
+    .unwrap()
+    .into_iter()
+    .collect();
+    assert!(!committed.is_empty());
+    assert!(committed.len() < fixtures.len());
+    let mut observed = Vec::new();
+    while let Ok(path) = first_hashes.try_recv() {
+        observed.push(path);
+    }
+    observed.sort();
+    assert_eq!(observed, committed.keys().cloned().collect::<Vec<_>>());
+    assert!(committed.values().all(|signature| signature.len() == 64));
+    scan.abort();
+    assert!(scan.await.unwrap_err().is_cancelled());
+    let store = library.store.clone();
+    drop(library);
+
+    let mut restarted = Library::new(store);
+    let (observer, mut restart_hashes) = tokio::sync::mpsc::unbounded_channel();
+    restarted.hash_observer = Some(observer);
+    let report = restarted.scan(&registered.id).await.unwrap();
+    let mut observed = Vec::new();
+    while let Ok(path) = restart_hashes.try_recv() {
+        observed.push(path);
+    }
+    observed.sort();
+    let remaining: Vec<_> = fixtures
+        .iter()
+        .filter(|path| !committed.contains_key(*path))
+        .cloned()
+        .collect();
+    assert_eq!(observed, remaining);
+    assert_eq!(report.visited, fixtures.len() as u64 + 1);
+    assert_eq!(report.skipped, 1);
+    assert_eq!(report.errors, 0);
+
+    let entries = restarted
+        .inventory_entries(&registered.id, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(entries.total, fixtures.len() as i64 + 1);
+    assert!(entries.next_cursor.is_none());
+    let mut inventoried: Vec<_> = entries
+        .items
+        .iter()
+        .filter(|entry| entry.state == "pending_association")
+        .map(|entry| entry.relative_path.clone())
+        .collect();
+    inventoried.sort();
+    assert_eq!(inventoried, fixtures);
+    let skipped: Vec<_> = entries
+        .items
+        .iter()
+        .filter(|entry| entry.state == "skipped")
+        .collect();
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped.iter().all(|entry| {
+        entry
+            .reason
+            .as_deref()
+            .is_some_and(|reason| !reason.is_empty())
+    }));
+    assert_eq!(skipped[0].relative_path, "link.cbz");
+    assert_eq!(skipped[0].reason.as_deref(), Some("symlink_skipped"));
+    for (path, signature) in committed {
+        let entry = entries
+            .items
+            .iter()
+            .find(|entry| entry.relative_path == path)
+            .unwrap();
+        assert_eq!(entry.reason.as_deref(), Some("metadata_unchanged"));
+        let reused: String = sqlx::query_scalar(
+            "SELECT signature FROM scan_entries WHERE root_id = ? AND relative_path = ?",
+        )
+        .bind(&registered.id)
+        .bind(&path)
+        .fetch_one(restarted.store.reader())
+        .await
+        .unwrap();
+        assert_eq!(reused, signature);
+    }
+}
+
 #[tokio::test]
 async fn copied_files_keep_their_original_bytes_and_unchanged_scan_reuses_hash() {
     let (_state, library) = library().await;
