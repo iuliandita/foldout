@@ -5,7 +5,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use libraryd::{app, store::sqlite::SqliteStore};
+use libraryd::{app, jobs::Jobs, store::sqlite::SqliteStore};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tower::ServiceExt;
@@ -85,6 +85,78 @@ async fn setup_cookie_requires_origin_for_writes_and_logout_invalidates_it() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn expired_browser_session_preserves_running_job_after_login() {
+    let directory = private_directory();
+    let store = SqliteStore::open(directory.path()).await.unwrap();
+    let jobs = Jobs::new(store.clone());
+    let app = app::router(store.clone());
+    let credentials = json!({"username":"owner","password":"correct horse battery staple"});
+    let response = request(
+        &app,
+        "POST",
+        "/api/v1/auth/setup",
+        None,
+        None,
+        credentials.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let cookie = response.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let queued = jobs
+        .enqueue("refresh", "edition:1", json!({"page": 1}))
+        .await
+        .unwrap();
+    let running = jobs.claim("worker", 300).await.unwrap().unwrap();
+    assert_eq!(running.id, queued.id);
+    assert_eq!(running.state, libraryd::jobs::JobState::Running);
+    let path = format!("/api/v1/jobs/{}", running.id);
+    let response = request(&app, "GET", &path, Some(&cookie), None, json!(null)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let before: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(before["id"], running.id);
+    assert_eq!(before["state"], "running");
+
+    let mut transaction = store.begin_write().await.unwrap();
+    sqlx::query("UPDATE auth_sessions SET expires_at = 0")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let response = request(&app, "GET", &path, Some(&cookie), None, json!(null)).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"]["code"], "unauthorized");
+    assert_eq!(error["error"]["message"], "Authentication required");
+    assert!(error["error"]["trace_id"].is_string());
+    assert_eq!(jobs.get(&running.id).await.unwrap().unwrap(), running);
+
+    let response = request(&app, "POST", "/api/v1/auth/login", None, None, credentials).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let new_cookie = response.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    assert_ne!(new_cookie, cookie);
+    let response = request(&app, "GET", &path, Some(&new_cookie), None, json!(null)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let after: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(after, before);
+    assert_eq!(jobs.get(&running.id).await.unwrap().unwrap(), running);
 }
 
 #[tokio::test]
