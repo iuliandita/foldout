@@ -66,6 +66,22 @@
   font-weight: 600;
 }
 
+.about-details {
+  display: grid;
+  gap: var(--space-1);
+}
+.about-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+}
+.about-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+}
+
 /* Storage */
 /* A row's overflow menu stays pinned to the right edge instead of wrapping under the text. */
 .inventory-list li.has-menu {

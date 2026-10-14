@@ -161,10 +161,20 @@ function General() {
           label={t('about')}
           description={t('aboutHint')}
           control={() => (
-            <span className="setting-row-value">
-              {t('app')}
-              {version && ` ${version}`}
-            </span>
+            <div className="about-details">
+              <span className="setting-row-value">
+                {t('app')}
+                {version && ` ${version}`}
+              </span>
+              <span className="about-links">
+                <a href="https://iuliandita.com" target="_blank" rel="noopener noreferrer">
+                  {t('madeBy')}
+                </a>
+                <a href="https://iuliandita.com/projects/" target="_blank" rel="noopener noreferrer">
+                  {t('otherProjects')}
+                </a>
+              </span>
+            </div>
           )}
         />
       </ul>

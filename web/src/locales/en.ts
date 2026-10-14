@@ -862,6 +862,8 @@ export const en = {
   themeHint: 'System follows your device setting.',
   interfaceLanguageHint: 'Language for menus, buttons, and messages.',
   about: 'About',
+  madeBy: 'Made by iuliandita',
+  otherProjects: 'Other projects',
   aboutHint: 'Tracks, finds, and reads your comics, manga, and magazines.',
   brandCaption: 'Comics, manga, magazines',
   wantedNothingMonitoredNote: 'Nothing monitored yet. Showing all missing titles.',
