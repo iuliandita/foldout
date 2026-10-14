@@ -23,6 +23,10 @@ pub(crate) fn hash_slots() -> Arc<tokio::sync::Semaphore> {
 pub struct Library {
     pub(crate) store: SqliteStore,
     pub(crate) hash_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    pub(crate) hash_observer: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    #[cfg(test)]
+    pub(crate) scan_commit_gate: Option<Arc<super::scan::ScanCommitGate>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -178,6 +182,10 @@ impl Library {
         Self {
             store,
             hash_slots: hash_slots(),
+            #[cfg(test)]
+            hash_observer: None,
+            #[cfg(test)]
+            scan_commit_gate: None,
         }
     }
 
