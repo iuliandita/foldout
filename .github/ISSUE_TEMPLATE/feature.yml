@@ -1,0 +1,18 @@
+name: Feature request
+description: Describe a Foldout workflow that needs improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and audience
+      description: What are you trying to do, and who needs it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior and alternatives
+      description: Describe the expected workflow, effects on original media, confirmation steps and recovery needs. Do not include secrets or private library data.
+    validations:
+      required: true

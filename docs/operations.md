@@ -19,8 +19,9 @@ automatically repaired. Keep SQLite on local storage, not NFS or SMB. Mount medi
 roots separately, read-only for scans; explicitly grant write access only to roots
 intended for imports. Preserve the same media paths when recovering a catalog.
 
-The build pins Rust 1.98.1, Bun 1.4.2, and Alpine 3.24.2 with registry manifest
-digests. Build tools install separately under `tools/`, including TypeScript 5 for
+The local toolchain pins Rust 1.98.1. The default container builder pins Rust
+1.99.0 on Alpine 3.23; the runtime pins Alpine 3.24.2, and the frontend builder
+pins Bun 1.4.2. Container base images use registry manifest digests. Build tools install separately under `tools/`, including TypeScript 5 for
 the API generator. Frontend TypeScript 7 stays under `web/`. The build checks the
 generated API types, type-checks and compiles the frontend, and embeds its assets
 in the release executable. The runtime contains neither Bun nor Rust.

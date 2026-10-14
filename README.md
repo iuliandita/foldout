@@ -42,7 +42,7 @@ Release searches assess the selected catalog unit, with reasons for conflicts or
 ./scripts/check
 ```
 
-Checks run offline after dependency installation. The script validates formatting, Clippy, Rust tests, TypeScript, the frontend build, embedded-asset tests, and the release build. The release executable is `target/release/libraryd`; it includes its UI and needs no frontend runtime. Release builds fail without the embedded-ui feature or compiled frontend assets, including files referenced by the entrypoint.
+Checks run offline after dependency installation. The script validates documented version facts, formatting, Clippy, Rust tests, TypeScript, the frontend build, embedded-asset tests, and the release build. The release executable is `target/release/libraryd`; it includes its UI and needs no frontend runtime. Release builds fail without the embedded-ui feature or compiled frontend assets, including files referenced by the entrypoint.
 
 For API development, `cargo run --locked` works without frontend assets; `/` returns an explicit 503 diagnostic. Run `./scripts/bun run --cwd web dev` for a separate development UI. The frontend uses TypeScript 7; API type generation has an isolated TypeScript 5 dependency because its compiler API is incompatible with TypeScript 7. Run `./scripts/generate-api` after editing the API contract.
 
@@ -51,3 +51,20 @@ Keep `tools/package.json` and `tools/bun.lock` on TypeScript 5.9.3 with openapi-
 SIGINT and SIGTERM initiate bounded HTTP draining and database closure. A newer database schema is rejected before migrations. `libraryd backup DESTINATION` snapshots the database and encryption key; `libraryd restore BACKUP FRESH_STATE` restores into a new directory. See [operations](docs/operations.md) for recovery and container instructions. There is no released upgrade history yet; use disposable state for development.
 
 See [format validation](docs/formats.md) and [integration status](docs/integrations.md) for current evidence and remaining work.
+
+## Contributing and support
+
+Foldout is unreleased; `develop` and the [nightly images](docs/operations.md#container)
+are development channels with breaking changes and no stable support window.
+Use the [bug and feature forms](https://github.com/iuliandita/foldout/issues/new/choose)
+with the server version, nightly tag or source commit and a minimal reproduction.
+Redact credentials, tokens, personal data and private paths from diagnostics.
+Keep original media read-only, use disposable state, and follow the
+[backup and restore guidance](docs/operations.md#backup-commands) before upgrades.
+See [contributing](CONTRIBUTING.md) and [private security reporting](SECURITY.md).
+
+Foldout code is [MIT licensed](LICENSE). Fixture and third-party notices retain
+their own terms: [original fixtures](tests/fixtures/LICENSE.txt) and
+[RAR fixture notices](tests/fixtures/rar/LICENSE).
+
+Made by [Iulian Dita](https://iuliandita.com). [Other projects](https://iuliandita.com/projects/).

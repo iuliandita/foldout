@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a reproducible Foldout problem
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Use disposable state and fixtures, keep original media read-only, and never exercise real download clients. Redact credentials, tokens, personal data and private paths. Report security vulnerabilities privately through the security contact link.
+  - type: input
+    id: version
+    attributes:
+      label: Server version / nightly tag / source commit
+      description: Include libraryd --version or the About server version, plus the image tag or source commit. There are no tagged releases yet.
+      placeholder: 0.1.0 (abcdef1), nightly-abcdef1, or full source commit
+    validations:
+      required: true
+  - type: input
+    id: deployment
+    attributes:
+      label: Deployment and client
+      placeholder: Docker Compose on Linux; Firefox; library on local storage
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction and expected behavior
+      description: Describe minimal steps, what happens and what should happen. Include the affected library format or provider if relevant, without sharing private media.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include relevant logs or screenshots. Preserve original state and use the operations backup/restore guidance for a recovery drill; never delete volumes or restore over active state.
+    validations:
+      required: false
