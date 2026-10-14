@@ -45,6 +45,49 @@ RUN case "$TARGETARCH" in \
     && tar -xJf archive.tar.xz 7zzs License.txt readme.txt \
     && chmod 755 7zzs
 
+FROM rust:1.98.1-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 AS backend-debian
+ARG TARGETARCH
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+RUN mkdir src && printf 'fn main() {}\n' > src/main.rs && cargo fetch --locked && rm src/main.rs
+COPY build.rs ./
+COPY migrations ./migrations
+COPY --exclude=**/.verify --exclude=**/target src ./src
+COPY --from=frontend /build/web/dist ./web/dist
+ARG LIBRARY_BUILD_COMMIT=unknown
+RUN --mount=type=cache,id=libraryd-rust-debian-${TARGETARCH},target=/build/target,sharing=locked \
+    LIBRARY_BUILD_COMMIT=${LIBRARY_BUILD_COMMIT} cargo build --locked --offline --release --features embedded-ui \
+    && cp /build/target/release/libraryd /build/libraryd
+
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS debian
+COPY --from=archive /archive/7zzs /usr/bin/7z
+COPY --from=archive /archive/License.txt /archive/readme.txt /usr/share/licenses/7zip/
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates poppler-utils util-linux libgcc-s1 wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 library \
+    && useradd --no-log-init --no-create-home --uid 1000 --gid library --shell /usr/sbin/nologin library \
+    && mkdir /state \
+    && chown 1000:1000 /state \
+    && chmod 700 /state \
+    && test -x /usr/bin/prlimit \
+    && test -x /usr/bin/7z \
+    && test -x /usr/bin/pdfinfo \
+    && test -x /usr/bin/pdftoppm
+COPY --from=backend-debian /build/libraryd /usr/local/bin/libraryd
+ENV LIBRARY_STATE_DIR=/state LIBRARY_LISTEN=0.0.0.0:8787 LIBRARY_ORIGIN=http://localhost:8787
+USER 1000:1000
+WORKDIR /state
+EXPOSE 8787
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:8787/health/ready || exit 1
+ENTRYPOINT ["/bin/sh", "-c", "umask 077; exec /usr/local/bin/libraryd \"$@\"", "libraryd"]
+
 FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 COPY --from=archive /archive/7zzs /usr/bin/7z
 COPY --from=archive /archive/License.txt /archive/readme.txt /usr/share/licenses/7zip/
