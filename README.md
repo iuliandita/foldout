@@ -46,6 +46,8 @@ Checks run offline after dependency installation. The script validates formattin
 
 For API development, `cargo run --locked` works without frontend assets; `/` returns an explicit 503 diagnostic. Run `./scripts/bun run --cwd web dev` for a separate development UI. The frontend uses TypeScript 7; API type generation has an isolated TypeScript 5 dependency because its compiler API is incompatible with TypeScript 7. Run `./scripts/generate-api` after editing the API contract.
 
+Keep `tools/package.json` and `tools/bun.lock` on TypeScript 5.9.3 with openapi-typescript 7.13.0. The generator declares a TypeScript `^5.x` peer dependency and uses the compiler API, including `ts.factory.createKeywordTypeNode`; the tools update to TypeScript 7.0.2 fails at that API (issue #80). The web compiler is independent and remains on TypeScript 7.0.2. Before changing the generator's compiler major, verify generator support, install with frozen lockfiles, and run the full check, including API generation and comparison with the committed schema. Dependabot uses separate `/web` and `/tools` policies and ignores TypeScript major updates only in `/tools`.
+
 SIGINT and SIGTERM initiate bounded HTTP draining and database closure. A newer database schema is rejected before migrations. `libraryd backup DESTINATION` snapshots the database and encryption key; `libraryd restore BACKUP FRESH_STATE` restores into a new directory. See [operations](docs/operations.md) for recovery and container instructions. There is no released upgrade history yet; use disposable state for development.
 
 See [format validation](docs/formats.md) and [integration status](docs/integrations.md) for current evidence and remaining work.

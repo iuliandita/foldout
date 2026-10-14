@@ -11,7 +11,7 @@ updates:
         update-types: [minor, patch]
 
   - package-ecosystem: bun
-    directories: [/web, /tools]
+    directory: /web
     target-branch: develop
     schedule:
       interval: weekly
@@ -19,6 +19,19 @@ updates:
       bun:
         patterns: ["*"]
         update-types: [minor, patch]
+
+  - package-ecosystem: bun
+    directory: /tools
+    target-branch: develop
+    schedule:
+      interval: weekly
+    groups:
+      bun:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
