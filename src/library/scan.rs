@@ -23,6 +23,12 @@ use super::{
 
 const BATCH_SIZE: usize = 32;
 
+#[cfg(test)]
+pub(crate) struct ScanCommitGate {
+    pub committed: tokio::sync::Notify,
+    pub release: tokio::sync::Semaphore,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ScanReport {
     pub run_id: String,
@@ -140,6 +146,8 @@ impl Library {
                 let root = root.to_path_buf();
                 let slots = self.hash_slots.clone();
                 let cancellation = cancellation.clone();
+                #[cfg(test)]
+                let hash_observer = self.hash_observer.clone();
                 tasks.spawn(async move {
                     let permit = slots
                         .acquire_owned()
@@ -147,7 +155,14 @@ impl Library {
                         .expect("hash semaphore remains open");
                     tokio::task::spawn_blocking(move || {
                         let _permit = permit;
-                        inventory_candidate(&root, candidate, previous, &cancellation)
+                        inventory_candidate(
+                            &root,
+                            candidate,
+                            previous,
+                            &cancellation,
+                            #[cfg(test)]
+                            hash_observer.as_ref(),
+                        )
                     })
                     .await
                     .map_err(|_| std::io::Error::other("inventory worker failed"))
@@ -167,6 +182,15 @@ impl Library {
                 entries.push(entry);
             }
             self.persist_entries(root_id, run_id, entries).await?;
+            #[cfg(test)]
+            if let Some(gate) = &self.scan_commit_gate {
+                gate.committed.notify_one();
+                gate.release
+                    .acquire()
+                    .await
+                    .expect("scan commit gate remains open")
+                    .forget();
+            }
         }
         Ok(report)
     }
@@ -353,6 +377,7 @@ fn inventory_candidate(
     candidate: Candidate,
     prior: Option<Prior>,
     cancellation: &AtomicBool,
+    #[cfg(test)] hash_observer: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> IoResult<Entry> {
     if candidate.state != "pending_association" {
         return Ok(Entry {
@@ -395,6 +420,10 @@ fn inventory_candidate(
             state: "pending_association",
             reason: Some("metadata_unchanged"),
         });
+    }
+    #[cfg(test)]
+    if let Some(observer) = hash_observer {
+        observer.send(candidate.relative.clone()).unwrap();
     }
     match hash_safe_cancelled(root, &candidate.path, cancellation) {
         Ok(result) => Ok(Entry {
