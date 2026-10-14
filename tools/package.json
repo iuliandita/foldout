@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "bun": "1.4.2",
+    "bun": "1.4.3",
     "openapi-typescript": "7.13.0",
     "typescript": "5.9.3"
   }
