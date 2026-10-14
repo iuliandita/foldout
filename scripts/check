@@ -4,6 +4,8 @@ umask 077
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 cd "$(dirname "$0")/.."
+./scripts/bun test tools/check-docs-facts.test.ts
+./scripts/bun tools/check-docs-facts.ts
 cargo fmt --all -- --check
 cargo clippy --locked --offline --all-targets -- -D warnings
 cargo test --locked --offline --all-targets
