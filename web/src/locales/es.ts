@@ -870,6 +870,8 @@ export const es: Record<keyof typeof en, string> = {
   themeHint: 'Sistema sigue la configuración de tu dispositivo.',
   interfaceLanguageHint: 'Idioma de los menús, botones y mensajes.',
   about: 'Acerca de',
+  madeBy: 'Creado por iuliandita',
+  otherProjects: 'Otros proyectos',
   aboutHint: 'Sigue, encuentra y lee tus cómics, manga y revistas.',
   brandCaption: 'Cómics, manga, revistas',
   wantedNothingMonitoredNote: 'Aún no sigues nada. Se muestran todos los títulos que faltan.',
