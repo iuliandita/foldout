@@ -688,7 +688,7 @@ fn prowlarr(private: PrivateIntegration) -> Result<crate::providers::Prowlarr, S
         },
     )?)
 }
-fn credential_scope(integration: &Integration, key: Option<&str>) -> String {
+pub(crate) fn credential_scope(integration: &Integration, key: Option<&str>) -> String {
     digest(
         serde_json::json!([integration.kind, integration.base_url, key])
             .to_string()
@@ -717,7 +717,7 @@ pub(crate) async fn reserve_cooldown(
     tx.commit().await?;
     Ok(())
 }
-async fn provider_result<T>(
+pub(crate) async fn provider_result<T>(
     store: &SqliteStore,
     scope: &str,
     result: Result<T, ProviderError>,

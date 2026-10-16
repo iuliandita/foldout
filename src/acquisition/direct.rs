@@ -207,7 +207,8 @@ impl Direct {
         input: DirectChapterSearch,
     ) -> Result<DirectChapterPage, DirectError> {
         label(owner)?;
-        let (provider, fingerprint) = manga_adapter(settings, &input.integration_id).await?;
+        let (provider, fingerprint) =
+            manga_adapter(&self.store, settings, &input.integration_id).await?;
         let page = provider
             .list_chapters(
                 &input.manga_id,
@@ -267,7 +268,8 @@ impl Direct {
         if selection.source_kind != "mangadex_chapter" {
             return Err(DirectError::Invalid);
         }
-        let (provider, fingerprint) = manga_adapter(settings, &selection.integration_id).await?;
+        let (provider, fingerprint) =
+            manga_adapter(&self.store, settings, &selection.integration_id).await?;
         if fingerprint != selection.fingerprint {
             return Err(DirectError::Changed);
         }
@@ -303,7 +305,7 @@ impl Direct {
         input: DirectSearch,
     ) -> Result<DirectSearchPage, DirectError> {
         label(owner)?;
-        let (adapter, fingerprint) = adapter(settings, &input.integration_id).await?;
+        let (adapter, fingerprint) = adapter(&self.store, settings, &input.integration_id).await?;
         let page = adapter.search(&input.query, input.page).await?;
         let mut posts = Vec::new();
         for post in page.posts {
@@ -338,7 +340,7 @@ impl Direct {
         if selected.source_kind != "getcomics" || !selected.digest.is_empty() {
             return Err(DirectError::Invalid);
         }
-        let adapter = checked_adapter(settings, &selected).await?;
+        let adapter = checked_adapter(&self.store, settings, &selected).await?;
         let detail = adapter.detail(&selected.post_path).await?;
         let public = detail.summary();
         let mut links = Vec::new();
@@ -383,7 +385,7 @@ impl Direct {
         if selected.source_kind != "getcomics" || selected.digest.is_empty() {
             return Err(DirectError::Invalid);
         }
-        let adapter = checked_adapter(settings, &selected).await?;
+        let adapter = checked_adapter(&self.store, settings, &selected).await?;
         let detail = adapter.detail(&selected.post_path).await?;
         let link = detail
             .links()
@@ -1007,48 +1009,55 @@ fn chapter_identity(chapter: &MangaDexChapter) -> Result<String, DirectError> {
     ))
 }
 async fn manga_adapter(
+    store: &SqliteStore,
     settings: &Settings,
     integration_id: &str,
 ) -> Result<(MangaDexChapters, String), DirectError> {
     id(integration_id)?;
-    let config = settings.get(integration_id).await?;
+    let private = settings.load_private(integration_id).await?;
+    let config = private.integration;
     if config.kind != IntegrationKind::MangaDex || !config.enabled {
         return Err(SettingsError::NotConfigured.into());
     }
     let fingerprint =
         crate::search::source_fingerprint(&config).map_err(|_| DirectError::Database)?;
     Ok((
-        MangaDexChapters::new(ProviderConfig::new(
-            &config.base_url,
-            None,
-            HttpLimits::default(),
-        )?)?,
+        MangaDexChapters::new(
+            ProviderConfig::new(&config.base_url, None, HttpLimits::default())?.with_budget(
+                store.clone(),
+                crate::search::credential_scope(&config, private.api_key.as_deref()),
+            ),
+        )?,
         fingerprint,
     ))
 }
 async fn adapter(
+    store: &SqliteStore,
     settings: &Settings,
     integration_id: &str,
 ) -> Result<(GetComicsAdapter, String), DirectError> {
     id(integration_id)?;
-    let config = settings.get(integration_id).await?;
+    let private = settings.load_private(integration_id).await?;
+    let config = private.integration;
     if config.kind != IntegrationKind::GetComics || !config.enabled {
         return Err(SettingsError::NotConfigured.into());
     }
     let fingerprint =
         crate::search::source_fingerprint(&config).map_err(|_| DirectError::Database)?;
-    let provider = GetComicsAdapter::new(ProviderConfig::new(
-        &config.base_url,
-        None,
-        HttpLimits::default(),
-    )?)?;
+    let provider = GetComicsAdapter::new(
+        ProviderConfig::new(&config.base_url, None, HttpLimits::default())?.with_budget(
+            store.clone(),
+            crate::search::credential_scope(&config, private.api_key.as_deref()),
+        ),
+    )?;
     Ok((provider, fingerprint))
 }
 async fn checked_adapter(
+    store: &SqliteStore,
     settings: &Settings,
     selected: &Selection,
 ) -> Result<GetComicsAdapter, DirectError> {
-    let (provider, fingerprint) = adapter(settings, &selected.integration_id).await?;
+    let (provider, fingerprint) = adapter(store, settings, &selected.integration_id).await?;
     if fingerprint != selected.fingerprint {
         return Err(DirectError::Changed);
     }

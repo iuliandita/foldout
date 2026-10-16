@@ -287,7 +287,8 @@ impl GetComicsAdapter {
         let Some(target) = &link.target else {
             return Ok(resolution(unsupported(), None));
         };
-        tokio::time::timeout(RESOLVE_TIMEOUT, async {
+        let deadline = tokio::time::Instant::now() + RESOLVE_TIMEOUT;
+        tokio::time::timeout_at(deadline, async {
             let mut target = target.clone();
             let mut seen = HashSet::new();
             let mut requests = 0;
@@ -302,27 +303,20 @@ impl GetComicsAdapter {
                     return Ok(resolution(unsupported(), None));
                 }
                 requests += 1;
+                self.http.reserve(deadline).await?;
                 let response = self
                     .resolver
                     .head(target.clone())
                     .send()
                     .await
                     .map_err(|_| ProviderError::Unavailable)?;
+                self.http.check_rate_limit(&response).await?;
                 if response
                     .headers()
                     .get("cf-mitigated")
                     .is_some_and(|v| v == "challenge")
                 {
                     return Err(ProviderError::ChallengeRequired);
-                }
-                if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    return Err(ProviderError::RateLimited {
-                        retry_after_seconds: response
-                            .headers()
-                            .get(header::RETRY_AFTER)
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|s| s.parse().ok()),
-                    });
                 }
                 if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
                     let raw = response
@@ -484,4 +478,79 @@ fn resolution(
     download: Option<GetComicsDownload>,
 ) -> GetComicsResolution {
     GetComicsResolution { summary, download }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::{providers::HttpLimits, store::sqlite::SqliteStore};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[tokio::test]
+    async fn resolver_hops_share_and_persist_the_control_budget() {
+        let state = crate::search::mock::private_directory();
+        let store = SqliteStore::open(state.path()).await.unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let requests = seen.clone();
+        let app =
+            axum::Router::new().fallback(move |request: axum::http::Request<axum::body::Body>| {
+                let requests = requests.clone();
+                async move {
+                    assert_eq!(request.method(), axum::http::Method::HEAD);
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    let response = if request.uri().path() == "/dls/first" {
+                        axum::http::Response::builder()
+                            .status(302)
+                            .header("location", "/dls/second")
+                    } else {
+                        axum::http::Response::builder()
+                            .status(429)
+                            .header("retry-after", "120")
+                            .header("cf-mitigated", "challenge")
+                    };
+                    response.body(axum::body::Body::empty()).unwrap()
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let adapter = GetComicsAdapter::new(
+            ProviderConfig::new(&base, None, HttpLimits::default())
+                .unwrap()
+                .with_budget(store.clone(), "owned-resolver".into()),
+        )
+        .unwrap();
+        let link = GetComicsLink {
+            origin: adapter.origin.clone(),
+            target: Some(adapter.origin.join("dls/first").unwrap()),
+            summary: GetComicsLinkSummary {
+                state: GetComicsLinkState::NeedsResolution,
+                host: "getcomics",
+            },
+        };
+        assert!(matches!(
+            adapter.resolve(&link).await,
+            Err(ProviderError::RateLimited {
+                retry_after_seconds: Some(120)
+            })
+        ));
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            adapter.resolve(&link).await,
+            Err(ProviderError::RateLimited { .. })
+        ));
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            2,
+            "cooldown must prevent another HEAD"
+        );
+        assert!(matches!(
+            crate::search::reserve_cooldown(&store, "owned-resolver", 1).await,
+            Err(crate::search::SearchError::Cooldown { .. })
+        ));
+        task.abort();
+    }
 }
