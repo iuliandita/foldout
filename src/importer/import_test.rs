@@ -138,6 +138,140 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn recovery_requires_durable_catalog_evidence_before_cleanup() {
+    for policy in [
+        ImportPolicy::Copy,
+        ImportPolicy::Hardlink {
+            fallback_to_copy: false,
+        },
+    ] {
+        for phase in [ImportPhase::Cataloged, ImportPhase::CleanupPending] {
+            for remove_coverage in [true, false] {
+                let mut fixture = Fixture::new(policy.clone()).await;
+                fixture.plan().await;
+                let operation = loop {
+                    let operation = fixture.service().step(&fixture.id).await.unwrap();
+                    if operation.phase == phase {
+                        break operation;
+                    }
+                };
+                let file_id = operation.library_file_id.as_ref().unwrap();
+                let coverage: (String, String, String) = sqlx::query_as(
+                    "SELECT library_file_id, unit_id, evidence FROM file_coverage WHERE library_file_id = ?",
+                )
+                .bind(file_id)
+                .fetch_one(fixture.store.reader())
+                .await
+                .unwrap();
+                let signature: String =
+                    sqlx::query_scalar("SELECT signature FROM library_files WHERE id = ?")
+                        .bind(file_id)
+                        .fetch_one(fixture.store.reader())
+                        .await
+                        .unwrap();
+                let paths = [
+                    fixture.source.path().join("owned.pdf"),
+                    fixture.destination.path().join("imported.pdf"),
+                    fixture
+                        .destination
+                        .path()
+                        .join(".library-imports")
+                        .join(format!("{}.tmp", fixture.id)),
+                ];
+                let identities = paths.each_ref().map(|path| {
+                    assert_eq!(fs::read(path).unwrap(), PDF);
+                    let metadata = fs::metadata(path).unwrap();
+                    (
+                        metadata.dev(),
+                        metadata.ino(),
+                        metadata.mode(),
+                        metadata.len(),
+                    )
+                });
+                let mut tx = fixture.store.begin_write().await.unwrap();
+                let changed = if remove_coverage {
+                    sqlx::query(
+                        "DELETE FROM file_coverage WHERE library_file_id = ? AND unit_id = ?",
+                    )
+                    .bind(&coverage.0)
+                    .bind(&coverage.1)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap()
+                } else {
+                    sqlx::query("UPDATE library_files SET signature = ? WHERE id = ?")
+                        .bind(format!("{signature}-corrupt"))
+                        .bind(file_id)
+                        .execute(&mut *tx)
+                        .await
+                        .unwrap()
+                };
+                assert_eq!(changed.rows_affected(), 1);
+                tx.commit().await.unwrap();
+                fixture.store.close().await;
+                fixture.store = SqliteStore::open(fixture.state.path()).await.unwrap();
+
+                let error = fixture.service().recover(&fixture.id).await.unwrap_err();
+                assert!(matches!(error, ImportError::InvalidJournal));
+                let blocked = fixture.service().get(&fixture.id).await.unwrap();
+                assert_eq!(blocked.phase, phase);
+                assert_eq!(blocked.library_file_id, operation.library_file_id);
+                assert_eq!(
+                    blocked.last_error.as_deref(),
+                    Some(error.to_string().as_str())
+                );
+                for (path, identity) in paths.iter().zip(identities) {
+                    assert_eq!(fs::read(path).unwrap(), PDF);
+                    let metadata = fs::metadata(path).unwrap();
+                    assert_eq!(
+                        (
+                            metadata.dev(),
+                            metadata.ino(),
+                            metadata.mode(),
+                            metadata.len()
+                        ),
+                        identity
+                    );
+                }
+
+                let mut tx = fixture.store.begin_write().await.unwrap();
+                let restored = if remove_coverage {
+                    sqlx::query("INSERT INTO file_coverage (library_file_id, unit_id, evidence) VALUES (?, ?, ?)")
+                        .bind(&coverage.0)
+                        .bind(&coverage.1)
+                        .bind(&coverage.2)
+                        .execute(&mut *tx)
+                        .await
+                        .unwrap()
+                } else {
+                    sqlx::query("UPDATE library_files SET signature = ? WHERE id = ?")
+                        .bind(&signature)
+                        .bind(file_id)
+                        .execute(&mut *tx)
+                        .await
+                        .unwrap()
+                };
+                assert_eq!(restored.rows_affected(), 1);
+                tx.commit().await.unwrap();
+                fixture.store.close().await;
+                fixture.store = SqliteStore::open(fixture.state.path()).await.unwrap();
+                fixture.assert_done().await;
+                let done = fixture.service().get(&fixture.id).await.unwrap();
+                assert_eq!(done.library_file_id, operation.library_file_id);
+                assert!(done.last_error.is_none());
+                let restored: (String, String, String, String) = sqlx::query_as(
+                    "SELECT c.library_file_id, c.unit_id, c.evidence, f.signature FROM file_coverage c JOIN library_files f ON f.id = c.library_file_id",
+                )
+                .fetch_one(fixture.store.reader())
+                .await
+                .unwrap();
+                assert_eq!(restored, (coverage.0, coverage.1, coverage.2, signature));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn restart_after_every_committed_phase_preserves_source_and_one_catalog_file() {
     for policy in [
         ImportPolicy::Copy,
