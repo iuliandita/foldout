@@ -14,6 +14,46 @@ use std::sync::{Arc, Mutex};
 
 static TEST_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const ARCHIVE: &[u8] = include_bytes!("../../tests/fixtures/natural-order.cbz");
+
+#[tokio::test]
+async fn direct_search_honors_persisted_shared_cooldown() {
+    let fixture = Fixture::new().await;
+    let config = fixture.settings.get(&fixture.integration).await.unwrap();
+    let scope = crate::search::digest(
+        serde_json::json!([config.kind, config.base_url, null])
+            .to_string()
+            .as_bytes(),
+    );
+    assert!(matches!(
+        crate::search::provider_result::<()>(
+            &fixture.store,
+            &scope,
+            Err(ProviderError::RateLimited {
+                retry_after_seconds: Some(120),
+            }),
+        )
+        .await,
+        Err(crate::search::SearchError::Provider(
+            ProviderError::RateLimited { .. }
+        ))
+    ));
+    let result = Direct::new(fixture.store.clone())
+        .search(
+            &fixture.settings,
+            "owner",
+            DirectSearch {
+                integration_id: fixture.integration.clone(),
+                query: "Owned".into(),
+                page: 1,
+            },
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(DirectError::Provider(ProviderError::RateLimited { .. }))
+    ));
+}
+
 #[derive(Default)]
 struct Seen {
     transfers: usize,
