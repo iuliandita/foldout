@@ -22,6 +22,7 @@ pub struct ProviderConfig {
     base: Url,
     key: Option<String>,
     limits: HttpLimits,
+    budget: Option<RequestBudget>,
 }
 
 impl ProviderConfig {
@@ -56,7 +57,60 @@ impl ProviderConfig {
             base,
             key: api_key,
             limits,
+            budget: None,
         })
+    }
+
+    pub(crate) fn with_budget(
+        mut self,
+        store: crate::store::sqlite::SqliteStore,
+        scope: String,
+    ) -> Self {
+        self.budget = Some(RequestBudget { store, scope });
+        self
+    }
+}
+
+struct RequestBudget {
+    store: crate::store::sqlite::SqliteStore,
+    scope: String,
+}
+
+impl RequestBudget {
+    async fn reserve(&self, deadline: tokio::time::Instant) -> Result<(), ProviderError> {
+        loop {
+            match crate::search::reserve_cooldown(&self.store, &self.scope, 1).await {
+                Ok(()) => return Ok(()),
+                Err(crate::search::SearchError::Cooldown {
+                    retry_after_seconds,
+                }) => {
+                    let wait = Duration::from_secs(retry_after_seconds);
+                    if wait >= deadline.saturating_duration_since(tokio::time::Instant::now()) {
+                        return Err(ProviderError::RateLimited {
+                            retry_after_seconds: Some(retry_after_seconds),
+                        });
+                    }
+                    tokio::time::sleep(wait).await;
+                    // Waiting does not reserve a slot: another caller may have extended it.
+                }
+                Err(_) => return Err(ProviderError::Unavailable),
+            }
+        }
+    }
+
+    async fn limited(&self, seconds: Option<u64>) -> Result<(), ProviderError> {
+        match crate::search::provider_result::<()>(
+            &self.store,
+            &self.scope,
+            Err(ProviderError::RateLimited {
+                retry_after_seconds: seconds,
+            }),
+        )
+        .await
+        {
+            Err(crate::search::SearchError::Provider(error)) => Err(error),
+            _ => Err(ProviderError::Unavailable),
+        }
     }
 }
 
@@ -174,21 +228,45 @@ impl Http {
         Ok(value.to_owned())
     }
 
+    pub(crate) async fn reserve(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), ProviderError> {
+        if let Some(budget) = &self.config.budget {
+            budget.reserve(deadline).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn check_rate_limit(
+        &self,
+        response: &reqwest::Response,
+    ) -> Result<(), ProviderError> {
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            let seconds = response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(retry_after);
+            if let Some(budget) = &self.config.budget {
+                budget.limited(seconds).await?;
+            }
+            return Err(ProviderError::RateLimited {
+                retry_after_seconds: seconds,
+            });
+        }
+        Ok(())
+    }
+
     pub async fn execute(&self, request: RequestBuilder) -> Result<Response, ProviderError> {
-        tokio::time::timeout(self.config.limits.timeout, async {
+        let deadline = tokio::time::Instant::now() + self.config.limits.timeout;
+        tokio::time::timeout_at(deadline, async {
+            self.reserve(deadline).await?;
             let mut response = request
                 .send()
                 .await
                 .map_err(|_| ProviderError::Unavailable)?;
-            if response.status() == StatusCode::TOO_MANY_REQUESTS {
-                return Err(ProviderError::RateLimited {
-                    retry_after_seconds: response
-                        .headers()
-                        .get(header::RETRY_AFTER)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(retry_after),
-                });
-            }
+            self.check_rate_limit(&response).await?;
             let challenge = response
                 .headers()
                 .get("cf-mitigated")
@@ -300,4 +378,181 @@ fn retry_after(value: &str) -> Option<u64> {
         era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + (153 * m + 2) / 5 + day - 1 - 719468;
     let timestamp = epoch_days as u64 * 86400 + time[0] * 3600 + time[1] * 60 + time[2];
     Some(timestamp.saturating_sub(SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs()))
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::store::sqlite::SqliteStore;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[tokio::test]
+    async fn reservation_wait_obeys_http_deadline_without_sending() {
+        let state = crate::search::mock::private_directory();
+        let store = SqliteStore::open(state.path()).await.unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let requests = seen.clone();
+        let app = axum::Router::new().fallback(move || {
+            let requests = requests.clone();
+            async move {
+                requests.fetch_add(1, Ordering::SeqCst);
+                "owned"
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = Http::new(
+            ProviderConfig::new(
+                &base,
+                None,
+                HttpLimits {
+                    timeout: Duration::from_millis(50),
+                    ..HttpLimits::default()
+                },
+            )
+            .unwrap()
+            .with_budget(store.clone(), "owned".into()),
+            false,
+        )
+        .unwrap();
+        let writer = store.begin_write().await.unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            http.execute(http.get("").unwrap()),
+        )
+        .await;
+        writer.commit().await.unwrap();
+        task.abort();
+        assert!(
+            matches!(result, Ok(Err(ProviderError::Unavailable))),
+            "HTTP deadline must include the database reservation wait"
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_reservations_recheck_the_shared_slot() {
+        let state = crate::search::mock::private_directory();
+        let store = SqliteStore::open(state.path()).await.unwrap();
+        let first = RequestBudget {
+            store: store.clone(),
+            scope: "owned".into(),
+        };
+        let second = RequestBudget {
+            store: store.clone(),
+            scope: "owned".into(),
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        let (a, b) = tokio::join!(first.reserve(deadline), second.reserve(deadline));
+        a.unwrap();
+        b.unwrap();
+        let next: i64 =
+            sqlx::query_scalar("SELECT next_at FROM search_cooldowns WHERE scope = 'owned'")
+                .fetch_one(store.reader())
+                .await
+                .unwrap();
+        assert!(next > crate::search::now());
+    }
+
+    #[tokio::test]
+    async fn retry_after_survives_restart_and_blocks_http() {
+        let state = crate::search::mock::private_directory();
+        let store = SqliteStore::open(state.path()).await.unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let requests = seen.clone();
+        let app = axum::Router::new().fallback(move || {
+            let requests = requests.clone();
+            async move {
+                requests.fetch_add(1, Ordering::SeqCst);
+                axum::http::Response::builder()
+                    .status(429)
+                    .header("retry-after", "120")
+                    .header("cf-mitigated", "challenge")
+                    .body(axum::body::Body::empty())
+                    .unwrap()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = Http::new(
+            ProviderConfig::new(&base, None, HttpLimits::default())
+                .unwrap()
+                .with_budget(store.clone(), "owned".into()),
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            http.execute(http.get("").unwrap()).await,
+            Err(ProviderError::RateLimited {
+                retry_after_seconds: Some(120)
+            })
+        ));
+        let before: i64 =
+            sqlx::query_scalar("SELECT next_at FROM search_cooldowns WHERE scope = 'owned'")
+                .fetch_one(store.reader())
+                .await
+                .unwrap();
+        let budget = RequestBudget {
+            store: store.clone(),
+            scope: "owned".into(),
+        };
+        assert!(matches!(
+            budget.limited(Some(1)).await,
+            Err(ProviderError::RateLimited { .. })
+        ));
+        let after: i64 =
+            sqlx::query_scalar("SELECT next_at FROM search_cooldowns WHERE scope = 'owned'")
+                .fetch_one(store.reader())
+                .await
+                .unwrap();
+        assert_eq!(
+            before, after,
+            "a shorter response must not reduce the cooldown"
+        );
+        drop(budget);
+        drop(http);
+        drop(store);
+        let reopened = SqliteStore::open(state.path()).await.unwrap();
+        let http = Http::new(
+            ProviderConfig::new(&base, None, HttpLimits::default())
+                .unwrap()
+                .with_budget(reopened, "owned".into()),
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            http.execute(http.get("").unwrap()).await,
+            Err(ProviderError::RateLimited { .. })
+        ));
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn unbudgeted_search_http_does_not_reserve_again() {
+        let state = crate::search::mock::private_directory();
+        let store = SqliteStore::open(state.path()).await.unwrap();
+        crate::search::reserve_cooldown(&store, "owned", 120)
+            .await
+            .unwrap();
+        let app = axum::Router::new().fallback(|| async { "owned" });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = Http::new(
+            ProviderConfig::new(&base, None, HttpLimits::default()).unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            http.execute(http.get("").unwrap()).await.unwrap().body,
+            b"owned"
+        );
+        task.abort();
+    }
 }
