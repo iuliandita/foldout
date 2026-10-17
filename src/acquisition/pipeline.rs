@@ -248,6 +248,7 @@ impl Pipeline {
         sqlx::query("INSERT INTO acquisition_runs (id, release_handle, client_id, client_fingerprint, client_kind, category, unit_id, state, destination_root, destination_relative, destination_path, selection_decision_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)")
             .bind(&id).bind(&request.release_handle).bind(&request.client_id).bind(client_fingerprint).bind(kind_name(kind)).bind(&options.category).bind(&request.unit_id)
             .bind(request.destination.as_ref().map(|d| &d.root_id)).bind(request.destination.as_ref().map(|d| &d.relative_path)).bind(destination_path).bind(selection_decision_id).execute(&mut *tx).await?;
+        lifecycle_event(&mut tx, &id, "acquisition_lifecycle_v1", None).await?;
         tx.commit().await?;
         self.get(owner, &id).await
     }
@@ -375,6 +376,9 @@ impl Pipeline {
         let mut tx = self.store.begin_write().await?;
         let acquired = sqlx::query("UPDATE acquisition_runs SET work_token = ?, work_until = unixepoch() + 300 WHERE id = ? AND state IN ('queued', 'downloading', 'importing') AND (work_until IS NULL OR work_until <= unixepoch())")
             .bind(&claim.token).bind(id).execute(&mut *tx).await?.rows_affected() == 1;
+        if acquired {
+            lifecycle_event(&mut tx, id, "acquisition_claim_started", Some(&claim.token)).await?;
+        }
         tx.commit().await?;
         if !acquired {
             return Ok(());
@@ -383,6 +387,14 @@ impl Pipeline {
         let mut tx = self.store.begin_write().await?;
         sqlx::query("UPDATE acquisition_runs SET work_token = NULL, work_until = NULL WHERE id = ? AND work_token = ?")
             .bind(id).bind(&claim.token).execute(&mut *tx).await?;
+        // A displaced claim still records its own actual return, never its replacement's.
+        lifecycle_event(
+            &mut tx,
+            id,
+            "acquisition_claim_returned",
+            Some(&claim.token),
+        )
+        .await?;
         tx.commit().await?;
         result
     }
@@ -1016,6 +1028,20 @@ async fn client_adapter(
         _ => return Err(PipelineError::Invalid),
     };
     Ok((adapter, fingerprint))
+}
+async fn lifecycle_event(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: &str,
+    event: &str,
+    claim: Option<&str>,
+) -> Result<(), PipelineError> {
+    sqlx::query("INSERT INTO job_events (job_id, event, to_state, worker, created_at) SELECT j.id, ?, j.state, ?, unixepoch() FROM jobs j JOIN acquisition_intents i ON i.job_id = j.id WHERE i.id = ?")
+        .bind(event)
+        .bind(claim.map(fingerprint))
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 async fn job_state(
     tx: &mut Transaction<'_, Sqlite>,

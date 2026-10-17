@@ -192,6 +192,143 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn lifecycle_evidence_covers_creation_and_each_actual_return() {
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("lifecycle").await;
+    let replay = f.create("lifecycle").await;
+    assert_eq!(intent.id, replay.id);
+    assert_eq!(
+        lifecycle_events(&f.store, &intent.job_id).await,
+        vec![("acquisition_lifecycle_v1".into(), None)]
+    );
+    f.submit(&intent.id).await;
+    f.pipeline
+        .tick_job(f.settings.clone(), &intent.id)
+        .await
+        .unwrap();
+    let events = lifecycle_events(&f.store, &intent.job_id).await;
+    assert_eq!(events.len(), 5);
+    for pair in events[1..].as_chunks::<2>().0 {
+        assert_eq!(pair[0].0, "acquisition_claim_started");
+        assert_eq!(pair[1].0, "acquisition_claim_returned");
+        assert!(pair[0].1.is_some());
+        assert_eq!(pair[0].1, pair[1].1);
+    }
+    assert_ne!(events[1].1, events[3].1);
+    assert_eq!(f.server.seen.lock().unwrap().submissions, 1);
+}
+
+async fn lifecycle_events(store: &SqliteStore, job_id: &str) -> Vec<(String, Option<String>)> {
+    sqlx::query_as("SELECT event, worker FROM job_events WHERE job_id = ? AND event IN ('acquisition_lifecycle_v1', 'acquisition_claim_started', 'acquisition_claim_returned') ORDER BY id")
+        .bind(job_id).fetch_all(store.reader()).await.unwrap()
+}
+
+#[tokio::test]
+async fn lifecycle_displaced_claim_returns_only_when_its_work_returns() {
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("displaced-lifecycle").await;
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    {
+        let mut seen = f.server.seen.lock().unwrap();
+        seen.payload_started = Some(started.clone());
+        seen.payload_release = Some(release.clone());
+        seen.own_tag = format!("libraryd-{}", intent.id);
+    }
+    mock::allow_search(&f.store).await;
+    let pipeline = f.pipeline.clone();
+    let settings = f.settings.clone();
+    let id = intent.id.clone();
+    let worker = tokio::spawn(async move { pipeline.tick_job(settings, &id).await });
+    started.notified().await;
+    let events = lifecycle_events(&f.store, &intent.job_id).await;
+    assert_eq!(events.len(), 2);
+    let old_worker = events[1].1.clone();
+    // A competing claim before expiry does not acquire or emit lifecycle evidence.
+    f.pipeline
+        .tick_job(f.settings.clone(), &intent.id)
+        .await
+        .unwrap();
+    assert_eq!(lifecycle_events(&f.store, &intent.job_id).await, events);
+    let mut tx = f.store.begin_write().await.unwrap();
+    sqlx::query("UPDATE acquisition_runs SET work_until = 0 WHERE id = ?")
+        .bind(&intent.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    // The replacement returns through cancellation without waiting on the blocked server.
+    sqlx::query("UPDATE jobs SET state = 'cancel_requested' WHERE id = ?")
+        .bind(&intent.job_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    f.pipeline
+        .tick_job(f.settings.clone(), &intent.id)
+        .await
+        .unwrap();
+    let events = lifecycle_events(&f.store, &intent.job_id).await;
+    assert_eq!(events.len(), 4);
+    assert_ne!(events[2].1, old_worker);
+    assert_eq!(events[2].1, events[3].1);
+    assert_eq!(events[3].0, "acquisition_claim_returned");
+    release.notify_one();
+    worker.await.unwrap().unwrap();
+    let events = lifecycle_events(&f.store, &intent.job_id).await;
+    assert_eq!(events.len(), 5);
+    assert_eq!(events[4], ("acquisition_claim_returned".into(), old_worker));
+    assert_eq!(f.server.seen.lock().unwrap().submissions, 0);
+}
+
+#[tokio::test]
+async fn lifecycle_aborted_work_stays_unmatched_across_reopen() {
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("aborted-lifecycle").await;
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    {
+        let mut seen = f.server.seen.lock().unwrap();
+        seen.payload_started = Some(started.clone());
+        seen.payload_release = Some(release.clone());
+    }
+    mock::allow_search(&f.store).await;
+    let pipeline = f.pipeline.clone();
+    let settings = f.settings.clone();
+    let id = intent.id.clone();
+    let worker = tokio::spawn(async move { pipeline.tick_job(settings, &id).await });
+    started.notified().await;
+    worker.abort();
+    assert!(worker.await.unwrap_err().is_cancelled());
+    release.notify_one();
+    let before = lifecycle_events(&f.store, &intent.job_id).await;
+    assert_eq!(before.len(), 2);
+    assert_eq!(before[1].0, "acquisition_claim_started");
+    f.store.close().await;
+    let store = SqliteStore::open(f.dir.path()).await.unwrap();
+    assert_eq!(lifecycle_events(&store, &intent.job_id).await, before);
+    assert_eq!(f.server.seen.lock().unwrap().submissions, 0);
+}
+
+#[tokio::test]
+async fn lifecycle_historical_acquisition_is_not_marked_covered() {
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("historical-lifecycle").await;
+    let mut tx = f.store.begin_write().await.unwrap();
+    sqlx::query("DELETE FROM job_events WHERE job_id = ? AND event = 'acquisition_lifecycle_v1'")
+        .bind(&intent.job_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    f.submit(&intent.id).await;
+    let events = lifecycle_events(&f.store, &intent.job_id).await;
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].0, "acquisition_claim_started");
+    assert_eq!(events[1].0, "acquisition_claim_returned");
+    assert_eq!(events[0].1, events[1].1);
+}
+
+#[tokio::test]
 async fn lost_response_is_fenced_across_reopen_and_generic_retry() {
     let f = Fixture::new(ContentType::Comic, false).await;
     let intent = f.create("lost-response").await;
