@@ -45,8 +45,15 @@ impl Fixture {
             .await
             .unwrap()
             .secret;
+        let key = libraryd::settings::EncryptionKey::load_or_create(directory.path())
+            .await
+            .unwrap();
         Self {
-            app: app::router(store.clone()),
+            app: app::router_with_settings(
+                store.clone(),
+                "http://127.0.0.1:8787",
+                libraryd::settings::Settings::new(store.clone(), key),
+            ),
             directory,
             store,
             read,
@@ -234,6 +241,24 @@ async fn review_feed_keeps_each_source_access_rule() {
     let fixture = Fixture::new().await;
     fixture.exec(CATALOG).await;
     fixture.exec(REVIEW).await;
+    let path = "/api/v1/acquisition/acq-own/review";
+    assert_eq!(
+        fixture.get(path, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fixture
+            .get("/api/v1/acquisition/acq-other/review", Some(&fixture.read))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = fixture.get(path, Some(&fixture.read)).await;
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let review = fixture.json(path, &fixture.read).await;
+    assert_eq!(review["acquisition"]["id"], "acq-own");
+    assert_eq!(review["revision"], 0);
+    assert_eq!(review["lifecycle"], "unproven");
     let response = fixture.get("/api/v1/review", Some(&fixture.manage)).await;
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let feed = fixture.json("/api/v1/review", &fixture.manage).await;

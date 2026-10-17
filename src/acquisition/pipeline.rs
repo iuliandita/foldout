@@ -119,6 +119,19 @@ pub struct Acquisition {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AcquisitionReview {
+    pub acquisition: Acquisition,
+    pub revision: i64,
+    pub lifecycle: ReviewLifecycle,
+}
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewLifecycle {
+    Returned,
+    Unproven,
+}
+
 #[derive(Clone)]
 pub struct Pipeline {
     store: SqliteStore,
@@ -258,6 +271,76 @@ impl Pipeline {
             .bind(id).bind(owner).fetch_optional(self.store.reader()).await?.ok_or(PipelineError::NotFound)?;
         view(row)
     }
+
+    pub async fn review(&self, owner: &str, id: &str) -> Result<AcquisitionReview, PipelineError> {
+        let mut tx = self.store.reader().begin().await?;
+        let row = sqlx::query("SELECT a.*, i.job_id, (SELECT COUNT(*) FROM acquisition_receipts r WHERE r.acquisition_id = a.id) AS receipt_count FROM acquisition_runs a JOIN acquisition_intents i ON i.id = a.id WHERE a.id = ? AND i.caller = ?")
+            .bind(id).bind(owner).fetch_optional(&mut *tx).await?.ok_or(PipelineError::NotFound)?;
+        if !matches!(
+            row.try_get::<&str, _>("state")?,
+            "needs_review" | "downloaded" | "completed" | "canceled"
+        ) {
+            return Err(PipelineError::Conflict);
+        }
+        let no_claim = row.try_get::<Option<String>, _>("work_token")?.is_none()
+            && row.try_get::<Option<i64>, _>("work_until")?.is_none();
+        let events =
+            sqlx::query("SELECT id, event, worker FROM job_events WHERE job_id = ? ORDER BY id")
+                .bind(row.try_get::<&str, _>("job_id")?)
+                .fetch_all(&mut *tx)
+                .await?;
+        let revision = events
+            .last()
+            .map(|e| e.try_get("id"))
+            .transpose()?
+            .unwrap_or(0);
+        let mut valid = no_claim && events.len() >= 2;
+        let mut started = std::collections::HashSet::new();
+        let mut returned = std::collections::HashSet::new();
+        for (index, event) in events.iter().enumerate() {
+            let name: &str = event.try_get("event")?;
+            let worker: Option<String> = event.try_get("worker")?;
+            if index == 0 {
+                valid &= name == "enqueue" && worker.is_none();
+            }
+            if index == 1 {
+                valid &= name == "acquisition_lifecycle_v1" && worker.is_none();
+            }
+            match name {
+                "acquisition_lifecycle_v1" => valid &= index == 1 && worker.is_none(),
+                "acquisition_claim_started" | "acquisition_claim_returned" => {
+                    let Some(worker) = worker else {
+                        valid = false;
+                        continue;
+                    };
+                    valid &= index > 1
+                        && worker.len() == 43
+                        && worker
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+                    if name == "acquisition_claim_started" {
+                        valid &= started.insert(worker);
+                    } else {
+                        valid &= started.contains(&worker) && returned.insert(worker);
+                    }
+                }
+                _ => {}
+            }
+        }
+        valid &= started == returned;
+        let acquisition = view(row)?;
+        tx.commit().await?;
+        Ok(AcquisitionReview {
+            acquisition,
+            revision,
+            lifecycle: if valid {
+                ReviewLifecycle::Returned
+            } else {
+                ReviewLifecycle::Unproven
+            },
+        })
+    }
+
     pub async fn list(
         &self,
         owner: &str,
