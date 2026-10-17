@@ -192,6 +192,85 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn terminal_review_checks_ownership_revision_and_lifecycle_without_writes() {
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("terminal-review").await;
+    assert!(matches!(
+        f.pipeline.review("owner", &intent.id).await,
+        Err(PipelineError::Conflict)
+    ));
+    assert!(matches!(
+        f.pipeline.review("other", &intent.id).await,
+        Err(PipelineError::NotFound)
+    ));
+    f.submit(&intent.id).await;
+    let mut tx = f.store.begin_write().await.unwrap();
+    sqlx::query("UPDATE acquisition_runs SET state = 'needs_review' WHERE id = ?")
+        .bind(&intent.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let first = f.pipeline.review("owner", &intent.id).await.unwrap();
+    assert_eq!(first.lifecycle, ReviewLifecycle::Returned);
+    assert!(first.revision > 0);
+    let replay = f.pipeline.review("owner", &intent.id).await.unwrap();
+    assert_eq!(first.revision, replay.revision);
+    assert_eq!(
+        serde_json::to_value(&first).unwrap(),
+        serde_json::to_value(&replay).unwrap()
+    );
+    let mut tx = f.store.begin_write().await.unwrap();
+    sqlx::query("INSERT INTO job_events(job_id,event,to_state,created_at) VALUES (?,'review_test','needs_review',0)")
+        .bind(&intent.job_id).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let updated = f.pipeline.review("owner", &intent.id).await.unwrap();
+    assert!(updated.revision > first.revision);
+    assert_eq!(f.server.seen.lock().unwrap().submissions, 1);
+}
+
+#[tokio::test]
+async fn terminal_review_fails_closed_on_incomplete_or_malformed_coverage() {
+    for change in [
+        "DELETE FROM job_events WHERE job_id = ? AND event = 'acquisition_lifecycle_v1'",
+        "DELETE FROM job_events WHERE job_id = ? AND event = 'acquisition_claim_returned'",
+        "DELETE FROM job_events WHERE job_id = ? AND event = 'acquisition_claim_started'",
+        "UPDATE job_events SET worker = NULL WHERE job_id = ? AND event = 'acquisition_claim_started'",
+        "UPDATE job_events SET worker = 'malformed' WHERE job_id = ? AND event LIKE 'acquisition_claim_%'",
+        "INSERT INTO job_events(job_id,event,to_state,worker,created_at) SELECT job_id,event,to_state,worker,created_at FROM job_events WHERE job_id = ? AND event = 'acquisition_claim_returned'",
+        "INSERT INTO job_events(job_id,event,to_state,worker,created_at) SELECT job_id,event,to_state,worker,created_at FROM job_events WHERE job_id = ? AND event = 'acquisition_claim_started'",
+        "INSERT INTO job_events(job_id,event,to_state,created_at) VALUES (?,'acquisition_lifecycle_v1','needs_review',0)",
+        "UPDATE acquisition_runs SET work_token = 'expired', work_until = 0 WHERE id = (SELECT id FROM acquisition_intents WHERE job_id = ?)",
+    ] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("malformed-review").await;
+        f.submit(&intent.id).await;
+        let mut tx = f.store.begin_write().await.unwrap();
+        sqlx::query("UPDATE acquisition_runs SET state = 'needs_review' WHERE id = ?")
+            .bind(&intent.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(change)
+            .bind(&intent.job_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(
+            f.pipeline
+                .review("owner", &intent.id)
+                .await
+                .unwrap()
+                .lifecycle,
+            ReviewLifecycle::Unproven,
+            "{change}"
+        );
+        assert_eq!(f.server.seen.lock().unwrap().submissions, 1);
+    }
+}
+
+#[tokio::test]
 async fn lifecycle_evidence_covers_creation_and_each_actual_return() {
     let f = Fixture::new(ContentType::Comic, false).await;
     let intent = f.create("lifecycle").await;
@@ -272,6 +351,14 @@ async fn lifecycle_displaced_claim_returns_only_when_its_work_returns() {
     assert_ne!(events[2].1, old_worker);
     assert_eq!(events[2].1, events[3].1);
     assert_eq!(events[3].0, "acquisition_claim_returned");
+    assert_eq!(
+        f.pipeline
+            .review("owner", &intent.id)
+            .await
+            .unwrap()
+            .lifecycle,
+        ReviewLifecycle::Unproven
+    );
     release.notify_one();
     worker.await.unwrap().unwrap();
     let events = lifecycle_events(&f.store, &intent.job_id).await;

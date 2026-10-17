@@ -599,6 +599,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/acquisition/{id}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Owner-scoped evidence, not recovery eligibility. */
+        get: operations["reviewAcquisition"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/acquisition/{id}/files": {
         parameters: {
             query?: never;
@@ -1565,6 +1582,19 @@ export interface components {
         AcquisitionState: "queued" | "downloading" | "downloaded" | "importing" | "completed" | "needs_review" | "canceled";
         /** @enum {string} */
         AcquisitionReason: "uncertain_submission" | "source_unavailable" | "configuration_changed" | "unsupported_torrent" | "invalid_payload" | "client_unavailable" | "client_job_missing" | "download_failed" | "unknown_client_state" | "file_association_required" | "import_review_required" | "cancel_requires_review" | "selection_review_required" | "duplicate_torrent";
+        AcquisitionReview: {
+            acquisition: components["schemas"]["Acquisition"];
+            /**
+             * Format: int64
+             * @description Latest job-event ID.
+             */
+            revision: number;
+            /**
+             * @description Claim returns only, not recovery validation.
+             * @enum {string}
+             */
+            lifecycle: "returned" | "unproven";
+        };
         Acquisition: {
             id: string;
             job_id: string;
@@ -4310,6 +4340,38 @@ export interface operations {
             };
             /** @description unavailable: authentication temporarily unavailable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    reviewAcquisition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Terminal review snapshot */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcquisitionReview"];
+                };
+            };
+            /** @description Request failed */
+            default: {
                 headers: {
                     [name: string]: unknown;
                 };
