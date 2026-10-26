@@ -13,7 +13,7 @@ RUN ./scripts/generate-api /tmp/schema.d.ts \
     && ./scripts/bun run --cwd web check \
     && ./scripts/bun run --cwd web build
 
-FROM rust:1.99.0-alpine3.23@sha256:42c2519fdf75d9e34cc61a1aaf34b1a684da9bfd65fe5daefef98d92a801b001 AS backend
+FROM rust:1.99.1-alpine3.23@sha256:2a941e16ec6e357ff7112e92336087772584122b6ae4b30eb36cb9adff5b5458 AS backend
 ARG TARGETARCH
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
@@ -45,7 +45,7 @@ RUN case "$TARGETARCH" in \
     && tar -xJf archive.tar.xz 7zzs License.txt readme.txt \
     && chmod 755 7zzs
 
-FROM rust:1.98.1-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 AS backend-debian
+FROM rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS backend-debian
 ARG TARGETARCH
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
