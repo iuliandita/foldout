@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS frontend
+FROM oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS frontend
 WORKDIR /build
 COPY tools/package.json tools/bun.lock ./tools/
 RUN bun install --cwd tools --frozen-lockfile
@@ -13,7 +13,7 @@ RUN ./scripts/generate-api /tmp/schema.d.ts \
     && ./scripts/bun run --cwd web check \
     && ./scripts/bun run --cwd web build
 
-FROM rust:1.99.0-alpine3.23@sha256:42c2519fdf75d9e34cc61a1aaf34b1a684da9bfd65fe5daefef98d92a801b001 AS backend
+FROM rust:1.99.1-alpine3.23@sha256:2a941e16ec6e357ff7112e92336087772584122b6ae4b30eb36cb9adff5b5458 AS backend
 ARG TARGETARCH
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
@@ -30,7 +30,7 @@ RUN --mount=type=cache,id=libraryd-rust-${TARGETARCH},target=/build/target,shari
     LIBRARY_BUILD_COMMIT=${LIBRARY_BUILD_COMMIT} cargo build --locked --offline --release --features embedded-ui \
     && cp /build/target/release/libraryd /build/libraryd
 
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS archive
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS archive
 ARG TARGETARCH
 RUN apk add --no-cache ca-certificates xz tar
 WORKDIR /archive
@@ -45,7 +45,7 @@ RUN case "$TARGETARCH" in \
     && tar -xJf archive.tar.xz 7zzs License.txt readme.txt \
     && chmod 755 7zzs
 
-FROM rust:1.98.1-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 AS backend-debian
+FROM rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS backend-debian
 ARG TARGETARCH
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
@@ -64,7 +64,7 @@ RUN --mount=type=cache,id=libraryd-rust-debian-${TARGETARCH},target=/build/targe
     LIBRARY_BUILD_COMMIT=${LIBRARY_BUILD_COMMIT} cargo build --locked --offline --release --features embedded-ui \
     && cp /build/target/release/libraryd /build/libraryd
 
-FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS debian
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS debian
 COPY --from=archive /archive/7zzs /usr/bin/7z
 COPY --from=archive /archive/License.txt /archive/readme.txt /usr/share/licenses/7zip/
 RUN apt-get update \
@@ -88,7 +88,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD wget -q -O /dev/null http://127.0.0.1:8787/health/ready || exit 1
 ENTRYPOINT ["/bin/sh", "-c", "umask 077; exec /usr/local/bin/libraryd \"$@\"", "libraryd"]
 
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 COPY --from=archive /archive/7zzs /usr/bin/7z
 COPY --from=archive /archive/License.txt /archive/readme.txt /usr/share/licenses/7zip/
 RUN apk add --no-cache ca-certificates poppler-utils util-linux-misc libgcc \
