@@ -19,9 +19,9 @@ automatically repaired. Keep SQLite on local storage, not NFS or SMB. Mount medi
 roots separately, read-only for scans; explicitly grant write access only to roots
 intended for imports. Preserve the same media paths when recovering a catalog.
 
-The local toolchain pins Rust 1.98.1. The default container builder pins Rust
-1.99.0 on Alpine 3.23; the runtime pins Alpine 3.24.2, and the frontend builder
-pins Bun 1.4.3. Container base images use registry manifest digests. Build tools install separately under `tools/`, including TypeScript 5 for
+The local toolchain pins Rust 1.99.1. The default container builder pins Rust
+1.99.1 on Alpine 3.23; the runtime pins Alpine 3.24.3, and the frontend builder
+pins Bun 1.4.4. Container base images use registry manifest digests. Build tools install separately under `tools/`, including TypeScript 5 for
 the API generator. Frontend TypeScript 7 stays under `web/`. The build checks the
 generated API types, type-checks and compiles the frontend, and embeds its assets
 in the release executable. The runtime contains neither Bun nor Rust.
@@ -45,7 +45,7 @@ problems, build the glibc-based Debian variant locally with a distinct tag:
 docker build --target debian -t libraryd:0.1.0-debian .
 ```
 
-The `debian` target pins the Rust 1.98.1 trixie builder and Debian trixie-slim
+The `debian` target pins the Rust 1.99.1 trixie builder and Debian trixie-slim
 runtime by registry manifest digest. It shares the frontend assets and static
 7-Zip executable with Alpine. Debian packages supply `poppler-utils` and
 `util-linux` for the PDF tools and `prlimit`, plus `wget` for the health check.
