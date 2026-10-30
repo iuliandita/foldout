@@ -2871,6 +2871,24 @@
         ]
       }
     },
+    "/api/v1/acquisition/{id}/review": {
+      "get": {
+        "operationId": "reviewAcquisition",
+        "description": "Owner-scoped evidence, not recovery eligibility.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {
+            "description": "Terminal review snapshot",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AcquisitionReview"}}},
+            "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}
+          },
+          "default": {
+            "description": "Request failed",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          }
+        }
+      }
+    },
     "/api/v1/acquisition/{id}/files": {
       "post": {
         "operationId": "associateAcquisitionFile",
@@ -7934,6 +7952,16 @@
           "selection_review_required",
           "duplicate_torrent"
         ]
+      },
+      "AcquisitionReview": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["acquisition", "revision", "lifecycle"],
+        "properties": {
+          "acquisition": {"$ref": "#/components/schemas/Acquisition"},
+          "revision": {"type": "integer", "format": "int64", "minimum": 0, "description": "Latest job-event ID."},
+          "lifecycle": {"type": "string", "enum": ["returned", "unproven"], "description": "Claim returns only, not recovery validation."}
+        }
       },
       "Acquisition": {
         "type": "object",

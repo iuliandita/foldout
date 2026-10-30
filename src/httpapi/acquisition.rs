@@ -28,6 +28,7 @@ pub fn routes(context: AcquisitionContext) -> Router {
         .route("/api/v1/acquisition", get(list).post(create))
         .route("/api/v1/acquisition/roots", get(roots))
         .route("/api/v1/acquisition/{id}", get(detail))
+        .route("/api/v1/acquisition/{id}/review", get(review))
         .route("/api/v1/acquisition/{id}/files", post(associate_file))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(context)
@@ -81,6 +82,20 @@ async fn detail(
     )
         .into_response())
 }
+
+async fn review(
+    State(context): State<AcquisitionContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(&context.auth, &headers, &Method::GET, Scope::Read).await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(context.pipeline.review(&principal.user_id, &id).await?),
+    )
+        .into_response())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Page {
