@@ -61,7 +61,7 @@ with the server version, nightly tag or source commit and a minimal reproduction
 Redact credentials, tokens, personal data and private paths from diagnostics.
 Keep original media read-only, use disposable state, and follow the
 [backup and restore guidance](docs/operations.md#backup-commands) before upgrades.
-See [contributing](CONTRIBUTING.md) and [private security reporting](SECURITY.md).
+See [contributing](CONTRIBUTING.md), the [documentation routing map](docs/MAINTENANCE.md), and [private security reporting](SECURITY.md).
 
 Foldout code is [MIT licensed](LICENSE). Fixture and third-party notices retain
 their own terms: [original fixtures](tests/fixtures/LICENSE.txt) and
