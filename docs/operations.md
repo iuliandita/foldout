@@ -349,11 +349,17 @@ same replacement. Preserve leftover partials for local inspection and never adop
 them into the new intent. Published downloads and imported library files are outside discard.
 
 For compatibility, older pre-release checkpoints with token-derived MangaDex
-page identities or only unqualified Last-Modified evidence require explicit restart.
+page identities require explicit restart. Partials with saved bytes and only
+unqualified Last-Modified evidence also require explicit restart.
 MangaDex page identity now uses chapter hash plus filename; temporary nodes and
 tokens are re-resolved rather than persisted. Malformed checkpoint records keep
 review/restart available and refuse resume. Never-started expected pages with no
 checkpoint can be absent or empty and fetch fresh under the unchanged manifest.
+An incomplete MangaDex checkpoint at offset zero also fetches fresh after a kill
+or deadline, since header capture does not prove any durable page bytes. Missing
+or empty files need no old HTTP validator; an extra tail can be truncated to zero
+only for the recorded private staging inode and matching empty-prefix hash.
+Existing complete pages stay verified and reusable. Archive recovery stays strict.
 For rollback, keep the previous executable and pre-upgrade backup. Older executables reject the newer schema. Stop the upgraded service and
 restore the pre-upgrade backup into a fresh state directory with the previous
 executable; there is no in-place downgrade. Do not clear attempted or manifest

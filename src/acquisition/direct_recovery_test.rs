@@ -18,6 +18,7 @@ enum Behavior {
     Twice,
     FirstPageCut,
     Paused,
+    PausedPage,
     Large,
     FreshAll,
 }
@@ -90,6 +91,7 @@ impl RangeFixture {
                     Behavior::NoValidators
                     | Behavior::DateOnly
                     | Behavior::WeakDate
+                    | Behavior::PausedPage
                     | Behavior::MissingDate => "",
                     Behavior::WeakEtag => "ETag: W/\"owned\"\r\n",
                     Behavior::ChangedEtag if is_resume => "ETag: \"changed\"\r\n",
@@ -165,7 +167,9 @@ impl RangeFixture {
                     };
                 let date = match behavior {
                     Behavior::MissingDate => "",
-                    Behavior::WeakDate => "Date: Wed, 21 Oct 2026 10:00:00 GMT\r\n",
+                    Behavior::WeakDate | Behavior::PausedPage => {
+                        "Date: Wed, 21 Oct 2026 10:00:00 GMT\r\n"
+                    }
                     _ => "Date: Fri, 23 Oct 2026 10:00:00 GMT\r\n",
                 };
                 let headers = format!(
@@ -181,6 +185,9 @@ impl RangeFixture {
                     released.notified().await;
                 }
                 stream.write_all(body).await.unwrap();
+                if behavior == Behavior::PausedPage && request.contains("second.png") {
+                    released.notified().await;
+                }
                 stream.shutdown().await.unwrap();
             }
         });
@@ -1076,6 +1083,127 @@ async fn manga_rotation_and_never_started_middle_page_use_fresh_manifest_locatio
         if unstarted {
             assert!(requests[1..].iter().all(|r| !r.contains("range:")));
         }
+    }
+}
+
+#[tokio::test]
+async fn manga_header_checkpoint_survives_dropped_transfer_and_refetches_only_unstarted_page() {
+    use std::io::Write;
+    let _serial = TEST_GATE.lock().await;
+    for disposition in ["empty", "missing", "tail", "replaced_tail"] {
+        let mut f = Fixture::manga().await;
+        let mut first = RangeFixture::with_pages(f.store.clone(), Behavior::PausedPage, true).await;
+        f.direct.fixture = Some(first.address);
+        let intent = f.enqueue("header-only-cancellation").await;
+        let journal = Journal {
+            store: f.store.clone(),
+            acquisition_id: intent.id.clone(),
+        };
+        let mut transfer = Box::pin(f.direct.tick(f.settings.clone()));
+        tokio::select! {
+            result = &mut transfer => panic!("page must remain in flight: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    if let Ok(Some(checkpoint)) = journal.load(2).await
+                        && checkpoint.unstarted()
+                        && first.requests.lock().unwrap().len() == 2
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }) => {
+                if result.is_err() {
+                    let first_page = journal.load(1).await;
+                    let second_page = journal.load(2).await;
+                    panic!("second page headers timed out: requests={:?}; first={first_page:?}; second={second_page:?}", first.requests.lock().unwrap());
+                }
+            },
+        }
+        // Cancel before the body-error path can flush the buffered page prefix.
+        drop(transfer);
+        first.task.abort();
+        assert!((&mut first.task).await.unwrap_err().is_cancelled());
+        let staging = f
+            .source
+            .path()
+            .join(format!(".library-downloads/{}", intent.id));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while std::fs::read_dir(&staging).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("library-manga-")
+            }) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("cancelled chapter supervisor must finish cleanup");
+        let checkpoint = journal.load(2).await.unwrap().unwrap();
+        assert!(checkpoint.unstarted());
+        assert!(checkpoint.etag.is_none() && !checkpoint.last_modified_strong);
+        let page = staging.join("page-000002.partial");
+        assert_eq!(std::fs::metadata(&page).unwrap().len(), 0);
+        let completed = serde_json::to_value(journal.load(1).await.unwrap().unwrap()).unwrap();
+        assert_eq!(completed["complete"], true);
+        match disposition {
+            "missing" => std::fs::remove_file(&page).unwrap(),
+            "tail" => {
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&page)
+                    .unwrap();
+                file.write_all(b"uncommitted body tail").unwrap();
+                file.sync_all().unwrap();
+            }
+            "replaced_tail" => {
+                let original = File::open(&page).unwrap();
+                std::fs::remove_file(&page).unwrap();
+                std::fs::write(&page, b"unowned replacement tail").unwrap();
+                assert_ne!(
+                    identity(&original).unwrap(),
+                    identity(&File::open(&page).unwrap()).unwrap()
+                );
+            }
+            _ => {}
+        }
+        let second = RangeFixture::with_pages(f.store.clone(), Behavior::FreshAll, true).await;
+        f.direct.fixture = Some(second.address);
+        f.tick().await; // Startup recovery retains attempted and marks the killed attempt for review.
+        let review = f.direct.review("owner", &intent.id).await.unwrap();
+        if disposition == "replaced_tail" {
+            assert!(!review.resume.eligible);
+            assert!(matches!(
+                f.direct
+                    .resume_transfer(&f.settings, "owner", &intent.id, action(&review))
+                    .await,
+                Err(DirectError::RestartRequired)
+            ));
+            assert!(second.requests.lock().unwrap().is_empty());
+            assert_eq!(std::fs::read(&page).unwrap(), b"unowned replacement tail");
+        } else {
+            assert!(review.resume.eligible, "{disposition}: {review:?}");
+            let downloaded = f
+                .direct
+                .resume_transfer(&f.settings, "owner", &intent.id, action(&review))
+                .await
+                .unwrap();
+            assert_eq!(downloaded.state, "downloaded");
+            {
+                let requests = second.requests.lock().unwrap();
+                assert_eq!(requests.len(), 1);
+                assert!(requests[0].contains("second.png"));
+                assert!(!requests[0].contains("range:"));
+            }
+            assert_eq!(
+                serde_json::to_value(journal.load(1).await.unwrap().unwrap()).unwrap(),
+                completed
+            );
+            assert!(journal.load(2).await.unwrap().unwrap().complete);
+        }
+        assert_eq!(first.requests.lock().unwrap().len(), 2);
     }
 }
 

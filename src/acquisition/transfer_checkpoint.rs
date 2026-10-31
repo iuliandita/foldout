@@ -32,6 +32,9 @@ pub(crate) struct Checkpoint {
     pub complete: bool,
 }
 impl Checkpoint {
+    pub fn unstarted(&self) -> bool {
+        !self.complete && self.offset == 0
+    }
     pub fn eligible(&self) -> bool {
         self.offset > 0
             && self
@@ -348,7 +351,7 @@ impl Transfer<'_> {
             resume,
             image,
         } = *self;
-        let previous = if resume {
+        let mut previous = if resume {
             journal
                 .ok_or(DirectError::ResumeUnavailable)?
                 .load(ordinal)
@@ -358,6 +361,14 @@ impl Transfer<'_> {
         };
         if journal.is_some() {
             check_private(file)?;
+        }
+        if image && previous.as_ref().is_some_and(Checkpoint::unstarted) {
+            let checkpoint = previous.take().ok_or(DirectError::RestartRequired)?;
+            if file.metadata().map_err(|_| DirectError::LocalReview)?.len() > 0 {
+                // A header-only checkpoint owns no reusable bytes. Verify ownership and
+                // its empty prefix before discarding an uncommitted staging tail.
+                checkpoint.verify(file).await?;
+            }
         }
         let mut writer = if let Some(previous) = &previous {
             if image && previous.complete {

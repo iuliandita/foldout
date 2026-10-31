@@ -55,7 +55,7 @@ fetch a fresh review. `direct_busy` means retry later. An exact committed restar
 replay returns the same replacement instead of creating another intent.
 
 Resume re-resolves the persisted selection handle; no resolved URL is stored.
-A started partial needs `Accept-Ranges: bytes`, a known total length and a strong
+Appending to a partial needs `Accept-Ranges: bytes`, a known total length and a strong
 ETag or strong Last-Modified. Last-Modified qualifies only when the response Date
 is at least one second later; otherwise review reports
 `transfer_validator_not_strong`. Range uses If-Range, preferring the strong ETag.
@@ -64,6 +64,7 @@ content type may append. Archive origin must also remain unchanged. Missing
 validators or byte-range support require an explicit reviewed restart.
 
 Resume returns 202 with `state: downloading` immediately after its fence commits.
+The response uses the row returned by that update, without a post-commit read.
 The task continues if the caller disconnects. Poll
 `GET /api/v1/direct/acquisitions/{id}` until it leaves downloading. A transfer
 failure becomes `needs_review` with `transfer_restart_required`,
@@ -76,11 +77,15 @@ its saved SHA-256; a mismatched or shortened prefix requires restart.
 MangaDex requires the exact manifest identity and ordered chapter-hash/filename
 page identities, independent of the temporary node URL or token. A fresh at-home
 resolution may rotate nodes while retaining the same manifest. Started pages
-must match their recorded size/hash; incomplete pages also need stable HTTP
+must match their recorded size/hash; incomplete pages with saved bytes need stable HTTP
 validators. Complete verified pages are reused without another GET. A NULL
-checkpoint with an absent or zero-byte expected page means never started and
-fetches from zero. Missing checkpointed pages, missing manifest rows, changed
-manifests and extra pages require restart. Packaging and archive validation still
+checkpoint or an incomplete checkpoint at offset zero means no reusable bytes;
+an absent or empty expected page fetches fresh without Range or old validators.
+An uncommitted tail at offset zero is discarded only after verifying its staging
+ownership, recorded inode and empty-prefix hash. GET remains read-only. Archives
+keep their strict offset-zero refusal. Missing pages with saved bytes or complete
+checkpoints, missing manifest rows, changed manifests and extra pages require
+restart. Packaging and archive validation still
 precede import. Fixtures exercise these cases on owned loopback servers.
 
 Restart rechecks the selected source, unit and destination, then retires the old

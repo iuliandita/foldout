@@ -95,6 +95,7 @@ impl Direct {
         let blocked = blocked_in(&mut tx, &row).await?;
         let parts = parts_in(&mut tx, acquisition_id).await?;
         tx.commit().await?;
+        let image = row.try_get::<Option<u32>, _>("expected_pages")?.is_some();
         let mut restart_reason = idle_reason(&row, blocked)?;
         if restart_reason.is_none() {
             let source = self
@@ -125,6 +126,7 @@ impl Direct {
         if resume_reason.is_none()
             && parts.iter().filter_map(|p| p.checkpoint.as_ref()).any(|c| {
                 !c.complete
+                    && !(image && c.unstarted())
                     && c.etag.is_none()
                     && c.last_modified.is_some()
                     && !c.last_modified_strong
@@ -255,12 +257,12 @@ impl Direct {
             resolved.language.as_deref(),
         )
         .await?;
-        sqlx::query("UPDATE direct_acquisitions SET state='downloading',reason=NULL,updated_at=unixepoch() WHERE id=?")
-            .bind(acquisition_id).execute(&mut *tx).await?;
+        let accepted = view(sqlx::query("UPDATE direct_acquisitions SET state='downloading',reason=NULL,updated_at=unixepoch() WHERE id=? RETURNING *")
+            .bind(acquisition_id).fetch_one(&mut *tx).await?)?;
         audit(&mut tx, acquisition_id, "resume", &request, None).await?;
         tx.commit().await?;
         if let Some(send) = started.take() {
-            let _ = send.send(self.get(owner, acquisition_id).await);
+            let _ = send.send(Ok(accepted));
         }
         let result = self.finish_transfer(&row, resolved, stage, true).await;
         if let Err(error) = result {
@@ -425,10 +427,7 @@ impl Direct {
             if part.invalid {
                 return Err(DirectError::RestartRequired);
             }
-            let Some(checkpoint) = &part.checkpoint else {
-                if expected_pages.is_none() {
-                    return Err(DirectError::ResumeUnavailable);
-                }
+            if expected_pages.is_some() && part.fresh_page() {
                 let name = page_name(part.ordinal);
                 if page_absent(&stage.job, &name)? {
                     continue;
@@ -439,12 +438,22 @@ impl Direct {
                     || m.nlink() != 1
                     || m.uid() != unsafe { libc::geteuid() }
                     || m.mode() & 0o777 != 0o600
-                    || m.len() != 0
                 {
                     return Err(DirectError::RestartRequired);
                 }
+                if m.len() != 0 {
+                    // Only the action may truncate a header-only checkpoint's owned tail.
+                    part.checkpoint
+                        .as_ref()
+                        .ok_or(DirectError::RestartRequired)?
+                        .check_metadata(&file)?;
+                }
                 continue;
-            };
+            }
+            let checkpoint = part
+                .checkpoint
+                .as_ref()
+                .ok_or(DirectError::ResumeUnavailable)?;
             if !checkpoint.eligible() && !(expected_pages.is_some() && checkpoint.complete) {
                 return Err(DirectError::ResumeUnavailable);
             }
@@ -492,6 +501,11 @@ struct Part {
     identity: String,
     checkpoint: Option<Checkpoint>,
     invalid: bool,
+}
+impl Part {
+    fn fresh_page(&self) -> bool {
+        !self.invalid && self.checkpoint.as_ref().is_none_or(Checkpoint::unstarted)
+    }
 }
 async fn parts_in(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -632,9 +646,9 @@ fn check_page_names(job: &File, parts: &[Part]) -> Result<(), DirectError> {
         .collect::<std::collections::BTreeSet<_>>();
     if !actual.is_subset(&expected)
         || !actual.contains("filepartial")
-        || parts.iter().any(|p| {
-            (p.checkpoint.is_some() || p.invalid) && !actual.contains(&page_name(p.ordinal))
-        })
+        || parts
+            .iter()
+            .any(|p| !p.fresh_page() && !actual.contains(&page_name(p.ordinal)))
     {
         return Err(DirectError::RestartRequired);
     }
