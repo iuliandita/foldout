@@ -677,7 +677,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Requires manage scope. Revision and polling_fingerprint must match the terminal review snapshot, including its immutable import journal. Only needs_review acquisitions stopped with import_review_required and an existing non-Done journal are eligible. Revalidates owner, selection binding, completed owned receipts, client configuration, journal identity and complete actual-return lifecycle evidence in one write transaction while holding the importer lock. An expired lease never proves work stopped. Queues only recovery of the same journal, preserving its policy, source, destination, unit and submission fence; never re-plans or writes to a download client. Move cleanup uses existing destination/catalog/tombstone recovery; changed sources or recorded cleanup errors require review or abandonment. Stale actions and replays return 409. Cookie authentication requires a matching Origin. */
+        /** @description Requires manage scope. Revision and polling_fingerprint must match the terminal review snapshot, including its immutable import journal. Only needs_review acquisitions stopped with import_review_required and an existing non-Done journal are eligible. Validates Move cleanup filesystem evidence and content hashes in a blocking worker before opening the write transaction, while holding the importer lock. The transaction rechecks the revision, fingerprint, owner, selection binding, completed owned receipts, client configuration, journal identity and phase, complete actual-return lifecycle evidence and the captured filesystem metadata without hashing. An expired lease never proves work stopped. Queues only recovery of the same journal, preserving its policy, source, destination, unit and submission fence; never re-plans or writes to a download client. Move cleanup uses existing destination/catalog/tombstone recovery; changed sources or recorded cleanup errors require review or abandonment. Stale actions and replays return 409. Cookie authentication requires a matching Origin. */
         post: operations["resumeAcquisitionImport"];
         delete?: never;
         options?: never;
@@ -5116,7 +5116,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description acquisition_conflict: stale or replayed snapshot, missing, changed or Done journal, changed receipts/configuration, or outstanding or unproven work; Move cleanup errors require review or abandonment */
+            /** @description acquisition_conflict: stale or replayed snapshot, missing, changed or Done journal, changed receipts/configuration, unavailable source root, unsupported Move recovery, or outstanding or unproven work. The importer lock covers the entire destination root, so another acquisition importing into that root can also return this conflict. import_cleanup_review_required: changed Move source identity/content or recorded cleanup error requires review or abandonment; distinct from a stale snapshot. Transient filesystem or worker failures do not recommend abandonment */
             409: {
                 headers: {
                     [name: string]: unknown;

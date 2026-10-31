@@ -495,6 +495,220 @@ async fn resume_import_rejects_unsafe_journals_receipts_configuration_and_work()
 }
 
 #[tokio::test]
+async fn resume_import_rejects_torrent_move_and_mismatched_modes() {
+    for (torrent, change) in [
+        (
+            true,
+            "UPDATE import_operations SET request_json = json_set(request_json, '$.policy', 'Move')",
+        ),
+        (
+            false,
+            "UPDATE import_operations SET identity_json = json_set(identity_json, '$.mode', 'TorrentPreserving')",
+        ),
+    ] {
+        let f = Fixture::new(ContentType::Comic, torrent).await;
+        let intent = f.create("import-mode").await;
+        f.import_review(&intent.id, ImportPolicy::Copy, ImportPhase::Planned)
+            .await;
+        let mut tx = f.store.begin_write().await.unwrap();
+        sqlx::query(change).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        assert!(
+            matches!(
+                f.pipeline
+                    .resume_import(&f.settings, "owner", &intent.id, import_request(&review))
+                    .await,
+                Err(PipelineError::Conflict)
+            ),
+            "{change}"
+        );
+        assert_eq!(
+            f.pipeline
+                .review("owner", &intent.id)
+                .await
+                .unwrap()
+                .revision,
+            review.revision
+        );
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+    }
+}
+
+#[tokio::test]
+async fn resumed_import_rechecks_mode_before_advancing_the_journal() {
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("tick-import-mode").await;
+    let review = f
+        .import_review(&intent.id, ImportPolicy::Copy, ImportPhase::Planned)
+        .await;
+    f.pipeline
+        .resume_import(&f.settings, "owner", &intent.id, import_request(&review))
+        .await
+        .unwrap();
+    let mut tx = f.store.begin_write().await.unwrap();
+    sqlx::query("UPDATE import_operations SET identity_json = json_set(identity_json, '$.mode', 'TorrentPreserving')").execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let requests = f.server.seen.lock().unwrap().requests.clone();
+    f.pipeline
+        .tick_job(f.settings.clone(), &intent.id)
+        .await
+        .unwrap();
+    let acquisition = f.pipeline.get("owner", &intent.id).await.unwrap();
+    assert_eq!(acquisition.state, AcquisitionState::NeedsReview);
+    assert_eq!(
+        acquisition.reason,
+        Some(AcquisitionReason::ImportReviewRequired)
+    );
+    let service = ImportService::new(f.store.clone());
+    assert_eq!(
+        service
+            .get(review.acquisition.import_id.as_ref().unwrap())
+            .await
+            .unwrap()
+            .phase,
+        ImportPhase::Planned
+    );
+    assert!(!f.destination.path().join("selected.cbz").exists());
+    assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+}
+
+#[tokio::test]
+async fn import_resume_transaction_never_waits_for_hash_slots_and_rechecks_filesystem_facts() {
+    for changed in [false, true] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("import-preflight").await;
+        let review = f
+            .import_review(&intent.id, ImportPolicy::Move, ImportPhase::CleanupPending)
+            .await;
+        let request = import_request(&review);
+        let validated = f
+            .pipeline
+            .prepare_import("owner", &intent.id, &request)
+            .await
+            .unwrap();
+        let slots = crate::library::roots::hash_slots();
+        let _permits = slots.acquire_many(2).await.unwrap();
+        if changed {
+            let source = f.source.path().join("owned.cbz");
+            let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
+            let mut bytes = std::fs::read(&source).unwrap();
+            bytes[0] ^= 1;
+            std::fs::write(&source, bytes).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(source)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+        }
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            f.pipeline
+                .apply_import(&f.settings, "owner", &intent.id, &request, validated),
+        )
+        .await
+        .expect("the write transaction must not acquire a hash slot");
+        if changed {
+            assert!(matches!(result, Err(PipelineError::ImportCleanupReview)));
+            assert_eq!(
+                f.pipeline
+                    .review("owner", &intent.id)
+                    .await
+                    .unwrap()
+                    .revision,
+                review.revision
+            );
+        } else {
+            assert_eq!(result.unwrap().state, AcquisitionState::Importing);
+        }
+    }
+}
+
+#[tokio::test]
+async fn import_cleanup_errors_only_recommend_review_for_changed_evidence() {
+    use axum::{http::StatusCode, response::IntoResponse};
+    use http_body_util::BodyExt;
+    for (error, status, code) in [
+        (
+            ImportError::Changed,
+            StatusCode::CONFLICT,
+            "import_cleanup_review_required",
+        ),
+        (
+            ImportError::Worker,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+        ),
+        (
+            ImportError::Io(std::io::ErrorKind::WouldBlock.into()),
+            StatusCode::CONFLICT,
+            "acquisition_conflict",
+        ),
+        (
+            ImportError::Io(std::io::ErrorKind::NotFound.into()),
+            StatusCode::CONFLICT,
+            "acquisition_conflict",
+        ),
+        (
+            ImportError::UnsupportedMove,
+            StatusCode::CONFLICT,
+            "acquisition_conflict",
+        ),
+    ] {
+        let response =
+            crate::httpapi::errors::ApiError::from(import_cleanup_error(error)).into_response();
+        assert_eq!(response.status(), status);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"]["code"], code);
+        if code != "import_cleanup_review_required" {
+            assert!(
+                !body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("abandon")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn resume_import_unavailable_or_replaced_source_root_is_a_generic_conflict() {
+    for replaced in [false, true] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("unavailable-root").await;
+        let review = f
+            .import_review(&intent.id, ImportPolicy::Move, ImportPhase::CleanupPending)
+            .await;
+        let unavailable = f.source.path().with_extension("unavailable");
+        std::fs::rename(f.source.path(), &unavailable).unwrap();
+        if replaced {
+            std::fs::create_dir(f.source.path()).unwrap();
+        }
+        let result = f
+            .pipeline
+            .resume_import(&f.settings, "owner", &intent.id, import_request(&review))
+            .await;
+        if replaced {
+            std::fs::remove_dir(f.source.path()).unwrap();
+        }
+        std::fs::rename(unavailable, f.source.path()).unwrap();
+        assert!(matches!(result, Err(PipelineError::Conflict)));
+        assert_eq!(
+            f.pipeline
+                .review("owner", &intent.id)
+                .await
+                .unwrap()
+                .revision,
+            review.revision
+        );
+    }
+}
+
+#[tokio::test]
 async fn resume_import_requires_actual_returns_and_importer_lock_and_never_replans() {
     let f = Fixture::new(ContentType::Comic, false).await;
     let intent = f.create("locked-import").await;
@@ -588,12 +802,13 @@ async fn resume_import_move_changed_cleanup_requires_review_or_abandonment() {
         } else {
             f.source.path().join("owned.cbz")
         };
-        std::fs::write(&source, b"changed source").unwrap();
+        let original = std::fs::read(&source).unwrap();
         if recorded {
-            assert!(matches!(
-                service.step(import_id).await,
-                Err(ImportError::Changed)
-            ));
+            let mut tx = f.store.begin_write().await.unwrap();
+            sqlx::query("UPDATE import_operations SET last_error = 'file identity or content changed; review is required' WHERE id = ?").bind(import_id).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+        } else {
+            std::fs::write(&source, b"changed source").unwrap();
         }
         let review = f.pipeline.review("owner", &intent.id).await.unwrap();
         let requests = f.server.seen.lock().unwrap().requests.clone();
@@ -611,7 +826,14 @@ async fn resume_import_move_changed_cleanup_requires_review_or_abandonment() {
                 .unwrap()
                 .revision
         );
-        assert_eq!(std::fs::read(&source).unwrap(), b"changed source");
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            if recorded {
+                original
+            } else {
+                b"changed source".to_vec()
+            }
+        );
         assert_eq!(requests, f.server.seen.lock().unwrap().requests);
         assert_eq!(
             service.abandon_move_cleanup(import_id).await.unwrap().phase,

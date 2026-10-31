@@ -189,7 +189,7 @@ fn review_error(error: PipelineError) -> ApiError {
         ),
         PipelineError::ImportCleanupReview => ApiError::new(
             StatusCode::CONFLICT,
-            "acquisition_conflict",
+            "import_cleanup_review_required",
             "Move cleanup requires review or abandonment before recovery",
         ),
         other => other.into(),

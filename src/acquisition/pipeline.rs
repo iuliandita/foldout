@@ -177,6 +177,13 @@ struct MappingValidation {
     destination_root: String,
 }
 
+struct ImportValidation {
+    revision: i64,
+    polling_fingerprint: String,
+    _lock: finalize::ImportLock,
+    cleanup: Option<finalize::RecoveryFacts>,
+}
+
 #[derive(Clone)]
 pub struct Pipeline {
     store: SqliteStore,
@@ -390,29 +397,74 @@ impl Pipeline {
         id: &str,
         request: ResumeImport,
     ) -> Result<Acquisition, PipelineError> {
+        let validated = self.prepare_import(owner, id, &request).await?;
+        self.apply_import(settings, owner, id, &request, validated)
+            .await
+    }
+
+    async fn prepare_import(
+        &self,
+        owner: &str,
+        id: &str,
+        request: &ResumeImport,
+    ) -> Result<ImportValidation, PipelineError> {
         let mut tx = self.store.reader().begin().await?;
-        let (_, operation) = import_review_in(&mut tx, owner, id, &request).await?;
+        let (_, operation) = import_review_in(&mut tx, owner, id, request).await?;
         tx.commit().await?;
         let service = ImportService::new(self.store.clone());
+        let locked = operation.clone();
         let lock = service
-            .blocking(move || finalize::lock(&operation))
+            .blocking(move || finalize::lock(&locked))
             .await
             .map_err(import_recovery_error)?;
-        let mut tx = self.store.begin_write().await?;
-        let (row, operation) = import_review_in(&mut tx, owner, id, &request).await?;
-        validate_owned_receipts_in(&mut tx, settings, id, &row, Some(&operation.id)).await?;
-        if operation.request.policy == ImportPolicy::Move
-            && operation.phase == ImportPhase::CleanupPending
-        {
-            if operation.last_error.is_some() {
-                return Err(PipelineError::ImportCleanupReview);
-            }
-            service
-                .blocking(move || {
-                    finalize::SourceTombstone::open(&operation)?.check_recovery(&operation)
+        let cleanup = operation.request.policy == ImportPolicy::Move
+            && operation.phase == ImportPhase::CleanupPending;
+        if cleanup && operation.last_error.is_some() {
+            return Err(PipelineError::ImportCleanupReview);
+        }
+        let revision = request.revision;
+        let polling_fingerprint = request.polling_fingerprint.clone();
+        service
+            .blocking(move || {
+                let cleanup = if cleanup {
+                    Some(
+                        finalize::SourceTombstone::open_recovery(&operation)?
+                            .check_recovery(&operation)?,
+                    )
+                } else {
+                    None
+                };
+                Ok(ImportValidation {
+                    revision,
+                    polling_fingerprint,
+                    _lock: lock,
+                    cleanup,
                 })
-                .await
-                .map_err(|_| PipelineError::ImportCleanupReview)?;
+            })
+            .await
+            .map_err(import_cleanup_error)
+    }
+
+    async fn apply_import(
+        &self,
+        settings: &Settings,
+        owner: &str,
+        id: &str,
+        request: &ResumeImport,
+        validated: ImportValidation,
+    ) -> Result<Acquisition, PipelineError> {
+        let mut tx = self.store.begin_write().await?;
+        let (row, operation) = import_review_in(&mut tx, owner, id, request).await?;
+        if validated.revision != request.revision
+            || validated.polling_fingerprint != request.polling_fingerprint
+        {
+            return Err(PipelineError::Conflict);
+        }
+        validate_owned_receipts_in(&mut tx, settings, id, &row, Some(&operation.id)).await?;
+        if let Some(facts) = &validated.cleanup {
+            finalize::SourceTombstone::open_recovery(&operation)
+                .and_then(|source| source.check_recovery_facts(&operation, facts))
+                .map_err(import_cleanup_error)?;
         }
         let changed = sqlx::query("UPDATE acquisition_runs SET state = 'importing', reason = NULL, next_poll_at = 0, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND reason = 'import_review_required' AND attempted = 1")
             .bind(id).execute(&mut *tx).await?.rows_affected();
@@ -428,7 +480,7 @@ impl Pipeline {
         sqlx::query("INSERT INTO job_events (job_id, event, from_state, to_state, created_at) VALUES (?, 'acquisition_import_resumed', 'needs_review', 'running', unixepoch())")
             .bind(job_id).execute(&mut *tx).await?;
         tx.commit().await?;
-        drop(lock);
+        drop(validated);
         self.get(owner, id).await
     }
 
@@ -1263,6 +1315,13 @@ fn import_recovery_error(error: ImportError) -> PipelineError {
         ImportError::Database(_) => PipelineError::Database,
         ImportError::Worker => PipelineError::Filesystem,
         _ => PipelineError::Conflict,
+    }
+}
+
+fn import_cleanup_error(error: ImportError) -> PipelineError {
+    match error {
+        ImportError::Changed => PipelineError::ImportCleanupReview,
+        other => import_recovery_error(other),
     }
 }
 
