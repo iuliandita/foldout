@@ -367,9 +367,12 @@ fn combined_label(raw: &str) -> bool {
             let number =
                 |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
             if number(left) && number(right) {
-                return !(left.len() == 4
-                    && right.len() == 2
-                    && validate_date(&format!("{left}-{right}")).is_ok());
+                let year_month = |year: &str, month: &str| {
+                    year.len() == 4
+                        && month.len() == 2
+                        && validate_date(&format!("{year}-{month}")).is_ok()
+                };
+                return !(year_month(left, right) || year_month(right, left));
             }
             let month = |part: &str| {
                 matches!(
@@ -427,6 +430,10 @@ mod tests {
             ("Vol. 3, No. 4", false),
             ("12-A", false),
             ("2024-03", false),
+            ("03/2024", false),
+            ("2024/03", false),
+            ("03-2024", false),
+            ("2024/12", false),
             ("3,4", false),
             (",", false),
             ("3", false),

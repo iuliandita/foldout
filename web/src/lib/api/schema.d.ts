@@ -30,7 +30,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Requires manage scope and matching Origin for cookie writes. Requires a magazine edition. Recomputes Archive metadata server-side, validates reviewed fields with manual unit rules, and atomically creates one unit, its internet_archive provider link and a durable receipt referencing that unit. Hard duplicate checks use only provider identifier or normalized final label in the chosen edition; dates produce warnings. Combined source issues allow kind issue or combined. Same key, owner and body replay the original response; changing owner or body under that key conflicts. No file acquisition or calendar generation. */
+        /** @description Requires manage scope and matching Origin for cookie writes. Requires a magazine edition. Recomputes Archive metadata server-side, validates reviewed fields with manual unit rules, and atomically creates one unit, its internet_archive provider link and a durable receipt referencing that unit. Hard duplicate checks use only provider identifier or normalized final label in the chosen edition; dates produce warnings. Combined source issues allow kind issue or combined. Same key, owner and body replay the original response; changing owner or body under that key conflicts. After a catalog unit is deleted, replaying its old Archive idempotency key performs a fresh accept with server-recomputed metadata instead of returning the deleted unit ID. No file acquisition or calendar generation. */
         post: operations["acceptArchiveUnit"];
         delete?: never;
         options?: never;

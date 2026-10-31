@@ -798,7 +798,7 @@ async fn bounded_http_session(
 
 async fn journal_http_run(directory: &Path, monitor: &Monitor) -> Result<Value> {
     use libraryd::importer::journal::{
-        ImportPhase, ImportPolicy, ImportService, InternalImportRequest,
+        ImportMode, ImportPhase, ImportPolicy, ImportService, InternalImportRequest,
     };
 
     let root_path = directory.join("library");
@@ -901,6 +901,7 @@ async fn journal_http_run(directory: &Path, monitor: &Monitor) -> Result<Value> 
                         unit_id: format!("bench-{index:05}"),
                         policy: ImportPolicy::Copy,
                     },
+                    ImportMode::Standalone,
                 )
                 .await?;
             let completed = service.recover(&id).await?;

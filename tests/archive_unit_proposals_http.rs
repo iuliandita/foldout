@@ -772,7 +772,7 @@ async fn volumes_and_advisory_dates_allow_distinct_issues_in_the_same_month() {
 }
 
 #[tokio::test]
-async fn concurrent_accepts_replay_inside_the_transaction_and_receipts_protect_unit_lifetime() {
+async fn concurrent_accepts_replay_inside_the_transaction_and_deleted_units_accept_fresh() {
     let fixture = Fixture::new().await;
     let body = fixture.accept("year", "1", json!("2024"), "concurrent");
     let (first, second) = tokio::join!(
@@ -796,6 +796,7 @@ async fn concurrent_accepts_replay_inside_the_transaction_and_receipts_protect_u
     assert_eq!(first.0, StatusCode::CREATED, "{}", first.1);
     assert_eq!(first, second);
     assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+    let original = first.clone();
 
     let service = Search::new(fixture.store.clone(), fixture.settings.clone());
     let other_owner = service
@@ -885,16 +886,13 @@ async fn concurrent_accepts_replay_inside_the_transaction_and_receipts_protect_u
             .unwrap(),
         2
     );
-    let unit_id = first.1["unit"]["id"].as_str().unwrap();
+    let unit_id = original.1["unit"]["id"].as_str().unwrap();
     let link: String = sqlx::query_scalar("SELECT id FROM provider_links WHERE unit_id = ?")
         .bind(unit_id)
         .fetch_one(fixture.store.reader())
         .await
         .unwrap();
     catalog.delete_provider_link(&link).await.unwrap();
-    assert!(
-        matches!(catalog.delete_unit(unit_id).await, Err(libraryd::catalog::CatalogError::Dependencies(message)) if message.contains("archive_unit_acceptances"))
-    );
     let mut tx = fixture.store.begin_write().await.unwrap();
     assert!(
         sqlx::query("DELETE FROM units WHERE id = ?")
@@ -911,10 +909,106 @@ async fn concurrent_accepts_replay_inside_the_transaction_and_receipts_protect_u
             "/api/v1/search/archive/accept",
             &fixture.manage,
             None,
-            race
+            body.clone()
         )
         .await,
-        first
+        original
+    );
+    catalog.delete_unit(unit_id).await.unwrap();
+    assert!(
+        !catalog
+            .list_units(&fixture.edition)
+            .await
+            .unwrap()
+            .iter()
+            .any(|unit| unit.id == unit_id)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM archive_unit_acceptances WHERE unit_id = ?"
+        )
+        .bind(unit_id)
+        .fetch_one(fixture.store.reader())
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM archive_unit_acceptances")
+            .fetch_one(fixture.store.reader())
+            .await
+            .unwrap(),
+        1
+    );
+    fixture.cooldown().await;
+    let requests = fixture.requests.load(Ordering::SeqCst);
+    let fresh = call(
+        &fixture.app,
+        "POST",
+        "/api/v1/search/archive/accept",
+        &fixture.manage,
+        None,
+        body,
+    )
+    .await;
+    assert_eq!(fresh.0, StatusCode::CREATED, "{}", fresh.1);
+    assert_ne!(fresh.1["unit"]["id"], original.1["unit"]["id"]);
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), requests + 1);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn archive_receipts_do_not_allow_deleting_units_with_monitor_or_coverage_dependencies() {
+    let fixture = Fixture::new().await;
+    let body = fixture.accept("year", "1", json!("2024"), "dependent-unit");
+    let accepted = call(
+        &fixture.app,
+        "POST",
+        "/api/v1/search/archive/accept",
+        &fixture.manage,
+        None,
+        body.clone(),
+    )
+    .await;
+    assert_eq!(accepted.0, StatusCode::CREATED, "{}", accepted.1);
+    let unit_id = accepted.1["unit"]["id"].as_str().unwrap();
+    let catalog = CatalogRepository::new(fixture.store.clone());
+    let link: String = sqlx::query_scalar("SELECT id FROM provider_links WHERE unit_id = ?")
+        .bind(unit_id)
+        .fetch_one(fixture.store.reader())
+        .await
+        .unwrap();
+    catalog.delete_provider_link(&link).await.unwrap();
+    let mut tx = fixture.store.begin_write().await.unwrap();
+    sqlx::query("INSERT INTO monitors(id,owner,unit_id,integration_id,content_type,query,interval_seconds,selection_policy,enabled,next_run,last_state) VALUES ('monitor','owner',?,?,'magazine','owned',900,'review_only',0,0,'disabled')")
+        .bind(unit_id).bind(&fixture.integration).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO library_files(id,path,format,signature,size_bytes) VALUES ('file','owned.cbz','cbz','owned',1)")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO file_coverage(library_file_id,unit_id,evidence) VALUES ('file',?,'user_confirmed')")
+        .bind(unit_id).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        matches!(catalog.delete_unit(unit_id).await, Err(libraryd::catalog::CatalogError::Dependencies(message)) if message.contains("monitors: 1") && message.contains("file_coverage: 1"))
+    );
+    assert!(
+        catalog
+            .list_units(&fixture.edition)
+            .await
+            .unwrap()
+            .iter()
+            .any(|unit| unit.id == unit_id)
+    );
+    assert_eq!(
+        call(
+            &fixture.app,
+            "POST",
+            "/api/v1/search/archive/accept",
+            &fixture.manage,
+            None,
+            body
+        )
+        .await,
+        accepted
     );
     fixture.stop().await;
 }
