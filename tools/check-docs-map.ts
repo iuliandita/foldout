@@ -1,6 +1,34 @@
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 
+export type DocsArea = { name: string; sources: string[]; docs: string[] };
+
+export function parseDocsMap(map: string): { areas: DocsArea[]; errors: string[] } {
+  const areas: DocsArea[] = [];
+  const errors: string[] = [];
+  const table = map.match(/\| Area \| Sources \| Review docs \|\n\| --- \| --- \| --- \|\n((?:\|[^\n]*\|\n)+)/)?.[1];
+  if (!table) return { areas, errors: ["Malformed map: missing routing table"] };
+  const names = new Set<string>();
+  for (const row of table.trimEnd().split("\n")) {
+    const cells = row.split("|").slice(1, -1).map(cell => cell.trim());
+    if (cells.length !== 3 || !cells[0] || names.has(cells[0])) {
+      errors.push(`Malformed map row: ${row}`);
+      continue;
+    }
+    names.add(cells[0]);
+    if (cells.slice(1).some(cell => !/^`[^`]+`(?:, `[^`]+`)*$/.test(cell))) {
+      errors.push(`Malformed map paths: ${row}`);
+      continue;
+    }
+    const paths = (cell: string) => [...cell.matchAll(/`([^`]+)`/g)].map(match => match[1]);
+    areas.push({ name: cells[0], sources: paths(cells[1]), docs: paths(cells[2]) });
+  }
+  for (const area of ["Configuration", "CLI", "API", "Database", "Backup and encryption", "Reader", "Integrations", "Build and web assets"]) {
+    if (!names.has(area)) errors.push(`Malformed map: missing area ${area}`);
+  }
+  return { areas, errors };
+}
+
 export function checkDocsMap(root: string): string[] {
   const errors: string[] = [];
   root = realpathSync(root);
@@ -19,31 +47,13 @@ export function checkDocsMap(root: string): string[] {
   const mapPath = (path: string) => isAbsolute(path) ? undefined : safePath(root, path);
   const read = (path: string) => readFileSync(resolve(root, path), "utf8");
   const map = read("docs/MAINTENANCE.md");
-  const table = map.match(/\| Area \| Sources \| Review docs \|\n\| --- \| --- \| --- \|\n((?:\|[^\n]*\|\n)+)/)?.[1];
-  if (!table) errors.push("Malformed map: missing routing table");
-  else {
-    const areas = new Set<string>();
-    for (const row of table.trimEnd().split("\n")) {
-      const cells = row.split("|").slice(1, -1).map(cell => cell.trim());
-      if (cells.length !== 3 || !cells[0] || areas.has(cells[0])) {
-        errors.push(`Malformed map row: ${row}`);
-        continue;
-      }
-      areas.add(cells[0]);
-      for (const cell of cells.slice(1)) {
-        if (!/^`[^`]+`(?:, `[^`]+`)*$/.test(cell)) {
-          errors.push(`Malformed map paths: ${row}`);
-          continue;
-        }
-        for (const match of cell.matchAll(/`([^`]+)`/g)) {
-          const file = mapPath(match[1]);
-          if (!file) errors.push(`Map path outside repository: ${match[1]}`);
-          else if (!existsSync(file)) errors.push(`Missing map path: ${match[1]}`);
-        }
-      }
-    }
-    for (const area of ["Configuration", "CLI", "API", "Database", "Backup and encryption", "Reader", "Integrations", "Build and web assets"]) {
-      if (!areas.has(area)) errors.push(`Malformed map: missing area ${area}`);
+  const parsed = parseDocsMap(map);
+  errors.push(...parsed.errors);
+  for (const area of parsed.areas) {
+    for (const path of [...area.sources, ...area.docs]) {
+      const file = mapPath(path);
+      if (!file) errors.push(`Map path outside repository: ${path}`);
+      else if (!existsSync(file)) errors.push(`Missing map path: ${path}`);
     }
   }
   for (const [label, kind] of [["Environment", "environment"], ["Commands", "commands"]]) {

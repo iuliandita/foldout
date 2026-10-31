@@ -22,4 +22,4 @@ The API contract is `api/openapi.yaml`; `scripts/generate-api` generates the web
 - Environment in `src/config.rs`, documented in `README.md`: `LIBRARY_STATE_DIR`, `LIBRARY_LISTEN`, `LIBRARY_ORIGIN`, `LIBRARY_WORKERS`.
 - Commands in `src/cli.rs`, documented in `README.md`: `backup`, `restore`.
 
-The pull-request diff requirement remains pending in [#48](https://github.com/iuliandita/foldout/issues/48).
+The pull-request impact check routes changed sources to review docs or specific explanations; it does not verify their content. Release-range checks are deferred until releases have tags.
