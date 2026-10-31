@@ -4,7 +4,8 @@ use super::{
 };
 use crate::{
     acquisition::pipeline::{
-        AcquisitionRequest, CorrectMapping, FileAssociation, Pipeline, PipelineError, ResumePolling,
+        AcquisitionRequest, CorrectMapping, FileAssociation, Pipeline, PipelineError, ResumeImport,
+        ResumePolling,
     },
     auth::Scope,
     settings::Settings,
@@ -34,6 +35,10 @@ pub fn routes(context: AcquisitionContext) -> Router {
         .route(
             "/api/v1/acquisition/{id}/resume-polling",
             post(resume_polling),
+        )
+        .route(
+            "/api/v1/acquisition/{id}/resume-import",
+            post(resume_import),
         )
         .route(
             "/api/v1/acquisition/{id}/correct-mapping",
@@ -133,6 +138,27 @@ async fn resume_polling(
         .into_response())
 }
 
+async fn resume_import(
+    State(context): State<AcquisitionContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    ApiJson(request): ApiJson<ResumeImport>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(&context.auth, &headers, &Method::POST, Scope::Manage).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(
+            context
+                .pipeline
+                .resume_import(&context.settings, &principal.user_id, &id, request)
+                .await
+                .map_err(review_error)?,
+        ),
+    )
+        .into_response())
+}
+
 async fn correct_mapping(
     State(context): State<AcquisitionContext>,
     headers: HeaderMap,
@@ -160,6 +186,11 @@ fn review_error(error: PipelineError) -> ApiError {
             StatusCode::CONFLICT,
             "acquisition_conflict",
             "Acquisition is not reviewable, the snapshot changed, or the reviewed action is not safe",
+        ),
+        PipelineError::ImportCleanupReview => ApiError::new(
+            StatusCode::CONFLICT,
+            "acquisition_conflict",
+            "Move cleanup requires review or abandonment before recovery",
         ),
         other => other.into(),
     }
@@ -219,6 +250,7 @@ impl From<PipelineError> for ApiError {
                 "not_found",
                 "Acquisition or selection not found",
             ),
+            PipelineError::ImportCleanupReview => review_error(error),
             PipelineError::Conflict => Self::new(
                 StatusCode::CONFLICT,
                 "acquisition_conflict",

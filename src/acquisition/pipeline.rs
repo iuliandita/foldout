@@ -12,7 +12,10 @@ use crate::{
     },
     importer::{
         finalize,
-        journal::{ImportError, ImportMode, ImportPolicy, ImportService, InternalImportRequest},
+        journal::{
+            self, ImportError, ImportMode, ImportOperation, ImportPhase, ImportPolicy,
+            ImportService, InternalImportRequest,
+        },
     },
     jobs::store::{canonical_json, enqueue_in_transaction, fingerprint, validate_label},
     search::selection::{SelectionError, SelectionRepository},
@@ -32,6 +35,8 @@ pub enum PipelineError {
     NotFound,
     #[error("selection, destination, or idempotency key conflicts with an existing intent")]
     Conflict,
+    #[error("Move cleanup requires review or abandonment before recovery")]
+    ImportCleanupReview,
     #[error(transparent)]
     Search(#[from] SearchError),
     #[error(transparent)]
@@ -141,6 +146,13 @@ pub enum ReviewLifecycle {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResumePolling {
+    pub revision: i64,
+    pub polling_fingerprint: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeImport {
     pub revision: i64,
     pub polling_fingerprint: String,
 }
@@ -352,7 +364,7 @@ impl Pipeline {
         {
             return Err(PipelineError::Conflict);
         }
-        validate_owned_receipts_in(&mut tx, settings, id, &row).await?;
+        validate_owned_receipts_in(&mut tx, settings, id, &row, None).await?;
         // Keep the submission fence and the original receipts; only polling becomes runnable.
         let changed = sqlx::query("UPDATE acquisition_runs SET state = 'downloading', reason = NULL, next_poll_at = 0, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND attempted = 1")
             .bind(id).execute(&mut *tx).await?.rows_affected();
@@ -368,6 +380,55 @@ impl Pipeline {
         sqlx::query("INSERT INTO job_events (job_id, event, from_state, to_state, created_at) VALUES (?, 'acquisition_polling_resumed', 'needs_review', 'running', unixepoch())")
             .bind(job_id).execute(&mut *tx).await?;
         tx.commit().await?;
+        self.get(owner, id).await
+    }
+
+    pub async fn resume_import(
+        &self,
+        settings: &Settings,
+        owner: &str,
+        id: &str,
+        request: ResumeImport,
+    ) -> Result<Acquisition, PipelineError> {
+        let mut tx = self.store.reader().begin().await?;
+        let (_, operation) = import_review_in(&mut tx, owner, id, &request).await?;
+        tx.commit().await?;
+        let service = ImportService::new(self.store.clone());
+        let lock = service
+            .blocking(move || finalize::lock(&operation))
+            .await
+            .map_err(import_recovery_error)?;
+        let mut tx = self.store.begin_write().await?;
+        let (row, operation) = import_review_in(&mut tx, owner, id, &request).await?;
+        validate_owned_receipts_in(&mut tx, settings, id, &row, Some(&operation.id)).await?;
+        if operation.request.policy == ImportPolicy::Move
+            && operation.phase == ImportPhase::CleanupPending
+        {
+            if operation.last_error.is_some() {
+                return Err(PipelineError::ImportCleanupReview);
+            }
+            service
+                .blocking(move || {
+                    finalize::SourceTombstone::open(&operation)?.check_recovery(&operation)
+                })
+                .await
+                .map_err(|_| PipelineError::ImportCleanupReview)?;
+        }
+        let changed = sqlx::query("UPDATE acquisition_runs SET state = 'importing', reason = NULL, next_poll_at = 0, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND reason = 'import_review_required' AND attempted = 1")
+            .bind(id).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 {
+            return Err(PipelineError::Conflict);
+        }
+        let job_id: &str = row.try_get("job_id")?;
+        let changed = sqlx::query("UPDATE jobs SET state = 'running', reason = NULL, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND worker IS NULL AND lease_until IS NULL AND retry_at IS NULL")
+            .bind(job_id).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 {
+            return Err(PipelineError::Conflict);
+        }
+        sqlx::query("INSERT INTO job_events (job_id, event, from_state, to_state, created_at) VALUES (?, 'acquisition_import_resumed', 'needs_review', 'running', unixepoch())")
+            .bind(job_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        drop(lock);
         self.get(owner, id).await
     }
 
@@ -419,7 +480,7 @@ impl Pipeline {
         if current != validated {
             return Err(PipelineError::Conflict);
         }
-        validate_owned_receipts_in(&mut tx, settings, id, &row).await?;
+        validate_owned_receipts_in(&mut tx, settings, id, &row, None).await?;
         // No journal exists yet. Preserve its reserved UUID, destination and submission fence.
         let changed = sqlx::query("UPDATE acquisition_runs SET source_root = ?, source_relative = ?, state = 'importing', reason = NULL, next_poll_at = 0, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND reason = 'import_review_required' AND attempted = 1")
             .bind(&request.source_root_id).bind(&request.source_relative_path).bind(id).execute(&mut *tx).await?.rows_affected();
@@ -964,7 +1025,28 @@ impl Pipeline {
             "sabnzbd" => ImportMode::Standalone,
             _ => return Err(PipelineError::Database),
         };
-        match service.plan(&import_id, request, mode).await {
+        let recovery: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM job_events e JOIN acquisition_intents i ON i.job_id = e.job_id WHERE i.id = ? AND e.event = 'acquisition_import_resumed')")
+            .bind(&claim.id).fetch_one(self.store.reader()).await?;
+        let planned = if recovery {
+            match service.get(&import_id).await {
+                Ok(operation)
+                    if operation.request.source_root == request.source_root
+                        && operation.request.source_relative == request.source_relative
+                        && operation.request.destination_root == request.destination_root
+                        && operation.request.destination_relative
+                            == request.destination_relative
+                        && operation.request.unit_id == request.unit_id
+                        && operation.identity.mode == mode =>
+                {
+                    Ok(operation)
+                }
+                Ok(_) => Err(ImportError::Conflict),
+                Err(error) => Err(error),
+            }
+        } else {
+            service.plan(&import_id, request, mode).await
+        };
+        match planned {
             Ok(_) => {}
             Err(crate::importer::journal::ImportError::Busy) => return self.defer(claim, 5).await,
             Err(_) => {
@@ -1176,16 +1258,105 @@ async fn mapping_review_in(
     ))
 }
 
+fn import_recovery_error(error: ImportError) -> PipelineError {
+    match error {
+        ImportError::Database(_) => PipelineError::Database,
+        ImportError::Worker => PipelineError::Filesystem,
+        _ => PipelineError::Conflict,
+    }
+}
+
+async fn import_review_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    owner: &str,
+    id: &str,
+    request: &ResumeImport,
+) -> Result<(sqlx::sqlite::SqliteRow, ImportOperation), PipelineError> {
+    let (row, revision, lifecycle) = review_in(tx, owner, id).await?;
+    if revision != request.revision
+        || polling_fingerprint_in(tx, id).await? != request.polling_fingerprint
+        || lifecycle != ReviewLifecycle::Returned
+        || row.try_get::<&str, _>("state")? != "needs_review"
+        || row.try_get::<Option<&str>, _>("reason")? != Some("import_review_required")
+        || row.try_get::<&str, _>("job_state")? != "needs_review"
+        || row.try_get::<Option<&str>, _>("job_reason")? != Some("import_review_required")
+        || row.try_get::<Option<String>, _>("job_worker")?.is_some()
+        || row.try_get::<Option<i64>, _>("job_lease")?.is_some()
+        || row.try_get::<Option<i64>, _>("job_retry")?.is_some()
+        || !row.try_get::<bool, _>("attempted")?
+        || row
+            .try_get::<Option<String>, _>("payload_digest")?
+            .is_none()
+        || row.try_get::<i64, _>("receipt_count")? == 0
+    {
+        return Err(PipelineError::Conflict);
+    }
+    let bound: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM acquisition_runs a JOIN acquisition_intents i ON i.id = a.id JOIN release_decisions d ON d.id = a.selection_decision_id JOIN release_assessments s ON s.id = d.assessment_id WHERE a.id = ? AND json_extract(i.request, '$.selection_decision_id') = d.id AND d.owner = i.caller AND d.action = 'selected' AND s.owner = i.caller AND s.unit_id = a.unit_id AND s.release_handle = a.release_handle) AND NOT EXISTS(SELECT 1 FROM acquisition_receipts WHERE acquisition_id = ? AND completed = 0)")
+        .bind(id).bind(id).fetch_one(&mut **tx).await?;
+    if !bound {
+        return Err(PipelineError::Conflict);
+    }
+    let journal = sqlx::query("SELECT * FROM import_operations WHERE id = ?")
+        .bind(row.try_get::<Option<&str>, _>("import_id")?)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(PipelineError::Conflict)?;
+    let operation = journal::decode(&journal).map_err(import_recovery_error)?;
+    let req = &operation.request;
+    for (column, value) in [
+        ("source_root", req.source_root.as_str()),
+        ("source_relative", req.source_relative.as_str()),
+        ("destination_root", req.destination_root.as_str()),
+        ("destination_relative", req.destination_relative.as_str()),
+        ("unit_id", req.unit_id.as_str()),
+    ] {
+        if row.try_get::<Option<&str>, _>(column)? != Some(value) {
+            return Err(PipelineError::Conflict);
+        }
+        if column != "source_relative" && journal.try_get::<&str, _>(column)? != value {
+            return Err(PipelineError::Conflict);
+        }
+    }
+    let roots: (String, String) = sqlx::query_as(
+        "SELECT s.path, d.path FROM library_roots s, library_roots d WHERE s.id = ? AND d.id = ?",
+    )
+    .bind(&req.source_root)
+    .bind(&req.destination_root)
+    .fetch_one(&mut **tx)
+    .await?;
+    let mode = if row.try_get::<&str, _>("client_kind")? == "qbittorrent" {
+        ImportMode::TorrentPreserving
+    } else {
+        ImportMode::Standalone
+    };
+    let path = operation.identity.destination_path(req);
+    if operation.phase == ImportPhase::Done
+        || operation.identity.mode != mode
+        || operation.identity.source_root != Path::new(&roots.0)
+        || operation.identity.destination_root != Path::new(&roots.1)
+        || row.try_get::<Option<&str>, _>("destination_path")? != path.to_str()
+        || journal.try_get::<&str, _>("destination_path")?
+            != path.to_str().ok_or(PipelineError::Conflict)?
+        || req.policy.resolve(mode, true).is_err()
+    {
+        return Err(PipelineError::Conflict);
+    }
+    finalize::relative(&req.source_relative).map_err(import_recovery_error)?;
+    finalize::relative(&req.destination_relative).map_err(import_recovery_error)?;
+    Ok((row, operation))
+}
+
 async fn validate_owned_receipts_in(
     tx: &mut Transaction<'_, Sqlite>,
     settings: &Settings,
     id: &str,
     row: &sqlx::sqlite::SqliteRow,
+    allowed_import: Option<&str>,
 ) -> Result<(), PipelineError> {
     let client_id: &str = row.try_get("client_id")?;
     let kind_name: &str = row.try_get("client_kind")?;
-    let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM acquisition_intents i JOIN acquisition_runs a ON a.id = i.id JOIN search_releases r ON r.handle = a.release_handle JOIN integrations c ON c.id = a.client_id JOIN jobs j ON j.id = i.job_id WHERE a.id = ? AND r.owner = i.caller AND json_extract(i.request, '$.client_id') = a.client_id AND json_extract(i.request, '$.release_handle') = a.release_handle AND json_extract(i.request, '$.unit_id') = a.unit_id AND json_extract(c.options, '$.category') = a.category AND j.kind = 'acquisition.pipeline' AND EXISTS(SELECT 1 FROM job_events WHERE job_id = i.job_id AND event = 'client_accepted') AND NOT EXISTS(SELECT 1 FROM import_operations WHERE id = a.import_id OR unit_id = a.unit_id OR destination_path = a.destination_path))")
-        .bind(id).fetch_one(&mut **tx).await?;
+    let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM acquisition_intents i JOIN acquisition_runs a ON a.id = i.id JOIN search_releases r ON r.handle = a.release_handle JOIN integrations c ON c.id = a.client_id JOIN jobs j ON j.id = i.job_id WHERE a.id = ? AND r.owner = i.caller AND json_extract(i.request, '$.client_id') = a.client_id AND json_extract(i.request, '$.release_handle') = a.release_handle AND json_extract(i.request, '$.unit_id') = a.unit_id AND json_extract(c.options, '$.category') = a.category AND j.kind = 'acquisition.pipeline' AND EXISTS(SELECT 1 FROM job_events WHERE job_id = i.job_id AND event = 'client_accepted') AND NOT EXISTS(SELECT 1 FROM import_operations WHERE (id = a.import_id OR unit_id = a.unit_id OR destination_path = a.destination_path) AND (? IS NULL OR id != ?)))")
+        .bind(id).bind(allowed_import).bind(allowed_import).fetch_one(&mut **tx).await?;
     if !owned
         || !client_configuration_current_in(
             tx,
@@ -1424,7 +1595,7 @@ async fn polling_fingerprint_in(
     id: &str,
 ) -> Result<String, PipelineError> {
     // Configuration and receipt edits do not necessarily append job events.
-    let evidence: String = sqlx::query_scalar("SELECT json_array(a.release_handle, a.client_id, a.client_fingerprint, a.client_kind, a.category, a.unit_id, a.attempted, a.payload_digest, a.torrent_hash, a.state, a.reason, a.import_id, a.source_root, a.source_relative, a.destination_root, a.destination_relative, a.destination_path, a.selection_decision_id, (SELECT path FROM library_roots WHERE id = a.source_root), (SELECT path FROM library_roots WHERE id = a.destination_root), i.caller, i.request, i.request_fingerprint, (SELECT json_group_array(json_array(ordinal, external_id, completed)) FROM (SELECT ordinal, external_id, completed FROM acquisition_receipts WHERE acquisition_id = a.id ORDER BY ordinal)), (SELECT json_array(kind, label, base_url, enabled, options, secret_version, hex(secret_nonce), hex(secret_ciphertext)) FROM integrations WHERE id = a.client_id)) FROM acquisition_runs a JOIN acquisition_intents i ON i.id = a.id WHERE a.id = ?")
+    let evidence: String = sqlx::query_scalar("SELECT json_array(a.release_handle, a.client_id, a.client_fingerprint, a.client_kind, a.category, a.unit_id, a.attempted, a.payload_digest, a.torrent_hash, a.state, a.reason, a.import_id, a.source_root, a.source_relative, a.destination_root, a.destination_relative, a.destination_path, a.selection_decision_id, (SELECT path FROM library_roots WHERE id = a.source_root), (SELECT path FROM library_roots WHERE id = a.destination_root), i.caller, i.request, i.request_fingerprint, (SELECT json_group_array(json_array(ordinal, external_id, completed)) FROM (SELECT ordinal, external_id, completed FROM acquisition_receipts WHERE acquisition_id = a.id ORDER BY ordinal)), (SELECT json_array(kind, label, base_url, enabled, options, secret_version, hex(secret_nonce), hex(secret_ciphertext)) FROM integrations WHERE id = a.client_id), (SELECT json_array(id, source_root, destination_root, destination_relative, destination_path, unit_id, request_json, identity_json, phase, effective_policy, staged_identity_json, validation, library_file_id, last_error, source_cleanup_state) FROM import_operations WHERE id = a.import_id)) FROM acquisition_runs a JOIN acquisition_intents i ON i.id = a.id WHERE a.id = ?")
         .bind(id).fetch_one(&mut **tx).await?;
     Ok(fingerprint(&evidence))
 }

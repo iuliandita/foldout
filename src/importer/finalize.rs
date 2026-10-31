@@ -890,6 +890,31 @@ impl SourceTombstone {
         Ok(())
     }
 
+    pub(crate) fn check_recovery(&self, operation: &ImportOperation) -> Result<(), ImportError> {
+        check_location(&self.parent, &self.expected_parent)?;
+        if let Some(directory) = self.directory(false)? {
+            match regular(&directory, "source") {
+                Ok(mut file) => {
+                    Self::verify(&mut file, operation)?;
+                    if operation.source_cleanup == SourceCleanup::Pending {
+                        absent(&self.parent, &self.name)?;
+                    }
+                    return Ok(());
+                }
+                Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if operation.source_cleanup == SourceCleanup::Pending {
+            match regular(&self.parent, &self.name) {
+                Ok(mut file) => Self::verify(&mut file, operation)?,
+                Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn restore(&self) -> Result<bool, ImportError> {
         check_location(&self.parent, &self.expected_parent)?;
         let Some(directory) = self.directory(false)? else {

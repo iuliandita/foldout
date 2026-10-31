@@ -668,6 +668,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/acquisition/{id}/resume-import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires manage scope. Revision and polling_fingerprint must match the terminal review snapshot, including its immutable import journal. Only needs_review acquisitions stopped with import_review_required and an existing non-Done journal are eligible. Revalidates owner, selection binding, completed owned receipts, client configuration, journal identity and complete actual-return lifecycle evidence in one write transaction while holding the importer lock. An expired lease never proves work stopped. Queues only recovery of the same journal, preserving its policy, source, destination, unit and submission fence; never re-plans or writes to a download client. Move cleanup uses existing destination/catalog/tombstone recovery; changed sources or recorded cleanup errors require review or abandonment. Stale actions and replays return 409. Cookie authentication requires a matching Origin. */
+        post: operations["resumeAcquisitionImport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/acquisition/{id}/correct-mapping": {
         parameters: {
             query?: never;
@@ -1755,6 +1772,11 @@ export interface components {
             revision: number;
             polling_fingerprint: string;
         };
+        ResumeImport: {
+            /** Format: int64 */
+            revision: number;
+            polling_fingerprint: string;
+        };
         CorrectMapping: {
             /** Format: int64 */
             revision: number;
@@ -1780,7 +1802,7 @@ export interface components {
              * @enum {string}
              */
             lifecycle: "returned" | "unproven";
-            /** @description Opaque receipt, mapping and configuration snapshot fence; pass unchanged to resume polling or correct mapping. */
+            /** @description Opaque receipt, mapping, configuration and import-journal snapshot fence; pass unchanged to reviewed acquisition actions. */
             polling_fingerprint: string;
         };
         Acquisition: {
@@ -5005,6 +5027,96 @@ export interface operations {
                 };
             };
             /** @description acquisition_conflict: stale or replayed snapshot, changed configuration or receipts, or polling recovery is unsafe */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    resumeAcquisitionImport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResumeImport"];
+            };
+        };
+        responses: {
+            /** @description Recovery queued for the same immutable import journal */
+            202: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Acquisition"];
+                };
+            };
+            /** @description invalid_request: invalid input or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: acquisition not found for caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description acquisition_conflict: stale or replayed snapshot, missing, changed or Done journal, changed receipts/configuration, or outstanding or unproven work; Move cleanup errors require review or abandonment */
             409: {
                 headers: {
                     [name: string]: unknown;

@@ -461,29 +461,32 @@ async fn acquisition_review_states_and_resume_http_guards() {
             StatusCode::BAD_REQUEST,
         ),
     ] {
-        let mut request = Request::builder()
-            .method("POST")
-            .uri(format!("/api/v1/acquisition/{id}/resume-polling"))
-            .header(header::CONTENT_TYPE, "application/json");
-        if let Some(token) = token {
-            request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
-        }
-        let response = f
-            .app
-            .clone()
-            .oneshot(request.body(Body::from(body)).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), expected);
-        if expected == StatusCode::CONFLICT {
-            let error: Value =
-                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                    .unwrap();
-            assert_eq!(error["error"]["code"], "acquisition_conflict");
-            assert_eq!(
-                error["error"]["message"],
-                "Acquisition is not reviewable, the snapshot changed, or the reviewed action is not safe"
-            );
+        for action in ["resume-polling", "resume-import"] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/acquisition/{id}/{action}"))
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(token) = token {
+                request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            let response = f
+                .app
+                .clone()
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::CONFLICT {
+                let error: Value = serde_json::from_slice(
+                    &response.into_body().collect().await.unwrap().to_bytes(),
+                )
+                .unwrap();
+                assert_eq!(error["error"]["code"], "acquisition_conflict");
+                assert_eq!(
+                    error["error"]["message"],
+                    "Acquisition is not reviewable, the snapshot changed, or the reviewed action is not safe"
+                );
+            }
         }
     }
 }

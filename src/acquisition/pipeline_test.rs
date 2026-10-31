@@ -249,6 +249,384 @@ fn mapping_request(f: &Fixture, review: &AcquisitionReview) -> CorrectMapping {
     }
 }
 
+impl Fixture {
+    async fn import_review(
+        &self,
+        id: &str,
+        policy: ImportPolicy,
+        phase: ImportPhase,
+    ) -> AcquisitionReview {
+        let review = self.failed_mapping(id).await;
+        let mut tx = self.store.begin_write().await.unwrap();
+        sqlx::query("UPDATE acquisition_runs SET source_relative = 'owned.cbz' WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let service = ImportService::new(self.store.clone());
+        let import_id = review.acquisition.import_id.unwrap();
+        let torrent = !self.server.seen.lock().unwrap().expected_hash.is_empty();
+        let mut op = service
+            .plan(
+                &import_id,
+                InternalImportRequest {
+                    source_root: self.source_id.clone(),
+                    source_relative: "owned.cbz".into(),
+                    destination_root: self.destination_id.clone(),
+                    destination_relative: "selected.cbz".into(),
+                    unit_id: self.request.unit_id.clone(),
+                    policy,
+                },
+                if torrent {
+                    ImportMode::TorrentPreserving
+                } else {
+                    ImportMode::Standalone
+                },
+            )
+            .await
+            .unwrap();
+        while op.phase != phase {
+            op = service.step(&import_id).await.unwrap();
+        }
+        self.pipeline.review("owner", id).await.unwrap()
+    }
+}
+
+fn import_request(review: &AcquisitionReview) -> ResumeImport {
+    ResumeImport {
+        revision: review.revision,
+        polling_fingerprint: review.polling_fingerprint.clone(),
+    }
+}
+
+#[tokio::test]
+async fn resume_import_fences_revision_replay_races_and_reopen_without_client_writes() {
+    for (torrent, policy, phase) in [
+        (false, ImportPolicy::Copy, ImportPhase::Planned),
+        (true, ImportPolicy::Copy, ImportPhase::Verified),
+        (
+            false,
+            ImportPolicy::Hardlink {
+                fallback_to_copy: false,
+            },
+            ImportPhase::Staged,
+        ),
+        (false, ImportPolicy::Move, ImportPhase::CleanupPending),
+    ] {
+        let f = Fixture::new(ContentType::Comic, torrent).await;
+        let intent = f.create("resume-import").await;
+        let stale = f.import_review(&intent.id, policy.clone(), phase).await;
+        let mut tx = f.store.begin_write().await.unwrap();
+        lifecycle_event(&mut tx, &intent.id, "import_test", None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(matches!(
+            f.pipeline
+                .resume_import(&f.settings, "owner", &intent.id, import_request(&stale))
+                .await,
+            Err(PipelineError::Conflict)
+        ));
+        let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+        assert!(matches!(
+            f.pipeline
+                .resume_import(&f.settings, "other", &intent.id, import_request(&review))
+                .await,
+            Err(PipelineError::NotFound)
+        ));
+        let import_id = review.acquisition.import_id.as_ref().unwrap();
+        let before: (String, String) = sqlx::query_as(
+            "SELECT request_json, identity_json FROM import_operations WHERE id = ?",
+        )
+        .bind(import_id)
+        .fetch_one(f.store.reader())
+        .await
+        .unwrap();
+        let fence: (bool, String, Option<String>) = sqlx::query_as(
+            "SELECT attempted, payload_digest, torrent_hash FROM acquisition_runs WHERE id = ?",
+        )
+        .bind(&intent.id)
+        .fetch_one(f.store.reader())
+        .await
+        .unwrap();
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        f.store.close().await;
+        let store = SqliteStore::open(f.dir.path()).await.unwrap();
+        let settings = Settings::new(
+            store.clone(),
+            EncryptionKey::load_or_create(f.dir.path()).await.unwrap(),
+        );
+        let pipeline = Pipeline::new(store.clone());
+        let reopened = pipeline.review("owner", &intent.id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&review).unwrap(),
+            serde_json::to_value(&reopened).unwrap()
+        );
+        let (a, b) = tokio::join!(
+            pipeline.resume_import(&settings, "owner", &intent.id, import_request(&review)),
+            pipeline.resume_import(&settings, "owner", &intent.id, import_request(&review))
+        );
+        assert!(matches!(
+            (&a, &b),
+            (Ok(_), Err(PipelineError::Conflict)) | (Err(PipelineError::Conflict), Ok(_))
+        ));
+        assert!(matches!(
+            pipeline
+                .resume_import(&settings, "owner", &intent.id, import_request(&review))
+                .await,
+            Err(PipelineError::Conflict)
+        ));
+        for _ in 0..12 {
+            pipeline
+                .tick_job(settings.clone(), &intent.id)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            pipeline.get("owner", &intent.id).await.unwrap().state,
+            AcquisitionState::Completed
+        );
+        let service = ImportService::new(store.clone());
+        for _ in 0..2 {
+            assert_eq!(
+                service.recover(import_id).await.unwrap().phase,
+                ImportPhase::Done
+            );
+        }
+        let after: (String, String) = sqlx::query_as(
+            "SELECT request_json, identity_json FROM import_operations WHERE id = ?",
+        )
+        .bind(import_id)
+        .fetch_one(store.reader())
+        .await
+        .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(service.get(import_id).await.unwrap().request.policy, policy);
+        let after_fence: (bool, String, Option<String>) = sqlx::query_as(
+            "SELECT attempted, payload_digest, torrent_hash FROM acquisition_runs WHERE id = ?",
+        )
+        .bind(&intent.id)
+        .fetch_one(store.reader())
+        .await
+        .unwrap();
+        assert_eq!(fence, after_fence);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM import_operations")
+            .fetch_one(store.reader())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event = 'acquisition_import_resumed' AND from_state = 'needs_review' AND to_state = 'running'")
+            .bind(&intent.job_id).fetch_one(store.reader()).await.unwrap();
+        assert_eq!(audits, 1);
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+        assert_eq!(f.server.seen.lock().unwrap().submissions, 1);
+        assert_eq!(
+            f.source.path().join("owned.cbz").exists(),
+            policy != ImportPolicy::Move
+        );
+    }
+}
+
+#[tokio::test]
+async fn resume_import_rejects_unsafe_journals_receipts_configuration_and_work() {
+    for change in [
+        "DELETE FROM import_operations WHERE id = (SELECT import_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE import_operations SET phase = 'done' WHERE id = (SELECT import_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE import_operations SET request_json = json_set(request_json, '$.source_relative', 'other.cbz') WHERE id = (SELECT import_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE import_operations SET identity_json = json_set(identity_json, '$.destination_root', '/foreign') WHERE id = (SELECT import_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE import_operations SET destination_relative = 'other.cbz' WHERE id = (SELECT import_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE acquisition_runs SET selection_decision_id = NULL WHERE id = ?",
+        "UPDATE acquisition_runs SET source_relative = 'other.cbz' WHERE id = ?",
+        "UPDATE acquisition_runs SET reason = 'uncertain_submission' WHERE id = ?",
+        "UPDATE acquisition_runs SET work_token = 'expired', work_until = 0 WHERE id = ?",
+        "UPDATE acquisition_runs SET work_until = unixepoch() + 300 WHERE id = ?",
+        "UPDATE jobs SET worker = 'expired', lease_until = 0 WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "UPDATE jobs SET retry_at = 0 WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "UPDATE jobs SET state = 'cancel_requested' WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "DELETE FROM job_events WHERE event = 'acquisition_lifecycle_v1' AND job_id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "DELETE FROM job_events WHERE event = 'acquisition_claim_returned' AND job_id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "DELETE FROM acquisition_receipts WHERE acquisition_id = ?",
+        "UPDATE acquisition_receipts SET completed = 0 WHERE acquisition_id = ?",
+        "UPDATE acquisition_receipts SET external_id = 'invalid' WHERE acquisition_id = ? AND ordinal = 0",
+        "UPDATE acquisition_receipts SET ordinal = -1 WHERE acquisition_id = ? AND ordinal = 0",
+        "UPDATE search_releases SET owner = 'foreign' WHERE handle = (SELECT release_handle FROM acquisition_runs WHERE id = ?)",
+        "UPDATE acquisition_intents SET request = json_set(request, '$.client_id', 'foreign') WHERE id = ?",
+        "UPDATE integrations SET base_url = 'http://127.0.0.1:1' WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET enabled = 0 WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET secret_nonce = zeroblob(24), secret_ciphertext = zeroblob(28) WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+    ] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("unsafe-import").await;
+        let stale = f
+            .import_review(&intent.id, ImportPolicy::Copy, ImportPhase::Planned)
+            .await;
+        let mut tx = f.store.begin_write().await.unwrap();
+        sqlx::query(change)
+            .bind(&intent.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        for snapshot in [&stale, &review] {
+            assert!(
+                matches!(
+                    f.pipeline
+                        .resume_import(&f.settings, "owner", &intent.id, import_request(snapshot))
+                        .await,
+                    Err(PipelineError::Conflict)
+                ),
+                "{change}"
+            );
+        }
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+        assert_eq!(
+            review.revision,
+            f.pipeline
+                .review("owner", &intent.id)
+                .await
+                .unwrap()
+                .revision
+        );
+        assert!(!f.destination.path().join("selected.cbz").exists());
+    }
+}
+
+#[tokio::test]
+async fn resume_import_requires_actual_returns_and_importer_lock_and_never_replans() {
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("locked-import").await;
+    let review = f
+        .import_review(&intent.id, ImportPolicy::Copy, ImportPhase::Planned)
+        .await;
+    let service = ImportService::new(f.store.clone());
+    let import_id = review.acquisition.import_id.as_ref().unwrap();
+    let lock = finalize::lock(&service.get(import_id).await.unwrap()).unwrap();
+    assert!(matches!(
+        f.pipeline
+            .resume_import(&f.settings, "owner", &intent.id, import_request(&review))
+            .await,
+        Err(PipelineError::Conflict)
+    ));
+    drop(lock);
+    let mut tx = f.store.begin_write().await.unwrap();
+    lifecycle_event(
+        &mut tx,
+        &intent.id,
+        "acquisition_claim_started",
+        Some("lost"),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    f.store.close().await;
+    let store = SqliteStore::open(f.dir.path()).await.unwrap();
+    let settings = Settings::new(
+        store.clone(),
+        EncryptionKey::load_or_create(f.dir.path()).await.unwrap(),
+    );
+    let pipeline = Pipeline::new(store.clone());
+    let unproven = pipeline.review("owner", &intent.id).await.unwrap();
+    assert!(matches!(
+        pipeline
+            .resume_import(&settings, "owner", &intent.id, import_request(&unproven))
+            .await,
+        Err(PipelineError::Conflict)
+    ));
+    let mut tx = store.begin_write().await.unwrap();
+    lifecycle_event(
+        &mut tx,
+        &intent.id,
+        "acquisition_claim_returned",
+        Some("lost"),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let returned = pipeline.review("owner", &intent.id).await.unwrap();
+    pipeline
+        .resume_import(&settings, "owner", &intent.id, import_request(&returned))
+        .await
+        .unwrap();
+    let mut tx = store.begin_write().await.unwrap();
+    sqlx::query("DELETE FROM import_operations WHERE id = ?")
+        .bind(import_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    pipeline.tick_job(settings, &intent.id).await.unwrap();
+    assert_eq!(
+        pipeline.get("owner", &intent.id).await.unwrap().state,
+        AcquisitionState::NeedsReview
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM import_operations")
+        .fetch_one(store.reader())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(!f.destination.path().join("selected.cbz").exists());
+}
+
+#[tokio::test]
+async fn resume_import_move_changed_cleanup_requires_review_or_abandonment() {
+    for (recorded, captured) in [(false, false), (true, false), (false, true)] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("move-review").await;
+        let stale = f
+            .import_review(&intent.id, ImportPolicy::Move, ImportPhase::CleanupPending)
+            .await;
+        let import_id = stale.acquisition.import_id.as_ref().unwrap();
+        let service = ImportService::new(f.store.clone());
+        let source = if captured {
+            service.step(import_id).await.unwrap();
+            f.source
+                .path()
+                .join(format!(".library-move-{import_id}/source"))
+        } else {
+            f.source.path().join("owned.cbz")
+        };
+        std::fs::write(&source, b"changed source").unwrap();
+        if recorded {
+            assert!(matches!(
+                service.step(import_id).await,
+                Err(ImportError::Changed)
+            ));
+        }
+        let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        assert!(matches!(
+            f.pipeline
+                .resume_import(&f.settings, "owner", &intent.id, import_request(&review))
+                .await,
+            Err(PipelineError::ImportCleanupReview)
+        ));
+        assert_eq!(
+            review.revision,
+            f.pipeline
+                .review("owner", &intent.id)
+                .await
+                .unwrap()
+                .revision
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), b"changed source");
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+        assert_eq!(
+            service.abandon_move_cleanup(import_id).await.unwrap().phase,
+            ImportPhase::Done
+        );
+        let done = f.pipeline.review("owner", &intent.id).await.unwrap();
+        assert!(matches!(
+            f.pipeline
+                .resume_import(&f.settings, "owner", &intent.id, import_request(&done))
+                .await,
+            Err(PipelineError::Conflict)
+        ));
+    }
+}
+
 #[tokio::test]
 async fn mapping_correction_fences_stale_replayed_and_racing_actions_across_reopen() {
     for torrent in [false, true] {
@@ -908,47 +1286,60 @@ async fn resume_polling_never_treats_reopen_or_cleared_expired_claim_as_return()
 }
 
 #[tokio::test]
-async fn resume_polling_rolls_back_when_either_guarded_update_changes_no_rows() {
-    for trigger in [
-        "CREATE TRIGGER ignore_resume BEFORE UPDATE ON acquisition_runs BEGIN SELECT RAISE(IGNORE); END",
-        "CREATE TRIGGER ignore_resume BEFORE UPDATE ON jobs BEGIN SELECT RAISE(IGNORE); END",
-    ] {
-        let f = Fixture::new(ContentType::Comic, false).await;
-        let intent = f.create("guarded-resume").await;
-        f.submit(&intent.id).await;
-        let review = f.stop_polling(&intent.id).await;
-        let mut tx = f.store.begin_write().await.unwrap();
-        sqlx::query(trigger).execute(&mut *tx).await.unwrap();
-        tx.commit().await.unwrap();
-        assert!(matches!(
-            f.pipeline
-                .resume_polling(&f.settings, "owner", &intent.id, resume_request(&review))
-                .await,
-            Err(PipelineError::Conflict)
-        ));
-        let after = f.pipeline.review("owner", &intent.id).await.unwrap();
-        assert_eq!(
-            serde_json::to_value(&review).unwrap(),
-            serde_json::to_value(&after).unwrap()
-        );
-        let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
-            .bind(&intent.job_id)
-            .fetch_one(f.store.reader())
-            .await
-            .unwrap();
-        assert_eq!(state, "needs_review");
-        assert_eq!(f.server.seen.lock().unwrap().submissions, 1);
+async fn reviewed_resumes_roll_back_when_either_guarded_update_changes_no_rows() {
+    for recovery in [false, true] {
+        for trigger in [
+            "CREATE TRIGGER ignore_resume BEFORE UPDATE ON acquisition_runs BEGIN SELECT RAISE(IGNORE); END",
+            "CREATE TRIGGER ignore_resume BEFORE UPDATE ON jobs BEGIN SELECT RAISE(IGNORE); END",
+        ] {
+            let f = Fixture::new(ContentType::Comic, false).await;
+            let intent = f.create("guarded-resume").await;
+            let review = if recovery {
+                f.import_review(&intent.id, ImportPolicy::Copy, ImportPhase::Planned)
+                    .await
+            } else {
+                f.submit(&intent.id).await;
+                f.stop_polling(&intent.id).await
+            };
+            let mut tx = f.store.begin_write().await.unwrap();
+            sqlx::query(trigger).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+            let result = if recovery {
+                f.pipeline
+                    .resume_import(&f.settings, "owner", &intent.id, import_request(&review))
+                    .await
+            } else {
+                f.pipeline
+                    .resume_polling(&f.settings, "owner", &intent.id, resume_request(&review))
+                    .await
+            };
+            assert!(matches!(result, Err(PipelineError::Conflict)));
+            let after = f.pipeline.review("owner", &intent.id).await.unwrap();
+            assert_eq!(
+                serde_json::to_value(&review).unwrap(),
+                serde_json::to_value(&after).unwrap()
+            );
+            let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
+                .bind(&intent.job_id)
+                .fetch_one(f.store.reader())
+                .await
+                .unwrap();
+            assert_eq!(state, "needs_review");
+            assert_eq!(f.server.seen.lock().unwrap().submissions, 1);
+        }
     }
 }
 
 #[tokio::test]
 async fn reviewed_actions_http_match_contract_and_require_cookie_origin() {
-    for mapping in [false, true] {
-        assert_reviewed_action_http(mapping).await;
+    for action in ["resume-polling", "correct-mapping", "resume-import"] {
+        assert_reviewed_action_http(action).await;
     }
 }
 
-async fn assert_reviewed_action_http(mapping: bool) {
+async fn assert_reviewed_action_http(action: &str) {
+    let mapping = action == "correct-mapping";
+    let recovery = action == "resume-import";
     use axum::{
         body::Body,
         http::{Request, StatusCode, header},
@@ -958,7 +1349,10 @@ async fn assert_reviewed_action_http(mapping: bool) {
 
     let f = Fixture::new(ContentType::Comic, false).await;
     let intent = f.create("http-resume").await;
-    if mapping {
+    if recovery {
+        f.import_review(&intent.id, ImportPolicy::Copy, ImportPhase::Planned)
+            .await;
+    } else if mapping {
         f.failed_mapping(&intent.id).await;
     } else {
         f.submit(&intent.id).await;
@@ -969,19 +1363,23 @@ async fn assert_reviewed_action_http(mapping: bool) {
         .setup("owner", "correct horse battery staple")
         .await
         .unwrap();
-    if mapping {
+    if mapping || recovery {
         let app = crate::app::router_with_settings(
             f.store.clone(),
             "http://127.0.0.1:8787",
             f.settings.clone(),
         );
         let review = f.pipeline.review("owner", &intent.id).await.unwrap();
-        let body = serde_json::json!({"revision":review.revision,"polling_fingerprint":review.polling_fingerprint,"source_root_id":f.source_id,"source_relative_path":"owned.cbz"});
+        let mut body = serde_json::json!({"revision":review.revision,"polling_fingerprint":review.polling_fingerprint});
+        if mapping {
+            body["source_root_id"] = f.source_id.clone().into();
+            body["source_relative_path"] = "owned.cbz".into();
+        }
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/acquisition/{}/correct-mapping", intent.id))
+                    .uri(format!("/api/v1/acquisition/{}/{action}", intent.id))
                     .header(header::COOKIE, format!("library_session={}", login.token))
                     .header(header::ORIGIN, "http://127.0.0.1:8787")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -1009,6 +1407,16 @@ async fn assert_reviewed_action_http(mapping: bool) {
         .execute(&mut *tx)
         .await
         .unwrap();
+    if recovery {
+        sqlx::query("UPDATE release_decisions SET owner = ? WHERE id = ?")
+            .bind(&login.principal.user_id)
+            .bind(f.request.selection_decision_id.as_ref().unwrap())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE release_assessments SET owner = ? WHERE id = (SELECT assessment_id FROM release_decisions WHERE id = ?)")
+            .bind(&login.principal.user_id).bind(f.request.selection_decision_id.as_ref().unwrap()).execute(&mut *tx).await.unwrap();
+    }
     tx.commit().await.unwrap();
     let app = crate::app::router_with_settings(
         f.store.clone(),
@@ -1020,11 +1428,6 @@ async fn assert_reviewed_action_http(mapping: bool) {
         .review(&login.principal.user_id, &intent.id)
         .await
         .unwrap();
-    let action = if mapping {
-        "correct-mapping"
-    } else {
-        "resume-polling"
-    };
     let mut body = serde_json::json!({"revision": review.revision, "polling_fingerprint": review.polling_fingerprint});
     if mapping {
         body["source_root_id"] = f.source_id.clone().into();
@@ -1149,7 +1552,7 @@ async fn assert_reviewed_action_http(mapping: bool) {
         assert!(body["updated_at"].is_i64());
         assert_eq!(
             body,
-            serde_json::json!({"id": intent.id, "job_id": intent.job_id, "unit_id": intent.unit_id, "state": if mapping { "importing" } else { "downloading" }, "reason": null, "submitted": true, "receipt_count": 2, "import_id": review.acquisition.import_id, "destination_reserved": true, "updated_at": body["updated_at"]})
+            serde_json::json!({"id": intent.id, "job_id": intent.job_id, "unit_id": intent.unit_id, "state": if mapping || recovery { "importing" } else { "downloading" }, "reason": null, "submitted": true, "receipt_count": 2, "import_id": review.acquisition.import_id, "destination_reserved": true, "updated_at": body["updated_at"]})
         );
     }
     assert_eq!(requests, f.server.seen.lock().unwrap().requests);
