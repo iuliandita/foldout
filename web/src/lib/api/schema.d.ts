@@ -210,7 +210,8 @@ export interface paths {
         get: operations["getUnitContext"];
         put?: never;
         post?: never;
-        delete?: never;
+        /** @description Requires Manage scope. Cookie-authenticated requests require a matching Origin. Referenced records are retained; library files and history are never deleted. */
+        delete: operations["deleteUnit"];
         options?: never;
         head?: never;
         /** @description Correct catalog metadata. Requires Manage access. Does not rename or move files, change parent identity, or remove file associations. */
@@ -616,6 +617,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/acquisition/{id}/resume-polling": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires manage scope. Revision and polling_fingerprint must match the terminal review snapshot. Only needs_review acquisitions stopped with client_unavailable, client_job_missing, or unknown_client_state are eligible; download_failed is excluded. Revalidates owned receipts, current configuration, complete actual-return lifecycle evidence and absence of import or outstanding work in one write transaction. Appends an audit event and resumes polling without client writes or resetting the submission fence. Replays return 409. Cookie authentication requires a matching Origin. */
+        post: operations["resumeAcquisitionPolling"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/acquisition/{id}/files": {
         parameters: {
             query?: never;
@@ -935,7 +953,8 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete?: never;
+        /** @description Requires Manage scope. Cookie-authenticated requests require a matching Origin. Referenced records are retained; library files and history are never deleted. */
+        delete: operations["deleteEdition"];
         options?: never;
         head?: never;
         /** @description Correct catalog metadata. Requires Manage access. Does not rename or move files, change parent identity, or remove file associations. */
@@ -988,6 +1007,23 @@ export interface paths {
         /** @description Assess a caller-owned cached release for a catalog unit without fetching a provider. Validates source configuration and handle expiry, returns the canonical target, persists an immutable assessment, and returns any active scoped rejection. Supports monitor candidates and targeted search results. Requires manage scope and matching Origin for cookie authentication. JSON body limit is 8 KiB. */
         post: operations["assessRelease"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/provider-links/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** @description Requires Manage scope. Cookie-authenticated requests require a matching Origin. Referenced records are retained; library files and history are never deleted. */
+        delete: operations["deleteProviderLink"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1589,6 +1625,11 @@ export interface components {
         AcquisitionState: "queued" | "downloading" | "downloaded" | "importing" | "completed" | "needs_review" | "canceled";
         /** @enum {string} */
         AcquisitionReason: "uncertain_submission" | "source_unavailable" | "configuration_changed" | "unsupported_torrent" | "invalid_payload" | "client_unavailable" | "client_job_missing" | "download_failed" | "unknown_client_state" | "file_association_required" | "import_review_required" | "cancel_requires_review" | "selection_review_required" | "duplicate_torrent";
+        ResumePolling: {
+            /** Format: int64 */
+            revision: number;
+            polling_fingerprint: string;
+        };
         AcquisitionReview: {
             acquisition: components["schemas"]["Acquisition"];
             /**
@@ -1597,10 +1638,12 @@ export interface components {
              */
             revision: number;
             /**
-             * @description Claim returns only, not recovery validation.
+             * @description Complete recorded claim returns only, not recovery eligibility; unproven includes historical, outstanding or malformed coverage.
              * @enum {string}
              */
             lifecycle: "returned" | "unproven";
+            /** @description Opaque receipt and configuration snapshot fence; pass unchanged to resume polling. */
+            polling_fingerprint: string;
         };
         Acquisition: {
             id: string;
@@ -2819,6 +2862,71 @@ export interface operations {
             };
             /** @description Operation failed; response includes a safe reason and trace ID */
             default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    deleteUnit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Record deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Manage scope or matching Origin required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Catalog record not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Referenced record; message contains blocking record kinds and counts */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Operation failed */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4402,8 +4510,152 @@ export interface operations {
                     "application/json": components["schemas"]["AcquisitionReview"];
                 };
             };
-            /** @description Request failed */
-            default: {
+            /** @description invalid_request: invalid input or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: acquisition not found for caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description acquisition_conflict: acquisition is not in a terminal review state */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    resumeAcquisitionPolling: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResumePolling"];
+            };
+        };
+        responses: {
+            /** @description Polling re-queued for the same owned receipts */
+            202: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Acquisition"];
+                };
+            };
+            /** @description invalid_request: invalid input or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: acquisition not found for caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description acquisition_conflict: stale or replayed snapshot, changed configuration or receipts, or polling recovery is unsafe */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6245,6 +6497,71 @@ export interface operations {
             };
         };
     };
+    deleteEdition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Record deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Manage scope or matching Origin required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Catalog record not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Referenced record; message contains blocking record kinds and counts */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Operation failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     updateEdition: {
         parameters: {
             query?: never;
@@ -6543,6 +6860,71 @@ export interface operations {
             };
             /** @description unavailable: authentication temporarily unavailable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    deleteProviderLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Record deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Manage scope or matching Origin required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Catalog record not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Referenced record; message contains blocking record kinds and counts */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Operation failed */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

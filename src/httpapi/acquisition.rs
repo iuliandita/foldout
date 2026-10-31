@@ -3,7 +3,9 @@ use super::{
     errors::{ApiError, ApiJson, ApiQuery},
 };
 use crate::{
-    acquisition::pipeline::{AcquisitionRequest, FileAssociation, Pipeline, PipelineError},
+    acquisition::pipeline::{
+        AcquisitionRequest, FileAssociation, Pipeline, PipelineError, ResumePolling,
+    },
     auth::Scope,
     settings::Settings,
 };
@@ -29,6 +31,10 @@ pub fn routes(context: AcquisitionContext) -> Router {
         .route("/api/v1/acquisition/roots", get(roots))
         .route("/api/v1/acquisition/{id}", get(detail))
         .route("/api/v1/acquisition/{id}/review", get(review))
+        .route(
+            "/api/v1/acquisition/{id}/resume-polling",
+            post(resume_polling),
+        )
         .route("/api/v1/acquisition/{id}/files", post(associate_file))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(context)
@@ -91,9 +97,47 @@ async fn review(
     let principal = authorize(&context.auth, &headers, &Method::GET, Scope::Read).await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(context.pipeline.review(&principal.user_id, &id).await?),
+        Json(
+            context
+                .pipeline
+                .review(&principal.user_id, &id)
+                .await
+                .map_err(review_error)?,
+        ),
     )
         .into_response())
+}
+
+async fn resume_polling(
+    State(context): State<AcquisitionContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    ApiJson(request): ApiJson<ResumePolling>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(&context.auth, &headers, &Method::POST, Scope::Manage).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(
+            context
+                .pipeline
+                .resume_polling(&context.settings, &principal.user_id, &id, request)
+                .await
+                .map_err(review_error)?,
+        ),
+    )
+        .into_response())
+}
+
+fn review_error(error: PipelineError) -> ApiError {
+    match error {
+        PipelineError::Conflict => ApiError::new(
+            StatusCode::CONFLICT,
+            "acquisition_conflict",
+            "Acquisition is not reviewable, the snapshot changed, or polling recovery is not safe",
+        ),
+        other => other.into(),
+    }
 }
 
 #[derive(Deserialize)]

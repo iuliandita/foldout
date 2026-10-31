@@ -35,14 +35,49 @@ pub fn routes(context: CatalogContext) -> Router {
         .route("/api/v1/editions", post(create_edition))
         .route(
             "/api/v1/editions/{id}",
-            axum::routing::patch(update_edition),
+            axum::routing::patch(update_edition).delete(remove_edition),
         )
         .route("/api/v1/editions/{id}/units", get(units))
         .route("/api/v1/units", post(create_unit))
-        .route("/api/v1/units/{id}", axum::routing::patch(update_unit))
+        .route(
+            "/api/v1/units/{id}",
+            axum::routing::patch(update_unit).delete(remove_unit),
+        )
         .route("/api/v1/provider-links", post(create_provider_link))
+        .route(
+            "/api/v1/provider-links/{id}",
+            axum::routing::delete(remove_provider_link),
+        )
         .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(context)
+}
+
+async fn remove_provider_link(
+    State(context): State<CatalogContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    authorize(&context.auth, &headers, &Method::DELETE, Scope::Manage).await?;
+    context.repository.delete_provider_link(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn remove_edition(
+    State(context): State<CatalogContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    authorize(&context.auth, &headers, &Method::DELETE, Scope::Manage).await?;
+    context.repository.delete_edition(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn remove_unit(
+    State(context): State<CatalogContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    authorize(&context.auth, &headers, &Method::DELETE, Scope::Manage).await?;
+    context.repository.delete_unit(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_provider_link(
@@ -66,6 +101,9 @@ impl From<CatalogError> for ApiError {
                 "conflict",
                 "The operation conflicts with existing catalog data",
             ),
+            CatalogError::Dependencies(message) => {
+                Self::new(StatusCode::CONFLICT, "conflict", message)
+            }
             CatalogError::NotFound => Self::new(
                 StatusCode::NOT_FOUND,
                 "not_found",

@@ -387,3 +387,103 @@ async fn review_catalog_identities_include_unit_kind_and_date_precision() {
         assert!(item["unit"].is_null());
     }
 }
+
+#[tokio::test]
+async fn acquisition_review_states_and_resume_http_guards() {
+    let f = Fixture::new().await;
+    f.exec(CATALOG).await;
+    f.exec(REVIEW).await;
+    for (state, expected) in [
+        ("completed", StatusCode::OK),
+        ("canceled", StatusCode::OK),
+        ("downloaded", StatusCode::OK),
+        ("needs_review", StatusCode::OK),
+        ("downloading", StatusCode::CONFLICT),
+        ("importing", StatusCode::CONFLICT),
+    ] {
+        let mut tx = f.store.begin_write().await.unwrap();
+        sqlx::query("UPDATE acquisition_runs SET state = ? WHERE id = 'acq-own'")
+            .bind(state)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let response = f
+            .get("/api/v1/acquisition/acq-own/review", Some(&f.read))
+            .await;
+        assert_eq!(response.status(), expected, "{state}");
+        if expected == StatusCode::CONFLICT {
+            let error: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(error["error"]["code"], "acquisition_conflict");
+            assert_eq!(
+                error["error"]["message"],
+                "Acquisition is not reviewable, the snapshot changed, or polling recovery is not safe"
+            );
+        }
+    }
+    for (id, token, body, expected) in [
+        (
+            "acq-own",
+            None,
+            r#"{"revision":0,"polling_fingerprint":"old"}"#,
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "acq-own",
+            Some(&f.read),
+            r#"{"revision":0,"polling_fingerprint":"old"}"#,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "acq-other",
+            Some(&f.manage),
+            r#"{"revision":0,"polling_fingerprint":"old"}"#,
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "acq-own",
+            Some(&f.manage),
+            r#"{"revision":0,"polling_fingerprint":"old"}"#,
+            StatusCode::CONFLICT,
+        ),
+        (
+            "acq-own",
+            Some(&f.manage),
+            r#"{"revision":-1,"polling_fingerprint":"old"}"#,
+            StatusCode::CONFLICT,
+        ),
+        (
+            "acq-own",
+            Some(&f.manage),
+            r#"{"revision":0}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/acquisition/{id}/resume-polling"))
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = f
+            .app
+            .clone()
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::CONFLICT {
+            let error: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(error["error"]["code"], "acquisition_conflict");
+            assert_eq!(
+                error["error"]["message"],
+                "Acquisition is not reviewable, the snapshot changed, or polling recovery is not safe"
+            );
+        }
+    }
+}
