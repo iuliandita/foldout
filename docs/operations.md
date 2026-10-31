@@ -206,8 +206,9 @@ The internal importer supports Copy, Hardlink with explicit copy fallback, and
 Move. Move copies into private staging and keeps the source through destination
 verification, publication, and the catalog/coverage transaction. Planning and
 cleanup reject cataloged sources, whether matched by absolute path or registered
-root and relative path. They also reject equal, overlapping, noncanonical, or
-replaced roots. Cleanup holds the catalog writer transaction during these checks
+root and relative path, and any other import's reserved or published destination.
+They also reject equal, overlapping, noncanonical, replaced, or device/inode-aliased
+roots. Cleanup holds the catalog writer transaction during these checks
 and filesystem work.
 
 Only `CleanupPending` can remove a Move source, after revalidating the destination
@@ -221,17 +222,22 @@ platforms/filesystems return an explicit error without a plain-unlink fallback.
 Recovery restores an unverified capture with `RENAME_NOREPLACE`; it finishes a
 verified capture idempotently. A conflicting new original name is never replaced.
 A mismatch restores the capture and reports Changed. Missing sources are accepted
-only behind the same destination/catalog fence. Directory sync precedes Done.
+only behind the same destination/catalog fence. Empty tombstone directories are
+removed after restore or unlink, including leftovers found during recovery;
+nonempty directories are preserved. Directory sync precedes Done.
 
 Stop other writers before Move: an already open descriptor can still change a
 captured file. Changed content or a filesystem error retains the operation for
 review. After reviewing a permanent Changed error, an internal operator can call
 `ImportService::abandon_move_cleanup(operation_id).await` to keep the source and
-finish the operation. This revalidates destination/catalog evidence, restores any
-tombstone without replacing an existing name, and durably records
-`source_cleanup=abandoned` with Done. Repeating the call is safe. If restoration
-conflicts, preserve both files and resolve that filename conflict before retrying;
-no database edits are needed. Existing Copy/Hardlink journals remain recoverable.
+finish the operation. This revalidates destination/catalog evidence and durably
+records `source_cleanup=abandoned` with Done. It restores a tombstone only when
+the original parent can still be validated, without replacing an existing name.
+A moved or replaced parent never blocks abandonment: its files stay untouched.
+If a restore cannot safely finish, the operation still ends and retains a review
+message; preserve both files and resolve their names separately. Repeating the
+call can retry restoration safely; no database edits are needed. Existing
+Copy/Hardlink journals remain recoverable.
 
 `ImportService::plan` requires an explicit `ImportMode` argument. Torrent callers
 pass `ImportMode::TorrentPreserving`; standalone callers pass

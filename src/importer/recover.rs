@@ -124,7 +124,26 @@ impl ImportService {
             }
             ImportPhase::Done => {
                 self.verify_completed(&operation).await?;
-                if operation.last_error.is_some() {
+                if operation.request.policy == ImportPolicy::Move {
+                    let op = operation.clone();
+                    let result = self
+                        .blocking(move || {
+                            if finalize::SourceTombstone::present(&op)? {
+                                finalize::SourceTombstone::open(&op)?.remove_empty_directory()?;
+                            }
+                            Ok(())
+                        })
+                        .await;
+                    match result {
+                        Err(error) if operation.source_cleanup == SourceCleanup::Abandoned => {
+                            self.record_error(id, &error).await?
+                        }
+                        other => other?,
+                    }
+                }
+                if operation.last_error.is_some()
+                    && operation.source_cleanup != SourceCleanup::Abandoned
+                {
                     self.advance(&operation, ImportPhase::Done, None, None, None)
                         .await?;
                 }
@@ -148,8 +167,13 @@ impl ImportService {
         let tombstone = self
             .blocking(move || finalize::SourceTombstone::open(&op))
             .await?;
-        self.check_move_catalog(&operation.request, &operation.identity, &mut tx)
-            .await?;
+        self.check_move_catalog(
+            &operation.id,
+            &operation.request,
+            &operation.identity,
+            &mut tx,
+        )
+        .await?;
         self.verify_completed(operation).await?;
         let complete = match operation.source_cleanup {
             SourceCleanup::Pending => {
@@ -206,25 +230,28 @@ impl ImportService {
             let initial = service.get(&id).await?;
             let _lock = service.blocking(move || finalize::lock(&initial)).await?;
             let operation = service.get(&id).await?;
-            if operation.phase == ImportPhase::Done && operation.source_cleanup == SourceCleanup::Abandoned {
-                service.verify_completed(&operation).await?;
-                return Ok(operation);
-            }
-            if operation.phase != ImportPhase::CleanupPending || operation.request.policy != ImportPolicy::Move {
+            if operation.request.policy != ImportPolicy::Move
+                || !(operation.phase == ImportPhase::CleanupPending
+                    || (operation.phase == ImportPhase::Done && operation.source_cleanup == SourceCleanup::Abandoned)) {
                 return Err(ImportError::Conflict);
             }
             let mut tx = service.store.begin_write().await?;
-            if service.root_path(&operation.request.source_root).await? != operation.identity.source_root
-                || service.root_path(&operation.request.destination_root).await? != operation.identity.destination_root
+            if service.root_path(&operation.request.destination_root).await? != operation.identity.destination_root
             { return Err(ImportError::Changed); }
             service.verify_completed(&operation).await?;
             let op = operation.clone();
-            service.blocking(move || {
-                finalize::SourceTombstone::open(&op)?.restore()?;
-                finalize::destination(&op)?.cleanup(&op)
+            let review = service.blocking(move || {
+                let restore = (|| {
+                    if finalize::SourceTombstone::present(&op)? {
+                        finalize::SourceTombstone::open(&op)?.restore()?;
+                    }
+                    Ok::<_, ImportError>(())
+                })();
+                let cleanup = finalize::destination(&op).and_then(|destination| destination.cleanup(&op));
+                Ok(restore.and(cleanup).err().map(|error| format!("cleanup abandoned; retained source requires review: {error}")))
             }).await?;
-            let result = sqlx::query("UPDATE import_operations SET source_cleanup_state='abandoned', phase='done', last_error=NULL, updated_at=unixepoch() WHERE id=? AND phase='cleanup_pending'")
-                .bind(&id).execute(&mut *tx).await?;
+            let result = sqlx::query("UPDATE import_operations SET source_cleanup_state='abandoned', phase='done', last_error=?, updated_at=unixepoch() WHERE id=? AND (phase='cleanup_pending' OR (phase='done' AND source_cleanup_state='abandoned'))")
+                .bind(review).bind(&id).execute(&mut *tx).await?;
             if result.rows_affected() != 1 { return Err(ImportError::Busy); }
             tx.commit().await?;
             service.get(&id).await

@@ -362,7 +362,7 @@ pub(crate) fn destination(operation: &ImportOperation) -> Result<Destination, Im
     )?;
     let metadata = staging.metadata()?;
     if metadata.uid() != unsafe { libc::geteuid() }
-        || (metadata.mode() & 0o077 != 0 || metadata.mode() & 0o500 != 0o500)
+        || metadata.mode() & 0o777 != 0o700
         || metadata.dev() != parent.metadata()?.dev()
     {
         return Err(ImportError::UnsafePath);
@@ -625,9 +625,21 @@ pub(crate) fn verify_stage(operation: &ImportOperation) -> Result<File, ImportEr
 }
 
 pub(crate) fn check_move_roots(source: &Path, destination: &Path) -> Result<(), ImportError> {
-    root(source)?;
-    root(destination)?;
-    if source.starts_with(destination) || destination.starts_with(source) {
+    let source_root = root(source)?;
+    let destination_root = root(destination)?;
+    check_move_root_pair(source, destination, &source_root, &destination_root)
+}
+
+fn check_move_root_pair(
+    source: &Path,
+    destination: &Path,
+    source_root: &File,
+    destination_root: &File,
+) -> Result<(), ImportError> {
+    if source.starts_with(destination)
+        || destination.starts_with(source)
+        || Identity::of(source_root)? == Identity::of(destination_root)?
+    {
         return Err(ImportError::ProtectedSource);
     }
     Ok(())
@@ -636,7 +648,7 @@ pub(crate) fn check_move_roots(source: &Path, destination: &Path) -> Result<(), 
 fn rename_error(error: std::io::Error) -> ImportError {
     if matches!(
         error.raw_os_error(),
-        Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
+        Some(libc::ENOSYS | libc::EINVAL | libc::ENOTSUP)
     ) {
         ImportError::UnsupportedMove
     } else {
@@ -650,7 +662,8 @@ fn rename_noreplace(from: &File, source: &str, to: &File, target: &str) -> Resul
     #[cfg(target_os = "linux")]
     {
         if unsafe {
-            libc::renameat2(
+            libc::syscall(
+                libc::SYS_renameat2,
                 from.as_raw_fd(),
                 source.as_ptr(),
                 to.as_raw_fd(),
@@ -689,8 +702,10 @@ impl SourceTombstone {
         if id.to_string() != operation.id {
             return Err(ImportError::InvalidJournal);
         }
-        if operation.phase != ImportPhase::CleanupPending
-            || operation.request.policy != ImportPolicy::Move
+        if !matches!(
+            operation.phase,
+            ImportPhase::CleanupPending | ImportPhase::Done
+        ) || operation.request.policy != ImportPolicy::Move
             || operation.effective_policy.as_deref() != Some("move")
             || operation.library_file_id.is_none()
         {
@@ -744,6 +759,45 @@ impl SourceTombstone {
         })
     }
 
+    pub(crate) fn present(operation: &ImportOperation) -> Result<bool, ImportError> {
+        if uuid::Uuid::parse_str(&operation.id)
+            .map_err(|_| ImportError::InvalidJournal)?
+            .to_string()
+            != operation.id
+        {
+            return Err(ImportError::InvalidJournal);
+        }
+        relative(&operation.request.source_relative)?;
+        let source = operation
+            .identity
+            .source_root
+            .join(&operation.request.source_relative);
+        let directory = source
+            .parent()
+            .ok_or(ImportError::UnsafePath)?
+            .join(format!(".library-move-{}", operation.id));
+        match std::fs::symlink_metadata(directory) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub(crate) fn remove_empty_directory(&self) -> Result<(), ImportError> {
+        check_location(&self.parent, &self.expected_parent)?;
+        let name = cstring(&self.directory_name)?;
+        if unsafe { libc::unlinkat(self.parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) }
+            != 0
+        {
+            let error = std::io::Error::last_os_error();
+            if !matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTEMPTY)) {
+                return Err(error.into());
+            }
+        }
+        self.parent.sync_all()?;
+        Ok(())
+    }
+
     fn directory(&self, create: bool) -> Result<Option<File>, ImportError> {
         if create {
             let name = cstring(&self.directory_name)?;
@@ -795,10 +849,11 @@ impl SourceTombstone {
         match rename_noreplace(&directory, "source", &self.parent, &self.name) {
             Ok(()) => {
                 directory.sync_all()?;
-                self.parent.sync_all()?;
+                self.remove_empty_directory()?;
                 Ok(true)
             }
             Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.remove_empty_directory()?;
                 Ok(false)
             }
             Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -820,7 +875,9 @@ impl SourceTombstone {
         operation: &ImportOperation,
         before_rename: impl FnOnce(),
     ) -> Result<QuarantineResult, ImportError> {
-        if operation.source_cleanup != SourceCleanup::Pending {
+        if operation.phase != ImportPhase::CleanupPending
+            || operation.source_cleanup != SourceCleanup::Pending
+        {
             return Err(ImportError::InvalidJournal);
         }
         if self.restore()? {
@@ -852,7 +909,9 @@ impl SourceTombstone {
     }
 
     pub(crate) fn finish(&self, operation: &ImportOperation) -> Result<(), ImportError> {
-        if operation.source_cleanup != SourceCleanup::Verified {
+        if operation.phase != ImportPhase::CleanupPending
+            || operation.source_cleanup != SourceCleanup::Verified
+        {
             return Err(ImportError::InvalidJournal);
         }
         check_location(&self.parent, &self.expected_parent)?;
@@ -871,8 +930,7 @@ impl SourceTombstone {
             }
             directory.sync_all()?;
         }
-        self.parent.sync_all()?;
-        Ok(())
+        self.remove_empty_directory()
     }
 }
 
@@ -881,8 +939,30 @@ mod move_support_test {
     use super::*;
 
     #[test]
+    fn aliased_root_descriptors_are_rejected_even_with_disjoint_paths() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let file = File::open(source.path()).unwrap();
+        let alias = file.try_clone().unwrap();
+        // Bind mounts expose distinct canonical paths with the same directory identity.
+        assert!(matches!(
+            check_move_root_pair(source.path(), destination.path(), &file, &alias),
+            Err(ImportError::ProtectedSource)
+        ));
+        assert!(
+            check_move_root_pair(
+                source.path(),
+                destination.path(),
+                &file,
+                &File::open(destination.path()).unwrap()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn missing_renameat2_support_is_explicit() {
-        for code in [libc::ENOSYS, libc::EINVAL, libc::EOPNOTSUPP] {
+        for code in [libc::ENOSYS, libc::EINVAL, libc::ENOTSUP] {
             assert!(matches!(
                 rename_error(std::io::Error::from_raw_os_error(code)),
                 ImportError::UnsupportedMove

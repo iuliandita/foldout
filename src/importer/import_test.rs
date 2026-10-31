@@ -1359,10 +1359,10 @@ async fn move_tombstone_recovery_undoes_uncommitted_and_finishes_verified_captur
                 fs::read(fixture.source.path().join("owned.pdf")).unwrap(),
                 PDF
             );
-            assert!(!captured.exists());
+            assert!(!captured.parent().unwrap().exists());
         }
         fixture.assert_done().await;
-        assert!(!captured.exists());
+        assert!(!captured.parent().unwrap().exists());
     }
 }
 
@@ -1403,6 +1403,13 @@ async fn move_verified_tombstone_change_is_restored_and_new_original_names_are_p
             );
             assert_eq!(fs::read(&source).unwrap(), b"new original name");
         }
+        assert!(
+            !fixture
+                .source
+                .path()
+                .join(format!(".library-move-{}", fixture.id))
+                .exists()
+        );
         assert_eq!(
             fs::read(fixture.destination.path().join("imported.pdf")).unwrap(),
             PDF
@@ -1479,6 +1486,174 @@ async fn operator_can_abandon_changed_move_cleanup_only_with_valid_destination_e
         copy.service().abandon_move_cleanup(&copy.id).await,
         Err(ImportError::Conflict)
     ));
+}
+
+#[tokio::test]
+async fn move_rejects_other_imports_reserved_and_published_destinations() {
+    for boundary in ["plan", "replay", "cleanup"] {
+        for published in [false, true] {
+            let fixture = if boundary == "cleanup" {
+                pending_move().await
+            } else {
+                Fixture::new(ImportPolicy::Move).await
+            };
+            if boundary == "replay" {
+                fixture.plan().await;
+            }
+            let source = fixture.source.path().join("owned.pdf");
+            let saved = fixture.source.path().join("saved.pdf");
+            fs::rename(&source, &saved).unwrap();
+            fs::write(fixture.destination.path().join("other.pdf"), PDF).unwrap();
+            let other_id = Uuid::new_v4().to_string();
+            fixture
+                .service()
+                .plan(
+                    &other_id,
+                    InternalImportRequest {
+                        source_root: fixture.request.destination_root.clone(),
+                        source_relative: "other.pdf".into(),
+                        destination_root: fixture.request.source_root.clone(),
+                        destination_relative: "owned.pdf".into(),
+                        unit_id: fixture.request.unit_id.clone(),
+                        policy: ImportPolicy::Copy,
+                    },
+                    ImportMode::Standalone,
+                )
+                .await
+                .unwrap();
+            if published {
+                for _ in 0..3 {
+                    fixture.service().step(&other_id).await.unwrap();
+                }
+            } else {
+                fs::rename(&saved, &source).unwrap();
+            }
+            let result = if boundary == "cleanup" {
+                fixture.service().recover(&fixture.id).await
+            } else {
+                fixture
+                    .service()
+                    .plan(&fixture.id, fixture.request.clone(), ImportMode::Standalone)
+                    .await
+            };
+            assert!(
+                matches!(result, Err(ImportError::ProtectedSource)),
+                "{boundary}, published={published}: {result:?}"
+            );
+            assert_eq!(fs::read(source).unwrap(), PDF);
+        }
+    }
+}
+
+#[tokio::test]
+async fn recovery_removes_empty_move_directories_and_preserves_nonempty_ones() {
+    for completed in [false, true] {
+        for nonempty in [false, true] {
+            let fixture = pending_move().await;
+            if completed {
+                fixture.assert_done().await;
+            }
+            let directory = fixture
+                .source
+                .path()
+                .join(format!(".library-move-{}", fixture.id));
+            fs::create_dir(&directory).unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+            if nonempty {
+                fs::write(directory.join("keep"), b"unrelated").unwrap();
+            }
+            fixture.assert_done().await;
+            assert_eq!(directory.exists(), nonempty);
+            if nonempty {
+                assert_eq!(fs::read(directory.join("keep")).unwrap(), b"unrelated");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn abandonment_keeps_sources_when_the_parent_is_renamed_or_replaced() {
+    for parent_change in ["intact", "renamed", "replaced"] {
+        for captured in [false, true] {
+            let mut fixture = Fixture::new(ImportPolicy::Move).await;
+            let parent = fixture.source.path().join("nested");
+            fs::create_dir(&parent).unwrap();
+            fs::rename(
+                fixture.source.path().join("owned.pdf"),
+                parent.join("owned.pdf"),
+            )
+            .unwrap();
+            fixture.request.source_relative = "nested/owned.pdf".into();
+            fixture.plan().await;
+            for _ in 0..5 {
+                fixture.service().step(&fixture.id).await.unwrap();
+            }
+            if captured {
+                fixture.service().step(&fixture.id).await.unwrap();
+            }
+            let kept_parent = if parent_change == "intact" {
+                parent.clone()
+            } else {
+                let kept = fixture.source.path().join("kept");
+                fs::rename(&parent, &kept).unwrap();
+                if parent_change == "replaced" {
+                    fs::create_dir(&parent).unwrap();
+                    fs::write(parent.join("owned.pdf"), b"replacement").unwrap();
+                    if captured {
+                        let private = parent.join(format!(".library-move-{}", fixture.id));
+                        fs::create_dir(&private).unwrap();
+                        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+                        fs::write(private.join("source"), b"replacement tombstone").unwrap();
+                    }
+                }
+                kept
+            };
+            let done = fixture
+                .service()
+                .abandon_move_cleanup(&fixture.id)
+                .await
+                .unwrap();
+            assert_eq!(done.phase, ImportPhase::Done);
+            assert_eq!(done.source_cleanup, SourceCleanup::Abandoned);
+            if parent_change == "replaced" && captured {
+                assert!(done.last_error.is_some());
+                assert_eq!(
+                    fs::read(parent.join(format!(".library-move-{}/source", fixture.id))).unwrap(),
+                    b"replacement tombstone"
+                );
+            }
+            let retained = if captured && parent_change != "intact" {
+                kept_parent.join(format!(".library-move-{}/source", fixture.id))
+            } else {
+                kept_parent.join("owned.pdf")
+            };
+            assert_eq!(fs::read(&retained).unwrap(), PDF);
+            if parent_change == "intact" {
+                assert!(
+                    !parent
+                        .join(format!(".library-move-{}", fixture.id))
+                        .exists()
+                );
+            }
+            if parent_change == "replaced" {
+                assert_eq!(fs::read(parent.join("owned.pdf")).unwrap(), b"replacement");
+            }
+            assert_eq!(
+                fixture.service().recover(&fixture.id).await.unwrap().phase,
+                ImportPhase::Done
+            );
+            assert_eq!(
+                fixture
+                    .service()
+                    .abandon_move_cleanup(&fixture.id)
+                    .await
+                    .unwrap()
+                    .phase,
+                ImportPhase::Done
+            );
+            assert_eq!(fs::read(retained).unwrap(), PDF);
+        }
+    }
 }
 
 fn private_directory() -> tempfile::TempDir {

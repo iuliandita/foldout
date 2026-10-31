@@ -359,7 +359,7 @@ async fn scenario(boundary: &str, policy: ImportPolicy, collision: bool) {
         assert_eq!(fs::read(root.join("source/owned.cbz")).unwrap(), CBZ);
         assert!(
             !root
-                .join(format!("source/.library-move-{}/source", input.operation))
+                .join(format!("source/.library-move-{}", input.operation))
                 .exists()
         );
     }
@@ -409,6 +409,13 @@ async fn scenario(boundary: &str, policy: ImportPolicy, collision: bool) {
             assert_eq!(identity(&target), inode);
         }
         assert_eq!(identity(&target) == original, hardlink);
+        if moving {
+            assert!(
+                !root
+                    .join(format!("source/.library-move-{}", input.operation))
+                    .exists()
+            );
+        }
         assert_eq!(
             ArchiveDecoder::new()
                 .manifest(&target)

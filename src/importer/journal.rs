@@ -124,7 +124,7 @@ pub enum ImportError {
     CrossFilesystem,
     #[error("move is forbidden for a torrent-preserving import")]
     TorrentPreserving,
-    #[error("move source is cataloged or its roots overlap")]
+    #[error("move source is cataloged or reserved, or its roots overlap")]
     ProtectedSource,
     #[error("move requires renameat2 with RENAME_NOREPLACE support")]
     UnsupportedMove,
@@ -200,7 +200,7 @@ impl ImportService {
                 {
                     return Err(ImportError::Changed);
                 }
-                self.check_move_catalog(&request, &existing.identity, &mut tx)
+                self.check_move_catalog(&id, &request, &existing.identity, &mut tx)
                     .await?;
                 tx.commit().await?;
             }
@@ -228,7 +228,7 @@ impl ImportService {
         {
             return Err(ImportError::Changed);
         }
-        self.check_move_catalog(&request, &identity, &mut tx)
+        self.check_move_catalog(&id, &request, &identity, &mut tx)
             .await?;
         let result = sqlx::query("INSERT INTO import_operations (id, source_root, destination_root, destination_relative, destination_path, unit_id, request_json, identity_json, phase) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned')")
             .bind(&id).bind(&request.source_root).bind(&request.destination_root)
@@ -255,6 +255,7 @@ impl ImportService {
 
     pub(crate) async fn check_move_catalog(
         &self,
+        operation_id: &str,
         request: &InternalImportRequest,
         identity: &IntentIdentity,
         connection: &mut sqlx::SqliteConnection,
@@ -263,9 +264,10 @@ impl ImportService {
             return Ok(());
         }
         let source = identity.source_root.join(&request.source_relative);
-        let protected: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM library_files WHERE path = ? OR (root_id = ? AND relative_path = ?))")
+        let protected: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM library_files WHERE path = ? OR (root_id = ? AND relative_path = ?)) OR EXISTS(SELECT 1 FROM import_operations WHERE id != ? AND destination_path = ?)")
             .bind(source.to_str().ok_or(ImportError::UnsafePath)?)
             .bind(&request.source_root).bind(&request.source_relative)
+            .bind(operation_id).bind(source.to_str().ok_or(ImportError::UnsafePath)?)
             .fetch_one(connection).await?;
         if protected {
             return Err(ImportError::ProtectedSource);
