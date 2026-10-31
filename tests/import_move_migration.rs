@@ -8,7 +8,7 @@ async fn move_upgrade_preserves_journals_reservations_and_foreign_keys() {
         .await
         .unwrap();
     let migrations = sqlx::migrate!("./migrations");
-    for migration in migrations.iter().filter(|migration| migration.version < 19) {
+    for migration in migrations.iter().filter(|migration| migration.version < 20) {
         sqlx::raw_sql(migration.sql.clone())
             .execute(&mut connection)
             .await
@@ -42,7 +42,7 @@ async fn move_upgrade_preserves_journals_reservations_and_foreign_keys() {
         .fetch_one(&mut connection)
         .await
         .unwrap();
-    sqlx::raw_sql(include_str!("../migrations/019_import_move.sql"))
+    sqlx::raw_sql(include_str!("../migrations/020_import_move.sql"))
         .execute(&mut connection)
         .await
         .unwrap();
