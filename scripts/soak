@@ -13,6 +13,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import sqlite3
@@ -30,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 REQUIRED = ("monitor_review", "direct_resume", "direct_restart", "mapping_correction",
             "import_recovery", "reassessment", "service_restart")
 MAX_DISK = 256 * 1024**2
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 def utc():
@@ -46,6 +48,26 @@ def loopback(url):
     return url.rstrip("/")
 
 
+def binary_revision(version, checkout_commit):
+    match = re.fullmatch(r"libraryd [0-9][0-9A-Za-z.+-]* \(([0-9a-f]{7})\) \[soak-fixtures debug\]", version)
+    if not match:
+        raise ValueError("binary requires a known source commit and exact soak-fixtures debug version")
+    revision = match.group(1)
+    if not re.fullmatch(r"[0-9a-f]{40}", checkout_commit) or revision != checkout_commit[:7]:
+        raise ValueError("binary source commit does not match checkout HEAD")
+    return revision
+
+
+def loopback_configuration(urls, addresses):
+    try:
+        return (len(urls) == 2 and all(loopback(url) == url for url in urls)
+                and len(addresses) == 1 and all(
+                    len(address) == 2 and ipaddress.ip_address(address[0]).is_loopback
+                    and type(address[1]) is int and 0 < address[1] <= 65535 for address in addresses))
+    except (TypeError, ValueError):
+        return False
+
+
 def classifications(report):
     invalid = {"fixture result": "invalid", "multi-day observation": "unmeasured",
                "real-household acceptance": "unmeasured"}
@@ -53,15 +75,25 @@ def classifications(report):
         if type(report["schema_version"]) is not int or report["schema_version"] != 1 or report["fixture_class"] != "owned loopback":
             return invalid
         artifact = report["artifact"]
-        for key, size in (("git_commit", 40), ("binary_sha256", 64)):
+        for key, size in (("git_commit", 7), ("checkout_git_commit", 40), ("binary_sha256", 64)):
             value = artifact[key]
             if not isinstance(value, str) or len(value) != size or any(c not in "0123456789abcdef" for c in value):
                 return invalid
         if type(artifact["dirty_tree"]) is not bool or artifact["build_profile"] != "debug; soak-fixtures":
             return invalid
+        if binary_revision(artifact["binary_version"], artifact["checkout_git_commit"]) != artifact["git_commit"]:
+            return invalid
         urls = report["configured_urls"]
         if (not isinstance(urls, list) or len(urls) != 2
                 or any(not isinstance(url, str) or loopback(url) != url for url in urls)):
+            return invalid
+        addresses = report["fixture_bound_addresses"]
+        if (not isinstance(addresses, list) or len(addresses) != 1
+                or any(not isinstance(a, list) or len(a) != 2 or not isinstance(a[0], str)
+                       or type(a[1]) is not int or not 0 < a[1] <= 65535 for a in addresses)):
+            return invalid
+        interrupted = report["interrupted"]
+        if interrupted is not None and (not isinstance(interrupted, str) or not interrupted):
             return invalid
         window = report["window"]
         duration, elapsed = window["requested_seconds"], window["elapsed_seconds"]
@@ -98,9 +130,11 @@ def classifications(report):
             if datetime.datetime.fromisoformat(window[key]).tzinfo is None:
                 return invalid
         failed = (bool(report["failures"]) or not all(report["invariants"].values())
+                  or not loopback_configuration(urls, addresses)
                   or before != after or not report["cleanup_completed"]
-                  or report["client_submissions"] != report["cycles_completed"])
-        complete = (all(checks.values()) and report["cycles_completed"] >= 1 and elapsed >= duration)
+                  or not report["cycles_completed"] <= report["client_submissions"] <=
+                  report["cycles_completed"] + (1 if interrupted else 0))
+        complete = (not interrupted and all(checks.values()) and report["cycles_completed"] >= 1 and elapsed >= duration)
         verdict = "fail" if failed else "pass" if complete else "unmeasured"
         return {"fixture result": verdict,
                 "multi-day observation": verdict if complete and duration >= 172800 else "unmeasured",
@@ -341,7 +375,6 @@ class Soak:
     def stop(self):
         if self.child:
             child = self.child
-            self.child = None
             if child.poll() is None:
                 child.terminate()
                 try:
@@ -349,7 +382,11 @@ class Soak:
                 except subprocess.TimeoutExpired:
                     child.kill()
                     child.wait()
+                    self.child = None
                     raise RuntimeError("owned service failed bounded shutdown")
+            else:
+                child.wait()
+            self.child = None
             if child.returncode != 0:
                 raise RuntimeError(f"owned service shutdown exit {child.returncode}")
         if self.log:
@@ -371,6 +408,11 @@ class Soak:
         self.report["originals_before"] = self.hashes()
         self.fixture = Fixtures(archive)
         self.report["configured_urls"] = [self.args.listen_url, self.fixture.url]
+        self.report["fixture_bound_addresses"] = [list(self.fixture.server.server_address)]
+        self.report["invariants"]["loopback_configuration"] = loopback_configuration(
+            self.report["configured_urls"], self.report["fixture_bound_addresses"])
+        if not self.report["invariants"]["loopback_configuration"]:
+            raise RuntimeError("non-loopback fixture configuration")
         self.start()
         token = (self.state / "setup-token").read_text().strip()
         self.api("POST", "/api/v1/auth/setup", {"username": "soak-owner", "password": "owned disposable soak password"}, 201,
@@ -536,6 +578,8 @@ class Soak:
                 time.sleep(min(1, max(0, self.end-time.monotonic())))
 
     def finish(self):
+        for signum in STOP_SIGNALS:
+            signal.signal(signum, signal.SIG_IGN)
         try:
             try:
                 self.stop()
@@ -546,6 +590,8 @@ class Soak:
                 self.fixture.close()
                 self.report["fixture_requests"] = self.fixture.requests
                 self.report["client_submissions"] = self.fixture.submissions
+            self.report["invariants"]["loopback_configuration"] = loopback_configuration(
+                self.report.get("configured_urls", []), self.report.get("fixture_bound_addresses", []))
             if (self.home / "originals/owned.cbz").exists():
                 self.report["originals_after"] = self.hashes()
                 source = self.home / "source/owned.cbz"
@@ -560,6 +606,7 @@ class Soak:
             summary = (f"Fixture result: {verdict['fixture result']}\nCompleted cycles: {self.report['cycles_completed']}\n"
                        f"Observed seconds: {self.report['window']['elapsed_seconds']}\n"
                        f"Multi-day observation: {verdict['multi-day observation']}\nReal-household acceptance: unmeasured\n"
+                       + (f"Interrupted: {self.report['interrupted']}\n" if self.report["interrupted"] else "")
                        + "".join(f"Failure: {failure}\n" for failure in self.report["failures"]))
             (self.home / "summary.txt").write_text(summary)
             print(summary, end="")
@@ -595,9 +642,9 @@ def main():
                 args.listen_url = f"http://127.0.0.1:{listener.getsockname()[1]}"
         args.listen_url = loopback(args.listen_url)
         args.binary = args.binary.resolve(strict=True)
-        identity = subprocess.check_output([str(args.binary), "--version"], text=True, timeout=10)
-        if "[soak-fixtures debug]" not in identity:
-            parser.error("binary lacks soak-fixtures debug transport; refusing any workload")
+        identity = subprocess.check_output([str(args.binary), "--version"], text=True, timeout=10).strip()
+        checkout_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        revision = binary_revision(identity, checkout_commit)
         parsed = urlsplit(args.listen_url)
         family = socket.AF_INET6 if ":" in parsed.hostname else socket.AF_INET
         with socket.socket(family) as reservation:
@@ -612,23 +659,27 @@ def main():
     except (OSError, ValueError) as error:
         parser.error(str(error))
     report = {"schema_version": 1, "fixture_class": "owned loopback", "artifact": {
-        "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "git_commit": revision, "checkout_git_commit": checkout_commit, "binary_version": identity,
         "dirty_tree": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
         "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
         "build_profile": "debug; soak-fixtures"},
         "window": {"started_at": utc(), "ended_at": None, "requested_seconds": args.duration_seconds,
                    "elapsed_seconds": 0, "interval_seconds": args.interval_seconds},
-        "checks": dict.fromkeys(REQUIRED, False), "cycles_completed": 0, "transitions": [], "failures": [],
+        "checks": dict.fromkeys(REQUIRED, False), "cycles_completed": 0, "transitions": [], "failures": [], "interrupted": None,
+        "configured_urls": [], "fixture_bound_addresses": [],
         "originals_before": {}, "originals_after": {}, "cleanup_completed": False,
-        "invariants": {"original_hashes_unchanged": False, "loopback_configuration": True},
+        "invariants": {"original_hashes_unchanged": False, "loopback_configuration": False},
         "real_household": {"authorization": None, "observation": None, "result": "unmeasured"}}
     runner = Soak(args, report)
     def interrupted(signum, frame):
-        raise KeyboardInterrupt(f"signal {signum}")
-    signal.signal(signal.SIGTERM, interrupted)
+        raise KeyboardInterrupt(signal.Signals(signum).name)
+    for signum in STOP_SIGNALS:
+        signal.signal(signum, interrupted)
     try:
         runner.run()
-    except (Exception, KeyboardInterrupt) as error:
+    except KeyboardInterrupt as error:
+        report["interrupted"] = str(error) or "SIGINT"
+    except Exception as error:
         traceback.print_exc()
         report["failures"].append(f"{type(error).__name__}: {error}")
     finally:

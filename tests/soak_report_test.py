@@ -5,7 +5,9 @@ import subprocess
 import sys
 from pathlib import Path
 import tempfile
+import time
 import unittest
+from unittest.mock import Mock, patch
 
 loader = importlib.machinery.SourceFileLoader("soak", str(Path(__file__).resolve().parents[1] / "scripts/soak"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -15,9 +17,11 @@ loader.exec_module(soak)
 
 def evidence():
     return {"schema_version": 1, "fixture_class": "owned loopback",
-            "artifact": {"git_commit": "a"*40, "binary_sha256": "b"*64,
+            "artifact": {"git_commit": "a"*7, "checkout_git_commit": "a"*40,
+                         "binary_version": "libraryd 0.1.0 (aaaaaaa) [soak-fixtures debug]", "binary_sha256": "b"*64,
                          "dirty_tree": False, "build_profile": "debug; soak-fixtures"},
             "configured_urls": ["http://127.0.0.1:8787", "http://127.0.0.1:8788"],
+            "fixture_bound_addresses": [["127.0.0.1", 8788]],
             "fixture_requests": [{"method": "GET", "path": "/owned.cbz", "mode": None,
                                   "range": "bytes=274-", "if_range": '"owned"'}],
             "client_submissions": 1,
@@ -27,7 +31,7 @@ def evidence():
             "transitions": [{"at_seconds": 1, "kind": "cycle", "id": "1", "state": "completed"}],
             "originals_before": {"fixture": "a"*64}, "originals_after": {"fixture": "a"*64},
             "invariants": {"original_hashes_unchanged": True, "loopback_configuration": True},
-            "failures": [], "cleanup_completed": True}
+            "failures": [], "interrupted": None, "cleanup_completed": True}
 
 
 class ClassificationTest(unittest.TestCase):
@@ -59,6 +63,26 @@ class ClassificationTest(unittest.TestCase):
             report["real-household acceptance"] = "pass"
             self.assertEqual(soak.classifications(report)["real-household acceptance"], "unmeasured")
 
+    def test_operator_interruption_is_unmeasured_unless_a_failure_is_recorded(self):
+        report = evidence()
+        report["interrupted"] = "SIGHUP"
+        report["client_submissions"] += 1
+        self.assertEqual(soak.classifications(report)["fixture result"], "unmeasured")
+        report["failures"] = ["wrong imported bytes"]
+        self.assertEqual(soak.classifications(report)["fixture result"], "fail")
+        report["failures"] = []
+        report["invariants"]["original_hashes_unchanged"] = False
+        self.assertEqual(soak.classifications(report)["fixture result"], "fail")
+        report["fixture_requests"] = []
+        self.assertEqual(soak.classifications(report)["fixture result"], "invalid")
+
+    def test_actual_fixture_bind_addresses_must_be_loopback(self):
+        report = evidence()
+        self.assertTrue(soak.loopback_configuration(report["configured_urls"], report["fixture_bound_addresses"]))
+        report["fixture_bound_addresses"] = [["0.0.0.0", 8788]]
+        self.assertFalse(soak.loopback_configuration(report["configured_urls"], report["fixture_bound_addresses"]))
+        self.assertEqual(soak.classifications(report)["fixture result"], "fail")
+
     def test_malformed_or_missing_evidence_invalid(self):
         examples = [None, {}, [], "pass"]
         for key in evidence():
@@ -89,10 +113,13 @@ class ClassificationTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 soak.loopback(value)
         self.assertEqual(soak.loopback("http://127.0.0.1:8787/"), "http://127.0.0.1:8787")
-        with tempfile.TemporaryDirectory() as directory:
+        target = soak.ROOT / "target"
+        target.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=target) as directory:
             path = Path(directory)
             binary = path / "fixture-binary"
-            binary.write_text("#!/bin/sh\nprintf '%s\\n' 'libraryd [soak-fixtures debug]'\n")
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=soak.ROOT, text=True).strip()
+            binary.write_text(f"#!/bin/sh\nprintf '%s\\n' 'libraryd 0.1.0 ({commit[:7]}) [soak-fixtures debug]'\n")
             binary.chmod(0o700)
             command = [sys.executable, "-I", "-B", str(Path(soak.__file__)), "--binary", str(binary)]
             for candidate in [path, path / "dangling"]:
@@ -107,8 +134,42 @@ class ClassificationTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("loopback", result.stderr)
             self.assertFalse((path / "new").exists())
-            binary.write_text("#!/bin/sh\nprintf '%s\\n' 'libraryd ordinary debug'\n")
-            result = subprocess.run(command + ["--state-dir", str(path / "new")], capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("binary lacks soak-fixtures", result.stderr)
-            self.assertFalse((path / "new").exists())
+            for version, message in [
+                ("libraryd ordinary debug", "exact soak-fixtures debug version"),
+                ("libraryd 0.1.0 (unknown) [soak-fixtures debug]", "known source commit"),
+                (f"libraryd 0.1.0 ({'0'*7 if commit[:7] != '0'*7 else '1'*7}) [soak-fixtures debug]", "does not match checkout HEAD"),
+                (f"prefix libraryd 0.1.0 ({commit[:7]}) [soak-fixtures debug]", "exact soak-fixtures debug version"),
+            ]:
+                with self.subTest(version=version):
+                    binary.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n")
+                    result = subprocess.run(command + ["--state-dir", str(path / "new")], capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+                    self.assertFalse((path / "new").exists())
+
+    def test_child_is_retained_until_wait_succeeds_and_cleanup_ignores_stop_signals(self):
+        runner = object.__new__(soak.Soak)
+        runner.child, runner.log = Mock(), None
+        child = runner.child
+        child.poll.return_value = None
+        child.wait.side_effect = OSError("wait failed")
+        with self.assertRaisesRegex(OSError, "wait failed"):
+            runner.stop()
+        self.assertIs(runner.child, child)
+        child.wait.side_effect = None
+        child.returncode = 0
+        runner.stop()
+        self.assertIsNone(runner.child)
+        runner.stop = Mock(side_effect=OSError("shutdown failed"))
+        runner.report = evidence()
+        runner.fixture = None
+        runner.clock = time.monotonic()
+        runner.save = Mock()
+        target = soak.ROOT / "target"
+        target.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=target) as directory, patch.object(soak.signal, "signal") as handler, patch("builtins.print"):
+            runner.home = Path(directory)
+            runner.finish()
+        self.assertEqual(handler.call_args_list,
+                         [unittest.mock.call(signum, soak.signal.SIG_IGN) for signum in soak.STOP_SIGNALS])
+        self.assertEqual(runner.report["failures"], ["shutdown: shutdown failed"])

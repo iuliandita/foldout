@@ -21,7 +21,7 @@ are fresh fixture values. No existing credentials or browser sessions are used.
 umask 077
 export CARGO_TARGET_DIR="$PWD/target" CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=1
 cargo fetch --locked
-nice -n 8 cargo build --locked --offline --bin libraryd --features soak-fixtures
+LIBRARY_BUILD_COMMIT=$(git rev-parse HEAD) nice -n 8 cargo build --locked --offline --bin libraryd --features soak-fixtures
 ./scripts/soak --state-dir docs/local/soak-smoke --duration-seconds 180
 ```
 
@@ -31,8 +31,10 @@ exist on trusted local storage. The service creates a new private `state/`
 beneath it, listens on an unused literal loopback port, and enables workers.
 `--binary` can select the debug executable. `--listen-url` accepts only a literal
 loopback HTTP origin with a port, without credentials, query, fragment or path.
-The runner refuses other configured URLs, occupied listen ports, binaries without
-the `soak-fixtures` debug version marker, and redirects. Fixture servers
+The runner refuses other configured URLs, occupied listen ports, redirects, and
+binaries whose exact version string lacks the `soak-fixtures` debug marker or a
+known source commit matching checkout HEAD. Rebuild after changing HEAD; an
+`unknown` or mismatched commit is refused before state creation. Fixture servers
 bind only to `127.0.0.1`; they record requests and never forward traffic.
 
 Direct archive policy normally rejects loopback. The explicit `soak-fixtures`
@@ -41,8 +43,8 @@ a literal loopback socket, and the archive connection is rewritten there before
 DNS or connect. The fixture's allowed-host archive link is an inert adapter
 identity, not a contacted endpoint. No host policy is relaxed in ordinary builds.
 The debug version string includes `[soak-fixtures debug]`; the runner checks it
-before starting any workload. Release builds with this feature are rejected at
-compile time. Never deploy this
+before starting any workload. Release builds and builds combining this feature
+with `embedded-ui` are rejected at compile time. Never deploy this
 debug executable. The smoke exercises GetComics-style archives; MangaDex pages,
 real indexers and real downloaders remain outside its evidence.
 
@@ -122,7 +124,9 @@ transient peaks and decoder descendants are not continuously accounted for.
 The fake payload gate releases or times out after 20 seconds. No external network
 acceptance or resource-performance claim follows from these bounds.
 
-Use Ctrl-C or SIGTERM to abort. The runner terminates only its recorded child,
+Use Ctrl-C, SIGTERM or SIGHUP to abort. The runner records the operator signal in
+`interrupted`, separately from failures, and ignores further stop signals during
+cleanup. The runner terminates only its recorded child,
 allows 35 seconds for shutdown, and closes its owned fixture servers. A forced
 service kill is a failure. Evidence and disposable state are retained; nothing
 is automatically deleted. SIGKILL or host failure can leave an owned service and
@@ -134,10 +138,12 @@ Check retained evidence before removing only that disposable run directory.
 
 The run directory contains atomic `report.json` checkpoints, `summary.txt`, and
 `service.log`. [The report template](soak-report-template.json) intentionally
-contains no passing measurements. Reports record source revision, dirty-tree
-status, executable SHA-256/profile, exact requested/elapsed window, cycle count,
+contains no passing measurements. Reports record the binary's exact version and
+seven-character source commit, matching full checkout revision, dirty-tree
+status, executable SHA-256/profile, configured URLs and actual fixture bind
+addresses, exact requested/elapsed window, cycle count,
 UTC endpoints, monotonic transition offsets, reasons, injected faults, fixture
-request method/path/Range/If-Range, client submissions, hash manifests, failures,
+request method/path/Range/If-Range, client submissions, hash manifests, failures, operator interruption,
 and process/server cleanup. They never record session cookies or setup tokens.
 
 ```sh
@@ -151,6 +157,9 @@ python3 -I -B -m unittest discover -s tests -p soak_report_test.py
   or failed cleanup. The runner exits nonzero. Expected injected interruptions
   are transitions, not unexpected failures.
 - `unmeasured`: well-formed evidence without complete workload/window evidence.
+  An operator interruption keeps this result even after the requested window;
+  actual failures or violated invariants still fail. A submission from the one
+  interrupted cycle is allowed without claiming that cycle completed.
   A sub-two-day run always leaves multi-day observation unmeasured.
 - `invalid`: absent, malformed, or structurally incomplete evidence. The template
   is invalid until filled from observation. Classification exits nonzero for

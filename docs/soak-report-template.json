@@ -3,6 +3,8 @@
   "fixture_class": "owned loopback",
   "artifact": {
     "git_commit": null,
+    "checkout_git_commit": null,
+    "binary_version": null,
     "dirty_tree": null,
     "binary_sha256": null,
     "build_profile": null
@@ -26,6 +28,7 @@
   "cycles_completed": 0,
   "transitions": [],
   "failures": [],
+  "interrupted": null,
   "originals_before": {},
   "originals_after": {},
   "cleanup_completed": false,
@@ -34,6 +37,7 @@
     "loopback_configuration": false
   },
   "configured_urls": [],
+  "fixture_bound_addresses": [],
   "fixture_requests": [],
   "client_submissions": 0,
   "real_household": {

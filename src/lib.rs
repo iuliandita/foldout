@@ -1,5 +1,7 @@
 #[cfg(all(feature = "soak-fixtures", not(debug_assertions)))]
 compile_error!("soak-fixtures is restricted to disposable debug builds");
+#[cfg(all(feature = "soak-fixtures", feature = "embedded-ui"))]
+compile_error!("soak-fixtures cannot be combined with shipped embedded-ui artifacts");
 
 /// Package version and immutable build revision, shared by the CLI and About API.
 pub const VERSION: &str = if cfg!(feature = "soak-fixtures") {
