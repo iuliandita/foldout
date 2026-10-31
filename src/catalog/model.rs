@@ -194,6 +194,9 @@ pub struct Edition {
     pub language: String,
     pub region: Option<String>,
     pub publisher: Option<String>,
+    pub language_locked: bool,
+    pub region_locked: bool,
+    pub publisher_locked: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -228,6 +231,10 @@ pub struct Unit {
     pub sort_key: Option<String>,
     pub date: Option<String>,
     pub date_precision: Option<DatePrecision>,
+    pub label_locked: bool,
+    pub kind_locked: bool,
+    pub sort_key_locked: bool,
+    pub date_locked: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

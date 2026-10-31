@@ -31,8 +31,8 @@ macro_rules! monitor_target_query {
 WITH monitor_target AS (
     SELECT m.*, i.label AS integration_label, m.owner AS monitor_owner, m.unit_id AS monitor_unit_id, m.integration_id AS monitor_integration_id,
         p.id AS p_id, p.content_type AS p_content_type, p.title AS p_title, p.sort_title AS p_sort_title, p.run_label AS p_run_label, p.title_locked AS p_title_locked, p.known_unit_count AS p_known_unit_count,
-        e.id AS e_id, e.publication_id AS e_publication_id, e.language AS e_language, e.region AS e_region, e.publisher AS e_publisher,
-        u.id AS u_id, u.edition_id AS u_edition_id, u.label AS u_label, u.kind AS u_kind, u.sort_key AS u_sort_key, u.date AS u_date, u.date_precision AS u_date_precision
+        e.id AS e_id, e.publication_id AS e_publication_id, e.language AS e_language, e.region AS e_region, e.publisher AS e_publisher, e.language_locked AS e_language_locked, e.region_locked AS e_region_locked, e.publisher_locked AS e_publisher_locked,
+        u.id AS u_id, u.edition_id AS u_edition_id, u.label AS u_label, u.kind AS u_kind, u.sort_key AS u_sort_key, u.date AS u_date, u.date_precision AS u_date_precision, u.label_locked AS u_label_locked, u.kind_locked AS u_kind_locked, u.sort_key_locked AS u_sort_key_locked, u.date_locked AS u_date_locked
     FROM monitors m JOIN integrations i ON i.id = m.integration_id JOIN units u ON u.id = m.unit_id JOIN editions e ON e.id = u.edition_id JOIN publications p ON p.id = e.publication_id
 )
 SELECT * FROM monitor_target
