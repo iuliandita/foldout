@@ -1178,6 +1178,7 @@ async fn cancellation_rejects_every_import_phase_even_for_idle_direct_intents() 
                 unit_id: f.request.unit_id.clone(),
                 policy: ImportPolicy::Copy,
             },
+            ImportMode::Standalone,
         )
         .await
         .unwrap();
