@@ -3,6 +3,7 @@ mod intent;
 pub(crate) mod manga_transfer;
 pub mod monitor;
 pub mod pipeline;
+mod transfer_checkpoint;
 
 pub use intent::{Intent, IntentError, Intents};
 

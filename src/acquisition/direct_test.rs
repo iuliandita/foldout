@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 static TEST_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const ARCHIVE: &[u8] = include_bytes!("../../tests/fixtures/natural-order.cbz");
 
+#[path = "direct_recovery_test.rs"]
+mod recovery_tests;
+
 #[tokio::test]
 async fn direct_search_honors_persisted_shared_cooldown() {
     let fixture = Fixture::new().await;
@@ -61,6 +64,7 @@ struct Seen {
     changed: bool,
     metadata_change: u8,
     missing_manifest_page: bool,
+    disable_during_resolution: bool,
     requests: Vec<String>,
 }
 struct Server {
@@ -88,6 +92,12 @@ impl Server {
                 tx.rollback().await.unwrap();
                 let mut state=seen.lock().unwrap();state.transfers+=1;state.requests.push(request.uri().to_string());
                 return Response::builder().status(if state.fail {503} else {200}).header("content-type","application/zip").body(Body::from(ARCHIVE)).unwrap();
+            }
+            let disable = { let mut state=seen.lock().unwrap(); std::mem::take(&mut state.disable_during_resolution) };
+            if disable {
+                let mut tx=store.begin_write().await.unwrap();
+                sqlx::query("UPDATE integrations SET enabled=0 WHERE kind='getcomics'").execute(&mut *tx).await.unwrap();
+                tx.commit().await.unwrap();
             }
             let state=seen.lock().unwrap();
             let body=if path=="/" {
@@ -641,6 +651,21 @@ async fn manage_scope_is_required_for_every_direct_route() {
             "/api/v1/direct/acquisitions/not-owned/cancel",
             serde_json::json!({}),
         ),
+        (
+            "GET",
+            "/api/v1/direct/acquisitions/not-owned/review",
+            serde_json::json!({}),
+        ),
+        (
+            "POST",
+            "/api/v1/direct/acquisitions/not-owned/resume",
+            serde_json::json!({"revision":0,"transfer_fingerprint":"f".repeat(64)}),
+        ),
+        (
+            "POST",
+            "/api/v1/direct/acquisitions/not-owned/restart",
+            serde_json::json!({"revision":0,"transfer_fingerprint":"f".repeat(64)}),
+        ),
         ("GET", "/api/v1/direct/acquisitions", serde_json::json!({})),
         (
             "GET",
@@ -792,7 +817,7 @@ impl Server {
             } else {
                 assert_eq!(path, format!("/at-home/server/{CHAPTER_ID}"));
                 let files = if state.missing_manifest_page { vec!["first.png"] } else { vec!["first.png","second.png"] };
-                serde_json::json!({"result":"ok","baseUrl":"https://uploads.mangadex.org","chapter":{"hash":"0123456789abcdef0123456789abcdef","data":files,"dataSaver":files}})
+                serde_json::json!({"result":"ok","baseUrl":"https://uploads.mangadex.org","chapter":{"hash":if state.changed {"fedcba9876543210fedcba9876543210"} else {"0123456789abcdef0123456789abcdef"},"data":files,"dataSaver":files}})
             };
             Response::builder().header("content-type","application/json").body(Body::from(body.to_string())).unwrap()
         }).with_state((store, seen.clone()));

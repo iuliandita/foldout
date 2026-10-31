@@ -3,7 +3,9 @@ use super::{
     errors::{ApiError, ApiJson, ApiQuery},
 };
 use crate::{
-    acquisition::direct::{Direct, DirectChapterSearch, DirectError, DirectRequest, DirectSearch},
+    acquisition::direct::{
+        Direct, DirectChapterSearch, DirectError, DirectRequest, DirectSearch, TransferAction,
+    },
     auth::Scope,
     providers::ProviderError,
     settings::Settings,
@@ -33,11 +35,60 @@ pub fn routes(context: DirectContext) -> Router {
         .route("/api/v1/direct/acquisitions", get(list).post(create))
         .route("/api/v1/direct/acquisitions/{id}", get(status))
         .route("/api/v1/direct/acquisitions/{id}/cancel", post(cancel))
+        .route("/api/v1/direct/acquisitions/{id}/review", get(review))
+        .route("/api/v1/direct/acquisitions/{id}/resume", post(resume))
+        .route("/api/v1/direct/acquisitions/{id}/restart", post(restart))
         .layer(DefaultBodyLimit::max(8 * 1024))
         .with_state(context)
 }
 fn response<T: serde::Serialize>(value: T) -> Response {
     ([(header::CACHE_CONTROL, "no-store")], Json(value)).into_response()
+}
+async fn review(
+    State(context): State<DirectContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(&context.auth, &headers, &Method::GET, Scope::Manage).await?;
+    Ok(response(
+        context.direct.review(&principal.user_id, &id).await?,
+    ))
+}
+async fn resume(
+    State(context): State<DirectContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    ApiJson(request): ApiJson<TransferAction>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(&context.auth, &headers, &Method::POST, Scope::Manage).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        response(
+            context
+                .direct
+                .resume_transfer(&context.settings, &principal.user_id, &id, request)
+                .await?,
+        ),
+    )
+        .into_response())
+}
+async fn restart(
+    State(context): State<DirectContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    ApiJson(request): ApiJson<TransferAction>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(&context.auth, &headers, &Method::POST, Scope::Manage).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        response(
+            context
+                .direct
+                .restart_transfer(&context.settings, &principal.user_id, &id, request)
+                .await?,
+        ),
+    )
+        .into_response())
 }
 async fn chapters(
     State(context): State<DirectContext>,
@@ -172,6 +223,21 @@ async fn list(
 impl From<DirectError> for ApiError {
     fn from(error: DirectError) -> Self {
         match error {
+            DirectError::ReviewConflict => Self::new(
+                StatusCode::CONFLICT,
+                "direct_review_conflict",
+                "Review snapshot changed or action was already consumed; fetch a fresh review",
+            ),
+            DirectError::RestartRequired => Self::new(
+                StatusCode::CONFLICT,
+                "transfer_restart_required",
+                "Transfer evidence changed; review an explicit restart",
+            ),
+            DirectError::ResumeUnavailable => Self::new(
+                StatusCode::CONFLICT,
+                "transfer_resume_unavailable",
+                "Stable validators or complete page checkpoints are missing; review an explicit restart",
+            ),
             DirectError::Invalid | DirectError::Provider(ProviderError::InvalidQuery) => {
                 Self::invalid("Invalid direct acquisition request")
             }
@@ -183,7 +249,7 @@ impl From<DirectError> for ApiError {
             DirectError::Busy => Self::new(
                 StatusCode::CONFLICT,
                 "direct_busy",
-                "Direct worker is busy; try cancellation later",
+                "Direct worker is busy; try the reviewed action later",
             ),
             DirectError::ReviewRequired => Self::new(
                 StatusCode::CONFLICT,

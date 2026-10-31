@@ -620,6 +620,10 @@ export const es: Record<keyof typeof en, string> = {
   invalid_archive: 'El archivo descargado no superó la validación.',
   interrupted_transfer:
     'La descarga se interrumpió. Revísala antes de iniciar otra descarga.',
+  transfer_restart_required:
+    'La fuente o el archivo parcial ha cambiado. Revisa un reinicio explícito desde cero.',
+  transfer_resume_unavailable:
+    'Faltan pruebas para reanudar con seguridad. Revisa un reinicio explícito desde cero.',
   directComicsOnly:
     'Las descargas directas no están disponibles para revistas. Usa la búsqueda de lanzamientos con un indexador configurado.',
   viewMirrors: 'Ver opciones de descarga',

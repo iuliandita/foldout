@@ -1,4 +1,5 @@
-//! Selected direct downloads and complete MangaDex chapters. No durable URLs, automatic resubmission, or resume.
+//! Selected direct downloads and complete MangaDex chapters. URL-free, explicitly reviewed recovery only.
+use super::transfer_checkpoint::{Journal, Transfer};
 use crate::{
     importer::{
         finalize,
@@ -33,7 +34,11 @@ use std::{
     sync::OnceLock,
     time::Duration,
 };
-use tokio::io::AsyncWriteExt;
+
+#[path = "direct_recovery.rs"]
+mod recovery;
+use recovery::ResolvedTransfer;
+pub use recovery::{DirectReview, TransferAction};
 use uuid::Uuid;
 
 const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -48,6 +53,12 @@ pub enum DirectError {
     NotFound,
     #[error("selection, unit, destination, or idempotency key conflicts")]
     Conflict,
+    #[error("review snapshot changed or action was already consumed")]
+    ReviewConflict,
+    #[error("transfer evidence requires an explicit restart")]
+    RestartRequired,
+    #[error("transfer lacks stable validators or a complete page checkpoint set")]
+    ResumeUnavailable,
     #[error("direct worker is busy")]
     Busy,
     #[error("intent requires import or local review before cancellation")]
@@ -665,29 +676,11 @@ impl Direct {
         if row.try_get::<bool, _>("attempted")? {
             return Err(DirectError::Transfer);
         }
-        let owner: String = row.try_get("owner")?;
-        let handle: String = row.try_get("link_handle")?;
-        let selection = self.selection(&owner, &handle).await?;
-        let (download, manifest, language) = if selection.source_kind == "mangadex_chapter" {
-            let (provider, chapter) = self.selected_chapter(settings, &owner, &handle).await?;
-            let manifest = provider.at_home(&chapter).await?;
-            if manifest.summary().chapter_id != chapter.id
-                || manifest.summary().page_count != chapter.page_count
-            {
-                return Err(DirectError::Changed);
-            }
-            (None, Some(manifest), Some(chapter.language))
-        } else {
-            let resolution = self.selected(settings, &owner, &handle).await?;
-            let download = match resolution.summary.state {
-                GetComicsLinkState::Direct => {
-                    resolution.into_download().ok_or(DirectError::Changed)?
-                }
-                GetComicsLinkState::ManualAction => return Err(DirectError::ManualAction),
-                _ => return Err(ProviderError::Unsupported.into()),
-            };
-            (Some(download), None, None)
-        };
+        let ResolvedTransfer {
+            download,
+            manifest,
+            language,
+        } = self.resolve_transfer(settings, row).await?;
         let source = self
             .root(&row.try_get::<String, _>("download_root_id")?)
             .await?;
@@ -718,6 +711,7 @@ impl Direct {
         .await
         .map_err(|_| DirectError::LocalReview)??;
         let root_identity = identity(&stage.root)?;
+        let part_identities = recovery::part_identities(manifest.as_ref())?;
         // Commit before DNS/GET. Cancellation, process death, or write failure leaves review state.
         let mut tx = self.store.begin_write().await?;
         check_unit(
@@ -731,11 +725,49 @@ impl Direct {
         if fenced != 1 {
             return Err(DirectError::Conflict);
         }
+        self.initialize_parts(&mut tx, &acquisition_id, &part_identities)
+            .await?;
         tx.commit().await?;
+        self.finish_transfer(
+            row,
+            ResolvedTransfer {
+                download,
+                manifest,
+                language,
+            },
+            stage,
+            false,
+        )
+        .await
+    }
+
+    async fn finish_transfer(
+        &self,
+        row: &sqlx::sqlite::SqliteRow,
+        resolved: ResolvedTransfer,
+        stage: Stage,
+        resume: bool,
+    ) -> Result<(), DirectError> {
+        let acquisition_id: String = row.try_get("id")?;
+        let source = self
+            .root(&row.try_get::<String, _>("download_root_id")?)
+            .await?;
+        let ResolvedTransfer {
+            download, manifest, ..
+        } = resolved;
+        let format = download
+            .as_ref()
+            .map(|d| archive_format(d.url()))
+            .transpose()?
+            .unwrap_or("cbz");
+        let journal = Journal {
+            store: self.store.clone(),
+            acquisition_id: acquisition_id.clone(),
+        };
         let expected_pages = manifest.as_ref().map(|m| m.summary().page_count);
-        let (size, digest, source_identity) = tokio::time::timeout(TRANSFER_TIME, async {
+        let finish = async {
             if let Some(manifest) = &manifest {
-                self.transfer_chapter(manifest, &stage.file, &stage.job)
+                self.transfer_chapter(manifest, &stage.file, &stage.job, journal.clone(), resume)
                     .await?;
                 if stage
                     .file
@@ -749,7 +781,14 @@ impl Direct {
             } else {
                 let download = download.as_ref().ok_or(DirectError::Changed)?;
                 let (client, url) = self.client(download.url()).await?;
-                transfer(client, url, &stage.file, MAX_BYTES).await?;
+                Transfer {
+                    journal: Some(&journal),
+                    ordinal: 0,
+                    resume,
+                    image: false,
+                }
+                .run(client, url, &stage.file, MAX_BYTES)
+                .await?;
             }
             let validated = fingerprint_file(&stage.file).await?;
             verify_archive_count(&stage.file, format, expected_pages).await?;
@@ -760,9 +799,15 @@ impl Direct {
             }
             stage.publish(format)?;
             Ok::<_, DirectError>((size, digest, identity(&stage.file)?))
-        })
-        .await
-        .map_err(|_| DirectError::Transfer)??;
+        };
+        // The chapter supervisor owns its deadline and reaps packaging before releasing locks.
+        let (size, digest, source_identity) = if expected_pages.is_some() {
+            finish.await?
+        } else {
+            tokio::time::timeout(TRANSFER_TIME, finish)
+                .await
+                .map_err(|_| DirectError::Transfer)??
+        };
         let relative = format!(".library-downloads/{acquisition_id}/file.{format}");
         let mut tx = self.store.begin_write().await?;
         sqlx::query("UPDATE direct_acquisitions SET state='downloaded',downloaded_bytes=?,content_digest=?,source_identity=?,source_relative=?,updated_at=unixepoch() WHERE id=? AND state='downloading'")
@@ -912,14 +957,23 @@ impl Direct {
         manifest: &MangaDexManifest,
         file: &File,
         job: &File,
+        journal: Journal,
+        resume: bool,
     ) -> Result<(), DirectError> {
         #[cfg(test)]
         if let Some(address) = self.fixture {
-            return super::manga_transfer::transfer_fixture(manifest, file, job, address)
-                .await
-                .map_err(manga_transfer_error);
+            return super::manga_transfer::transfer_durable(
+                manifest,
+                file,
+                job,
+                journal,
+                resume,
+                Some(address),
+            )
+            .await
+            .map_err(manga_transfer_error);
         }
-        super::manga_transfer::transfer(manifest, file, job)
+        super::manga_transfer::transfer_durable(manifest, file, job, journal, resume, None)
             .await
             .map_err(manga_transfer_error)
     }
@@ -969,6 +1023,8 @@ impl Direct {
 fn manga_transfer_error(error: super::manga_transfer::MangaTransferError) -> DirectError {
     use super::manga_transfer::MangaTransferError as E;
     match error {
+        E::RestartRequired => DirectError::RestartRequired,
+        E::ResumeUnavailable => DirectError::ResumeUnavailable,
         E::Changed => DirectError::Changed,
         E::NetworkPolicy => DirectError::NetworkPolicy,
         E::SizeLimit => DirectError::SizeLimit,
@@ -1094,7 +1150,7 @@ fn label(value: &str) -> Result<(), DirectError> {
         Ok(())
     }
 }
-fn hash(value: &[u8]) -> String {
+pub(super) fn hash(value: &[u8]) -> String {
     Sha256::digest(value)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -1172,94 +1228,21 @@ pub(crate) fn public_ip(ip: IpAddr) -> bool {
         }
     }
 }
+#[cfg(test)]
 async fn transfer(
     client: reqwest::Client,
     url: reqwest::Url,
     file: &File,
     limit: u64,
 ) -> Result<(), DirectError> {
-    let mut response = client
-        .get(url)
-        .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .send()
-        .await
-        .map_err(|_| DirectError::Transfer)?;
-    if response
-        .headers()
-        .get("cf-mitigated")
-        .is_some_and(|v| v == "challenge")
-    {
-        return Err(ProviderError::ChallengeRequired.into());
+    Transfer {
+        journal: None,
+        ordinal: 0,
+        resume: false,
+        image: false,
     }
-    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Err(ProviderError::RateLimited {
-            retry_after_seconds: None,
-        }
-        .into());
-    }
-    // A 206 without an authorized validator is not a complete archive response.
-    if response.status() != reqwest::StatusCode::OK {
-        return Err(DirectError::Transfer);
-    }
-    if response
-        .headers()
-        .get(reqwest::header::CONTENT_ENCODING)
-        .is_some_and(|v| v != "identity")
-    {
-        return Err(DirectError::InvalidArchive);
-    }
-    let mime = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    if !matches!(
-        mime.as_str(),
-        "application/octet-stream"
-            | "application/zip"
-            | "application/x-zip-compressed"
-            | "application/x-cbz"
-            | "application/vnd.comicbook+zip"
-            | "application/x-rar-compressed"
-            | "application/vnd.rar"
-            | "application/x-cbr"
-            | "application/vnd.comicbook-rar"
-    ) {
-        return Err(DirectError::InvalidArchive);
-    }
-    let length = response.content_length();
-    if length.is_some_and(|n| n == 0 || n > limit) {
-        return Err(DirectError::SizeLimit);
-    }
-    let mut output =
-        tokio::fs::File::from_std(file.try_clone().map_err(|_| DirectError::LocalReview)?);
-    let mut bytes = 0u64;
-    while let Some(chunk) = response.chunk().await.map_err(|_| DirectError::Transfer)? {
-        bytes = bytes
-            .checked_add(chunk.len() as u64)
-            .ok_or(DirectError::SizeLimit)?;
-        if bytes > limit {
-            return Err(DirectError::SizeLimit);
-        }
-        output
-            .write_all(&chunk)
-            .await
-            .map_err(|_| DirectError::LocalReview)?;
-    }
-    if bytes == 0 || length.is_some_and(|n| n != bytes) {
-        return Err(DirectError::Transfer);
-    }
-    output.flush().await.map_err(|_| DirectError::LocalReview)?;
-    output
-        .sync_all()
-        .await
-        .map_err(|_| DirectError::LocalReview)?;
-    Ok(())
+    .run(client, url, file, limit)
+    .await
 }
 async fn verify_archive_count(
     file: &File,
@@ -1302,7 +1285,7 @@ async fn verify_archive_count(
     }
     Ok(())
 }
-async fn fingerprint_file(file: &File) -> Result<(u64, String), DirectError> {
+pub(super) async fn fingerprint_file(file: &File) -> Result<(u64, String), DirectError> {
     let mut descriptor = file.try_clone().map_err(|_| DirectError::LocalReview)?;
     tokio::task::spawn_blocking(move || {
         let before = descriptor
@@ -1378,10 +1361,12 @@ fn reason(error: &DirectError) -> &'static str {
         DirectError::SizeLimit => "size_limit",
         DirectError::InvalidArchive => "invalid_archive",
         DirectError::Transfer => "interrupted_transfer",
+        DirectError::RestartRequired => "transfer_restart_required",
+        DirectError::ResumeUnavailable => "transfer_resume_unavailable",
         _ => "source_unavailable",
     }
 }
-fn identity(file: &File) -> Result<String, DirectError> {
+pub(super) fn identity(file: &File) -> Result<String, DirectError> {
     let m = file.metadata().map_err(|_| DirectError::LocalReview)?;
     Ok(format!("{}:{}", m.dev(), m.ino()))
 }
@@ -1466,6 +1451,90 @@ struct Stage {
     id: String,
 }
 impl Stage {
+    fn open(path: &Path, id: &str) -> Result<Self, DirectError> {
+        let root = finalize::root(path).map_err(|_| DirectError::LocalReview)?;
+        let area = open_at(
+            &root,
+            ".library-downloads",
+            libc::O_RDONLY | libc::O_DIRECTORY,
+        )?;
+        let job = open_at(&area, id, libc::O_RDONLY | libc::O_DIRECTORY)?;
+        for directory in [&area, &job] {
+            let m = directory.metadata().map_err(|_| DirectError::LocalReview)?;
+            if m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o777 != 0o700 {
+                return Err(DirectError::LocalReview);
+            }
+        }
+        let file = open_at(&job, "filepartial", libc::O_RDWR)?;
+        let m = file.metadata().map_err(|_| DirectError::LocalReview)?;
+        if !m.is_file()
+            || m.nlink() != 1
+            || m.uid() != unsafe { libc::geteuid() }
+            || m.mode() & 0o777 != 0o600
+        {
+            return Err(DirectError::LocalReview);
+        }
+        Ok(Self {
+            root,
+            area,
+            job,
+            file,
+            id: id.to_owned(),
+        })
+    }
+    fn prepare_discard(
+        path: &Path,
+        id: &str,
+        expected_root: Option<&str>,
+    ) -> Result<Option<Self>, DirectError> {
+        let root = finalize::root(path).map_err(|_| DirectError::LocalReview)?;
+        if expected_root.is_some_and(|expected| identity(&root).ok().as_deref() != Some(expected)) {
+            return Err(DirectError::LocalReview);
+        }
+        let job_path = path.join(".library-downloads").join(id);
+        match std::fs::symlink_metadata(&job_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(DirectError::LocalReview),
+            Ok(_) => {}
+        }
+        let stage = Self::open(path, id)?;
+        stage.check(path)?;
+        for name in ["file.cbz", "file.cbr"] {
+            absent_destination(&stage.job, name)?;
+        }
+        Ok(Some(stage))
+    }
+    fn discard(&self, path: &Path) -> Result<(), DirectError> {
+        self.check(path)?;
+        let stage = self;
+        for entry in std::fs::read_dir(format!("/proc/self/fd/{}", stage.job.as_raw_fd()))
+            .map_err(|_| DirectError::LocalReview)?
+        {
+            let entry = entry.map_err(|_| DirectError::LocalReview)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name != "filepartial"
+                && !(name.len() == 19
+                    && name.starts_with("page-")
+                    && name.ends_with(".partial")
+                    && name[5..11].bytes().all(|b| b.is_ascii_digit()))
+            {
+                continue;
+            }
+            let file = open_at(&stage.job, &name, libc::O_RDONLY)?;
+            let m = file.metadata().map_err(|_| DirectError::LocalReview)?;
+            if !m.is_file()
+                || m.nlink() != 1
+                || m.uid() != unsafe { libc::geteuid() }
+                || m.mode() & 0o777 != 0o600
+            {
+                return Err(DirectError::LocalReview);
+            }
+            // Descriptor-relative unlink never follows a symlink or leaves this retired staging job.
+            std::fs::remove_file(format!("/proc/self/fd/{}/{}", stage.job.as_raw_fd(), name))
+                .map_err(|_| DirectError::LocalReview)?;
+        }
+        stage.job.sync_all().map_err(|_| DirectError::LocalReview)
+    }
     fn create(path: &Path, id: &str) -> Result<Self, DirectError> {
         let root = finalize::root(path).map_err(|_| DirectError::LocalReview)?;
         let area = private_dir(&root, ".library-downloads", false)?;

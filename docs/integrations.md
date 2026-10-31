@@ -37,3 +37,41 @@ From an inspected Archive item, choose an existing magazine edition and request 
 `GET /api/v1/search/archive/proposal` and `POST /api/v1/search/archive/accept` require manage scope; cookie acceptance also requires the configured Origin. Acceptance fetches the item again and validates the reviewed fields using the manual unit rules. Only an existing Archive provider link or a duplicate normalized final label within the edition returns 409, with the existing unit ID, label, and publication link target. A renamed final label can resolve a label collision. Matching dates are non-blocking warnings, including month/day values in the same month; a regular issue and an Annual or Special may share that month. The API rejects editions belonging to comic or manga publications. Reuse the same idempotency key and body after an uncertain acceptance; changing the owner or body under that key returns a conflict. Concurrent accepts replay one committed unit. Catalog deletion removes only that unit's acceptance receipts after other dependency checks pass, so its old key performs a fresh server-recomputed acceptance after deletion. Acceptance creates only the reviewed unit, with no calendar, monitor, job, or file acquisition.
 
 An idle direct intent can be canceled to release its reservation while preserving files, the original failure reason, manifest evidence, and idempotency history. A new attempt requires a new explicit selection and key. Cancellation is rejected while work is active, after an import journal exists, or when the unit already has catalog coverage. Import recovery must resolve those cases first.
+
+## Direct transfer recovery
+
+Fetch `GET /api/v1/direct/acquisitions/{id}/review` with manage scope. It returns
+`revision`, `transfer_fingerprint`, and separate `resume`/`restart` eligibility
+with refusal reasons. The indexer acquisition review contract stays unchanged.
+Send the unchanged revision and fingerprint to the direct intent's `/resume` or
+`/restart` endpoint. Cookie writes require Origin. Each action is audited and
+serialized with the direct worker. Stale snapshots and consumed actions return
+`direct_review_conflict`; fetch a fresh review. `direct_busy` means retry later.
+
+Resume re-resolves the persisted selection handle; no resolved URL is stored.
+A partial needs `Accept-Ranges: bytes`, a known total length, and a strong ETag
+or Last-Modified. The request sends Range with If-Range, preferring the strong
+ETag. Only a 206 with the exact starting offset, unchanged origin, validators,
+total length and content type may append. The partial's inode, SHA-256 and
+fsynced offset must match. A changed response or partial returns
+`transfer_restart_required`; missing validators or page evidence returns
+`transfer_resume_unavailable`. Both require reviewing restart explicitly.
+Resume never retries automatically and preserves the attempted fence.
+
+MangaDex recovery retains the exact manifest identity and expected page set.
+Every expected page must have a persisted size/hash checkpoint and a matching
+private file; missing or extra pages refuse resume. Complete pages are verified
+and reused without downloading again. Incomplete pages additionally need stable
+HTTP validators. Interruption before all pages have response evidence therefore
+requires restart. Packaging and complete archive validation still precede import.
+These behaviors are exercised with owned loopback fixtures, not live providers.
+
+Restart rechecks the selected source, catalog unit and destination, then retires
+the original intent and creates a fresh queued intent in one write transaction.
+It preserves the old attempted fence, manifest and original creation replay key.
+Only the retired intent's private partial files are discarded; library files and
+published archives are never deleted. The new intent uses fresh staging and
+normal submission checks. Changed chapter metadata requires selecting again.
+An existing import journal, coverage or published transfer requires separate
+import/local review and cannot use this action. `local_review` requires checking
+the configured root or staging identity before continuing.

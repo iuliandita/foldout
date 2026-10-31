@@ -1,5 +1,6 @@
-//! Ephemeral MangaDex transfer and packaging. The caller owns durable state/publication.
+//! MangaDex page transfer and supervised packaging. The caller owns durable publication.
 use super::direct::{client_builder, public_ip};
+use super::transfer_checkpoint::{Journal, Transfer};
 use crate::providers::mangadex_chapters::{MangaDexManifest, MangaDexManifestSummary};
 use image::{ImageFormat, ImageReader};
 use sha2::{Digest, Sha256};
@@ -31,6 +32,10 @@ const PIPE_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MangaTransferError {
+    #[error("chapter checkpoint requires an explicit restart")]
+    RestartRequired,
+    #[error("chapter checkpoint cannot be resumed")]
+    ResumeUnavailable,
     #[error("chapter manifest identity or page count changed")]
     Changed,
     #[error("chapter server violates network policy")]
@@ -57,12 +62,29 @@ pub enum MangaTransferError {
 /// directory descriptor, on the download filesystem rather than system temporary storage.
 /// On failure/cancellation the supervisor truncates the output after reaping 7z.
 /// Dropping this future signals cancellation; it never abandons an active 7z child.
-pub async fn transfer(
+pub(crate) async fn transfer_durable(
     manifest: &MangaDexManifest,
     output: &File,
     staging_parent: &File,
+    journal: Journal,
+    resume: bool,
+    fixture: Option<SocketAddr>,
 ) -> Result<(), MangaTransferError> {
-    start(manifest, output, staging_parent, Options::default()).await
+    #[cfg(not(test))]
+    let _ = fixture;
+    start(
+        manifest,
+        output,
+        staging_parent,
+        Options {
+            journal: Some(journal),
+            resume,
+            #[cfg(test)]
+            fixture,
+            ..Options::default()
+        },
+    )
+    .await
 }
 
 /// Only image GETs are redirected to the owned fixture. Never compiled in production.
@@ -146,6 +168,8 @@ impl Snapshot {
 }
 
 struct Options {
+    journal: Option<Journal>,
+    resume: bool,
     page_bytes: u64,
     total_bytes: u64,
     timeout: Duration,
@@ -155,6 +179,8 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            journal: None,
+            resume: false,
             page_bytes: PAGE_BYTES,
             total_bytes: TOTAL_BYTES,
             timeout: TRANSFER_TIME,
@@ -387,6 +413,19 @@ async fn download_pages(
     let client = page_client(&first).await?;
     let mut names = Vec::new();
     let mut total = 0u64;
+    if options.journal.is_some() && !options.resume {
+        for index in 1..=manifest.summary.page_count {
+            open_at(
+                stage.parent.as_raw_fd(),
+                &format!("page-{index:06}.partial"),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            )?;
+        }
+        stage
+            .parent
+            .sync_all()
+            .map_err(|_| MangaTransferError::LocalReview)?;
+    }
     for index in 0..manifest.summary.page_count {
         let url = manifest
             .page_url(index as usize)
@@ -403,12 +442,47 @@ async fn download_pages(
         } else {
             url
         };
-        let bytes = fetch_page(
-            &client,
-            url,
-            options.page_bytes.min(options.total_bytes - total),
-        )
-        .await?;
+        let bytes = if let Some(journal) = &options.journal {
+            let file = open_at(
+                stage.parent.as_raw_fd(),
+                &format!("page-{:06}.partial", index + 1),
+                libc::O_RDWR,
+            )?;
+            Transfer {
+                journal: Some(journal),
+                ordinal: index + 1,
+                resume: options.resume,
+                image: true,
+            }
+            .run(
+                client.clone(),
+                url,
+                &file,
+                options.page_bytes.min(options.total_bytes - total),
+            )
+            .await
+            .map_err(checkpoint_error)?;
+            let mut descriptor = file;
+            descriptor
+                .seek(SeekFrom::Start(0))
+                .map_err(|_| MangaTransferError::LocalReview)?;
+            let mut bytes = Vec::new();
+            descriptor
+                .take(options.page_bytes + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| MangaTransferError::LocalReview)?;
+            if bytes.len() as u64 > options.page_bytes {
+                return Err(MangaTransferError::SizeLimit);
+            }
+            bytes
+        } else {
+            fetch_page(
+                &client,
+                url,
+                options.page_bytes.min(options.total_bytes - total),
+            )
+            .await?
+        };
         total += bytes.len() as u64;
         let (bytes, extension) = tokio::task::spawn_blocking(move || {
             let extension = validate_image(&bytes)?;
@@ -428,6 +502,18 @@ async fn download_pages(
         names.push(name);
     }
     Ok(names)
+}
+
+fn checkpoint_error(error: super::direct::DirectError) -> MangaTransferError {
+    use super::direct::DirectError as E;
+    match error {
+        E::RestartRequired => MangaTransferError::RestartRequired,
+        E::ResumeUnavailable => MangaTransferError::ResumeUnavailable,
+        E::LocalReview => MangaTransferError::LocalReview,
+        E::SizeLimit => MangaTransferError::SizeLimit,
+        E::InvalidArchive => MangaTransferError::InvalidImage,
+        _ => MangaTransferError::Transfer,
+    }
 }
 
 async fn fetch_page(

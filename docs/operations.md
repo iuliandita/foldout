@@ -316,3 +316,34 @@ preservation, and forward migration only in the fresh restored state. Run
 to exercise the full asset and release build on the host architecture.
 
 The repository-wide acceptance check remains `./scripts/check`.
+
+## Direct transfer checkpoints
+
+Migration 024 adds URL-free response checkpoints, direct review revisions and an
+audit trail for reviewed resume/restart actions. It is additive and preserves
+existing attempted fences, manifest immutability and creation replay keys. Older
+interrupted transfers have no trustworthy checkpoints and cannot resume; review
+an explicit restart if no import journal or catalog coverage exists.
+
+Before upgrading, stop workers and take a verified database/key backup. Preserve
+private acquisition staging separately when retaining resumable transfers: it
+lives in the existing `.library-downloads/<intent-id>` area of the configured
+download root. The database backup does not include these files. Keep their
+private ownership/permissions, inode and contents unchanged; copying them to a
+new filesystem changes their identity and requires restart rather than resume.
+No new configured write root is introduced. Startup applies migration 024.
+
+Checkpoints record a synced byte offset and SHA-256 only after the file is synced.
+A crash may leave additional bytes beyond the last committed offset; recovery
+refuses that mismatch instead of truncating or guessing. A reviewed restart uses
+a fresh intent and discards only the old private partial files. A crash after the
+restart transaction but before discard can leave orphan partials in the retired
+staging directory; preserve them for local inspection, never adopt them into the
+new intent. Published downloads and imported library files are outside discard.
+
+For compatibility and rollback, keep the previous executable and pre-upgrade
+backup. Older executables reject the newer schema. Stop the upgraded service and
+restore the pre-upgrade backup into a fresh state directory with the previous
+executable; there is no in-place downgrade. Do not clear attempted or manifest
+evidence with database edits. Validate upgrades and rollback only with disposable
+state and owned media; keep production clients disabled during recovery drills.
