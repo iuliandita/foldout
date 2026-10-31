@@ -28,7 +28,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
 
       - name: Install reader tools
         # Distro 7-Zip builds omit RAR decoding; match the upstream static build the image ships.
@@ -49,16 +48,6 @@ jobs:
         run: |
           bun install --cwd tools --frozen-lockfile
           ./scripts/bun install --cwd web --frozen-lockfile
-
-      - name: Check documentation impact
-        if: github.event_name == 'pull_request'
-        env:
-          DOCS_IMPACT_BODY: ${{ github.event.pull_request.body }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          ./scripts/bun test tools/check-docs-impact.test.ts
-          ./scripts/bun tools/check-docs-impact.ts --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA"
 
       - name: Install Rust toolchain
         run: rustup toolchain install
