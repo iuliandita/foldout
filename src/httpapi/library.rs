@@ -32,6 +32,10 @@ pub struct LibraryContext {
 }
 pub fn routes(context: LibraryContext) -> Router {
     Router::new()
+        .route(
+            "/api/v1/library/files/{id}/identity-hints",
+            get(identity_hints),
+        )
         .route("/api/v1/library/roots", get(roots).post(register))
         .route("/api/v1/library/roots/{id}/scan", post(scan))
         .route("/api/v1/library/roots/{id}/entries", get(entries))
@@ -231,4 +235,30 @@ async fn accept(
 ) -> Result<Json<FileView>, ApiError> {
     authorize(&ctx.auth, &headers, &Method::POST, Scope::Manage).await?;
     Ok(Json(ctx.previews.accept(&id).await?.into()))
+}
+
+async fn identity_hints(
+    State(ctx): State<LibraryContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::library::hints::IdentityHint>>, ApiError> {
+    authorize(&ctx.auth, &headers, &Method::GET, Scope::Manage).await?;
+    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM library_files WHERE id=?")
+        .bind(&id)
+        .fetch_optional(ctx.store.reader())
+        .await
+        .map_err(|_| ApiError::internal())?;
+    if exists.is_none() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Library file not found",
+        ));
+    }
+    Ok(Json(
+        ctx.library
+            .file_identity_hints(&id, false)
+            .await
+            .map_err(|_| ApiError::internal())?,
+    ))
 }

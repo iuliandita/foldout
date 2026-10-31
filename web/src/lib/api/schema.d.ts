@@ -4,6 +4,40 @@
  */
 
 export interface paths {
+    "/api/v1/search/archive/proposal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Requires manage scope and an existing magazine edition. Read-only dry run; no catalog mutation, transfer or calendar generation. Returns 409 with existing_unit_id, existing_unit and proposal only for an existing internet_archive provider link or the same normalized proposed label in this edition. Date and month matches are non-blocking date_warnings. Acceptance checks the reviewed final label, so a distinct renamed label may be accepted. */
+        get: operations["proposeArchiveUnit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/search/archive/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires manage scope and matching Origin for cookie writes. Requires a magazine edition. Recomputes Archive metadata server-side, validates reviewed fields with manual unit rules, and atomically creates one unit, its internet_archive provider link and a durable receipt referencing that unit. Hard duplicate checks use only provider identifier or normalized final label in the chosen edition; dates produce warnings. Combined source issues allow kind issue or combined. Same key, owner and body replay the original response; changing owner or body under that key conflicts. After a catalog unit is deleted, replaying its old Archive idempotency key performs a fresh accept with server-recomputed metadata instead of returning the deleted unit ID. No file acquisition or calendar generation. */
+        post: operations["acceptArchiveUnit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/setup": {
         parameters: {
             query?: never;
@@ -634,6 +668,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/acquisition/{id}/correct-mapping": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires manage scope. Corrects only the explicit local source-file association after import planning stops with import_review_required and before any journal exists. Revision and polling_fingerprint must match the terminal review snapshot. Revalidates owner, completed owned receipts, current client configuration, complete actual-return lifecycle evidence and absence of outstanding work in one write transaction. Filesystem validation runs in a blocking worker before the write transaction; the transaction rechecks the revision, evidence and exact validated root/path values. Registered roots and safe relative paths are required; symlinks and traversal are rejected. Sources must be cbz, cbr or pdf and match the destination extension, case-insensitively. The action records the path only, not file identity; the import worker revalidates and imports what is at that path when it runs. Preserves the import UUID, unit, destination reservation and attempted-submission fence. Appends an audit event and queues import planning with no client writes. Does not change client remote/local path settings or an existing journal. Stale actions and replays return 409. Cookie authentication requires a matching Origin. */
+        post: operations["correctAcquisitionMapping"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/acquisition/{id}/files": {
         parameters: {
             query?: never;
@@ -749,6 +800,23 @@ export interface paths {
         put?: never;
         /** @description Requires manage scope. Makes an enabled monitor due now and increments revision. Acceptance only schedules work; results are published asynchronously for review. Disabled monitors or stale revisions return 409. JSON body limit is 8 KiB. Cookie-authenticated requests require a matching Origin header. */
         post: operations["runMonitor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/library/files/{id}/identity-hints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Read persisted embedded identity hints for a library file. Requires manage scope. Hints are never catalog associations. */
+        get: operations["fileIdentityHints"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1033,6 +1101,63 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Read-only proposal. Raw source issue labels, volumes and dates are preserved; label construction trims source values and includes volume and issue when both exist. Only a single exact calendar date is parsed. Real numeric or month pairs default to kind combined and stay one unit. Date matches are advisory, never duplicate conflicts. */
+        ArchiveUnitProposal: {
+            edition_id: string;
+            label: string;
+            /** @enum {string} */
+            kind: "issue" | "chapter" | "volume" | "special" | "combined";
+            /** @description YYYY, YYYY-MM, or YYYY-MM-DD; precision is preserved. */
+            date: string | null;
+            /** @enum {string|null} */
+            date_precision: "year" | "month" | "day" | null;
+            raw_labels: string[];
+            raw_dates: string[];
+            combined: boolean;
+            identifier: string;
+            /** Format: uri */
+            source_url: string;
+            raw_volumes: string[];
+            /** @description Non-blocking matches with existing unit ids and labels. Month and day precision values in the same month match; a year-only date overlaps dates in that year. */
+            date_warnings: components["schemas"]["ArchiveUnitMatch"][];
+        };
+        ArchiveAcceptRequest: {
+            integration_id: string;
+            identifier: string;
+            edition_id: string;
+            label: string;
+            /** @enum {string} */
+            kind: "issue" | "chapter" | "volume" | "special" | "combined";
+            /** @description YYYY, YYYY-MM, or YYYY-MM-DD; precision is preserved. */
+            date?: string | null;
+            idempotency_key: string;
+        };
+        ArchiveUnitAcceptance: {
+            unit: components["schemas"]["Unit"];
+            proposal: components["schemas"]["ArchiveUnitProposal"];
+        };
+        ArchiveUnitConflict: components["schemas"]["Error"] & {
+            existing_unit_id: string;
+            proposal: components["schemas"]["ArchiveUnitProposal"];
+            existing_unit: components["schemas"]["ArchiveUnitMatch"];
+        };
+        ArchiveUnitMatch: {
+            id: string;
+            label: string;
+            edition_id: string;
+            publication_id: string;
+        };
+        IdentityHint: {
+            kind: string;
+            raw_value: string;
+            value: string | null;
+            /** @enum {string} */
+            status: "usable" | "needs_review";
+            source_field: string;
+            container_path: string;
+            /** Format: int64 */
+            extracted_at: number;
+        };
         Error: {
             error: {
                 code: string;
@@ -1630,6 +1755,19 @@ export interface components {
             revision: number;
             polling_fingerprint: string;
         };
+        CorrectMapping: {
+            /** Format: int64 */
+            revision: number;
+            /** @description Pass unchanged from the terminal review snapshot. */
+            polling_fingerprint: string;
+            /**
+             * Format: uuid
+             * @description Canonical lowercase, hyphenated, non-nil UUID.
+             */
+            source_root_id: string;
+            /** @description Relative path at most 4096 UTF-8 bytes. No control characters, backslashes, empty segments, dot segments, parent traversal, or leading slash. */
+            source_relative_path: string;
+        };
         AcquisitionReview: {
             acquisition: components["schemas"]["Acquisition"];
             /**
@@ -1642,7 +1780,7 @@ export interface components {
              * @enum {string}
              */
             lifecycle: "returned" | "unproven";
-            /** @description Opaque receipt and configuration snapshot fence; pass unchanged to resume polling. */
+            /** @description Opaque receipt, mapping and configuration snapshot fence; pass unchanged to resume polling or correct mapping. */
             polling_fingerprint: string;
         };
         Acquisition: {
@@ -2246,6 +2384,236 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    proposeArchiveUnit: {
+        parameters: {
+            query: {
+                integration_id: string;
+                identifier: string;
+                edition_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful operation */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArchiveUnitProposal"];
+                };
+            };
+            /** @description invalid_request: invalid input, non-magazine edition, or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: edition or integration not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description duplicate_unit includes existing_unit_id and proposal; integration or provider conflicts use Error */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArchiveUnitConflict"] | components["schemas"]["Error"];
+                };
+            };
+            /** @description unsupported: integration or provider capability unavailable */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description provider_cooldown: retry later; no Retry-After header is returned */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description provider_unavailable: provider could not complete this request */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    acceptArchiveUnit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArchiveAcceptRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful operation */
+            201: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArchiveUnitAcceptance"];
+                };
+            };
+            /** @description invalid_request: invalid input, non-magazine edition, or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: edition or integration not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description duplicate_unit includes existing_unit_id and proposal; integration or provider conflicts use Error; idempotency_conflict: key reused with a different body */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArchiveUnitConflict"] | components["schemas"]["Error"];
+                };
+            };
+            /** @description unsupported: integration or provider capability unavailable */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description provider_cooldown: retry later; no Retry-After header is returned */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description provider_unavailable: provider could not complete this request */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     setupStatus: {
         parameters: {
             query?: never;
@@ -4665,6 +5033,96 @@ export interface operations {
             };
         };
     };
+    correctAcquisitionMapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CorrectMapping"];
+            };
+        };
+        responses: {
+            /** @description Local source mapping corrected and import planning queued */
+            202: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Acquisition"];
+                };
+            };
+            /** @description invalid_request: invalid input, unsafe path, unsupported or mismatched extension, or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: acquisition not found for caller or source root not registered */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description acquisition_conflict: stale or replayed snapshot, changed evidence or validated root/path values, existing journal or destination file, active or uncertain work, or unsafe correction */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: filesystem I/O failure (including missing files or unavailable roots), blocking worker failure, or operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     associateAcquisitionFile: {
         parameters: {
             query?: never;
@@ -5355,6 +5813,37 @@ export interface operations {
             };
             /** @description unavailable: authentication temporarily unavailable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    fileIdentityHints: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Identity hints */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityHint"][];
+                };
+            };
+            /** @description Operation failed */
+            default: {
                 headers: {
                     [name: string]: unknown;
                 };

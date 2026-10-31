@@ -2,6 +2,7 @@
 """Run the opt-in owned corpus benchmark; never build the root-owned frontend."""
 import argparse
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,9 +11,81 @@ import subprocess
 import sys
 
 
+def classify(value, limit, eligible):
+    if not eligible or value is None:
+        return "unmeasured"
+    return "pass" if value < limit else "fail"
+
+
+def classifications(result, profile):
+    measurements = (result or {}).get("measurements") or {}
+    corpus = measurements.get("corpus") or {}
+    http = measurements.get("http") or {}
+    catalog = http.get("catalog_http") or {}
+    pages = http.get("warm_reader_http") or {}
+    files = corpus.get("files")
+    valid = (bool(measurements.get("overlap_verified")) and result.get("cleanup_completed") is True
+             and not result.get("failures") and profile == "release" and files == 50000)
+    context = {"file_count": files, "corpus_bytes": corpus.get("total_bytes"),
+               "build_profile": profile, "minimum_files": 50000, "minimum_http_samples": 100}
+    targets = {
+        "query p95 < 300 ms at five sessions": (catalog.get("p95_ms"), 300, catalog.get("count", 0) >= 100),
+        "idle RSS < 250 MiB": (measurements.get("idle_rss_bytes"), 250 * 1024**2,
+                                measurements.get("idle_settle_seconds", 0) >= 3
+                                and measurements.get("children_accounting", "").startswith("available;")),
+        "mixed RSS < 1 GiB": (measurements.get("mixed_rss_bytes"), 1024**3, False),
+        "warm page delivery < 1 s": (pages.get("max_ms"), 1000, pages.get("count", 0) >= 100),
+    }
+    return {name: {"fixture result": classify(value, limit, valid and eligible),
+                   "reference-environment acceptance": "unmeasured", **context}
+            for name, (value, limit, eligible) in targets.items()}
+
+
+def artifact_identity(root, report, profile, binary):
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+
+    identity = {"git_commit": git("rev-parse", "HEAD"),
+                "dirty_tree": bool(git("status", "--porcelain", "--untracked-files=normal")),
+                "build_profile": profile, "kind": "binary" if binary else "in-process router"}
+    path = ((report or {}).get("measurements") or {}).get("binary_path")
+    if binary and path:
+        identity["binary_path"] = path
+        with open(path, "rb") as source:
+            identity["binary_sha256"] = hashlib.file_digest(source, "sha256").hexdigest()
+    else:
+        identity.update({"binary_path": None, "binary_sha256": None})
+    return identity
+
+
+def cgroup_limits():
+    # v2 hierarchical limits can be tighter at any ancestor.
+    entry = next((line.split(":", 2)[2] for line in Path("/proc/self/cgroup").read_text().splitlines()
+                  if line.startswith("0::")), None)
+    if entry is None:
+        return {"status": "unmeasured (cgroup v2 unavailable)"}
+    mount = Path("/sys/fs/cgroup")
+    current = mount / entry.lstrip("/")
+    if not current.is_dir():
+        return {"status": "unmeasured (cgroup mount not resolved)"}
+    limits = []
+    while current == mount or mount in current.parents:
+        values = {name: (current / name).read_text().strip() if (current / name).is_file() else "unavailable"
+                  for name in ("cpu.max", "cpuset.cpus.effective", "memory.max")}
+        limits.append({"cgroup": str(current.relative_to(mount)), **values})
+        if current == mount:
+            break
+        current = current.parent
+    return {"hierarchy": limits}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--debug", action="store_true", help="debug smoke run; requires BENCHMARK_FILES=1000")
+    parser.add_argument("--binary", action="store_true", help="run the service binary over loopback")
+    parser.add_argument("--assert-reference-host", action="store_true", help="operator asserts this is the reference host; synthetic fixtures still cannot establish acceptance")
+    parser.add_argument("--host-metadata", help="operator-provided reference host description")
+    parser.add_argument("--network-metadata", help="operator-provided LAN path description")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     os.chdir(root)
@@ -49,12 +122,24 @@ def main() -> int:
                    "cpu_model": cpu, "logical_cpus": os.cpu_count(), "memory": memory,
                    "filesystem_type": filesystem, "architecture": os.uname().machine,
                    "kernel_release": os.uname().release, "tools": versions,
-                   "files": count, "profile": "debug" if args.debug else "release"}
+                   "files": count, "profile": "debug" if args.debug else "release",
+                   "applied_cgroup_limits": cgroup_limits(),
+                   "cpu_affinity": sorted(os.sched_getaffinity(0)),
+                   "corpus_and_state_mount": subprocess.check_output(["findmnt", "-T", str(root), "-no", "TARGET,FSTYPE,SOURCE"], text=True).strip(),
+                   "network_path": "loopback" if args.binary else "in-process",
+                   "artifact": None,
+                   "mixed_children": "child processes not exercised" if args.binary else "unmeasured",
+                   "fixture_class": "synthetic fixture", "reference_host_asserted": args.assert_reference_host,
+                   "host_metadata": args.host_metadata, "network_metadata": args.network_metadata,
+                   "cache_state": "warm after explicit requests; OS cache not dropped" if args.binary else
+                                  "fresh reader cache for cold; warm repeated; OS cache not dropped"}
     command = ["cargo", "test"]
     if not args.debug:
         command += ["--release", "--features", "embedded-ui"]
     command += ["--test", "benchmark", "--", "--ignored", "--exact",
-                "owned_50000_file_performance", "--nocapture"]
+                "owned_binary_loopback_performance" if args.binary else "owned_50000_file_performance", "--nocapture"]
+    command = ["nice", "-n", "10"] + command
+    command.insert(4, "--offline")
     print(json.dumps(environment), flush=True)
     print("Running: " + " ".join(command), flush=True)
     report = None
@@ -63,18 +148,23 @@ def main() -> int:
         for line in child.stdout:
             sys.stdout.write(line)
             sys.stdout.flush()
-            if line.startswith("BENCHMARK_RESULT "):
-                report = json.loads(line.removeprefix("BENCHMARK_RESULT "))
+            prefix = "BENCHMARK_BINARY_RESULT " if args.binary else "BENCHMARK_RESULT "
+            if prefix in line:
+                report = json.loads(line.split(prefix, 1)[1])
         status = child.wait()
     if status == 0 and report is None:
         raise RuntimeError("runner returned success without benchmark evidence")
+    environment["artifact"] = artifact_identity(root, report, environment["profile"], args.binary)
     result_file = root / "docs/local/benchmark-results.md"
+    result_file.parent.mkdir(parents=True, exist_ok=True)
     with result_file.open("a") as output:
         output.write("\n## Recorded run " + environment["utc"] + "\n\n")
         output.write(f"{'Full target corpus' if count == 50000 else 'Reduced corpus, not 50k validation'}; "
                      f"{environment['profile']}; exit status {status}.\n\n")
         output.write("Command: `" + " ".join(command) + "`\n\n")
-        output.write("```json\n" + json.dumps({"environment": environment, "result": report}, indent=2) + "\n```\n")
+        output.write("```json\n" + json.dumps({"environment": environment, "result": report,
+                                                  "acceptance_targets": classifications(report if args.binary else None, environment["profile"]),
+                                                  "failures": (report or {}).get("failures", []) + ([f"runner exit status {status}"] if status else [])}, indent=2) + "\n```\n")
     return status
 
 

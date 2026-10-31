@@ -1,6 +1,8 @@
 # Foldout
 
-Foldout is a self-hosted manager for comics, magazines, and manga. The development build includes a Rust HTTP service, SQLite catalog, administrator setup, scoped API keys, durable jobs, read-only library scans, reviewed adoption, and a built-in CBZ/CBR/PDF reader. It supports configured indexer searches, download-client workflows, GetComics and MangaDex direct acquisition, and Internet Archive magazine discovery. See [integration status](docs/integrations.md) for supported behavior and remaining live-transfer checks. This is not a released replacement yet.
+Foldout is a self-hosted manager for comics, magazines, and manga. The development build includes a Rust HTTP service, SQLite catalog, administrator setup, scoped API keys, durable jobs, read-only library scans, reviewed adoption, and a built-in CBZ/CBR/PDF reader. It supports configured indexer searches, download-client workflows, GetComics and MangaDex direct acquisition, and Internet Archive magazine discovery with reviewed catalog unit proposals. See [integration status](docs/integrations.md) for supported behavior and remaining live-transfer checks. This is not a released replacement yet.
+
+After a catalog unit is deleted, replaying its old Archive idempotency key performs a fresh accept with server-recomputed metadata instead of returning the deleted unit ID.
 
 ## Run locally
 
@@ -28,7 +30,7 @@ Open http://127.0.0.1:8787. The default state directory is `./state`. Keep SQLit
 
 `GET /health/live` checks HTTP liveness. `GET /health/ready` checks database access and returns 503 when unavailable. These endpoints expose no library or credential data. The versioned API is described in [OpenAPI](api/openapi.yaml). Browser sessions use HTTP-only cookies; automation uses scoped bearer API keys. Cookie-authenticated writes require the configured origin.
 
-Library scans read source files without moving or renaming them. Adoption requires selecting a catalog unit and accepting a preview; the source is rehashed before association. Keep original media mounted read-only while evaluating the application. Inventory shows how many catalog units are associated with the last scanned file identity; an additional association can describe another issue in a collection. Rescan after changing files.
+Library scans read source files without moving or renaming them. Adoption requires selecting a catalog unit and accepting a preview; the source is rehashed before association. Keep original media mounted read-only while evaluating the application. Inventory shows how many catalog units are associated with the last scanned file identity; an additional association can describe another issue in a collection. Rescan after changing files. After migration 022, the next scan also inspects embedded metadata in existing CBZ and CBR files, which can make that scan take longer. Failed extractions retry with backoff on later scans.
 
 Search the local library by title or run label, filter editions by language/region/publisher, and find units by label. Queries are literal substrings with ASCII case-insensitive matching; non-ASCII letters retain their case. Publication details allow correcting the title, sort title, run label, and known unit count. The selected edition supports language, region, and publisher corrections. Units support label, kind, sort key, and date corrections, preserving date precision. These edits keep record IDs and file associations and do not rename or move files.
 

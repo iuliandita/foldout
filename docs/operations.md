@@ -80,6 +80,43 @@ suffixed tags are prereleases and do not update `:latest`. Run the Release workf
 manually on a tag with `dry_run` enabled to build both architectures and variants
 without publishing, signing, or creating a release.
 
+## Performance evidence
+
+On Linux, run `cargo fetch --locked` first, then build the frontend before a
+release run. Run `./scripts/benchmark --binary` with `BENCHMARK_FILES=50000`
+for the owned synthetic corpus, or `BENCHMARK_FILES=1000 ./scripts/benchmark
+--binary --debug` for a small smoke run. The command uses offline Cargo and
+appends a Markdown section containing fenced JSON to `docs/local/benchmark-results.md`. It creates and
+removes private disposable state and independent fixture copies in the checkout.
+An interrupt or termination may leave a `.benchmark-*` directory and service
+process behind. Stop the owned process and remove only that disposable directory
+after checking it; it contains a database, key material, and API key hashes.
+
+The binary mode starts the real executable on loopback, warms the catalog and
+pages, waits three seconds with workers enabled before idle RSS, then records five
+concurrent sessions. The mixed phase contains catalog and warm page requests with a queued scan,
+without imports. It records each request window and observed scan state, and
+samples the executable and its descendants every 50 ms; short child peaks can
+be missed. Summed VmRSS overcounts shared pages, conservatively for upper limits.
+The mixed workload does not exercise child processes, so child-inclusive mixed
+RSS is unmeasured. Missing /proc child accounting is recorded as zero children
+counted. OS caches are not dropped. The older default mode uses the in-process
+router; its cold reader cache is not a cold OS cache. CPU affinity, cgroup v2
+hierarchy limits, storage mount and workload details accompany the results.
+Unavailable limits are reported as unmeasured. Compose's configured limits are
+not evidence that a local run used them.
+
+Each target has a fixture result of `pass`, `fail`, or `unmeasured`, and a
+separate reference-environment acceptance result. A release build, 50,000 files,
+100 samples per HTTP measurement, and observed five-session scan overlap are
+required for the relevant fixture verdicts. Warm page delivery uses the maximum
+observed page time; catalog queries use p95. Debug builds, reduced corpora,
+missing measurements, and failed runs yield `unmeasured`. Synthetic fixtures and
+loopback cannot establish reference-host or LAN acceptance, which remains
+`unmeasured`, even with `--assert-reference-host` and operator-supplied
+`--host-metadata` and `--network-metadata`. Do not interpret a fixture pass as
+acceptance evidence. The owner must measure the reference environment and LAN.
+
 ## Initial administrator
 
 Fresh instances require a setup token before an administrator
@@ -213,6 +250,8 @@ Before upgrading, retain a verified backup and the previous executable/image.
 Restore to a fresh directory for rollback; do not point an older executable at a
 database migrated by a newer version. There is no promise of backward schema
 compatibility or automated downgrade.
+
+Migration 023 adds durable Archive unit acceptance receipts. Each receipt references its created unit with a restrictive foreign key. Deleting a unit through the catalog removes its own acceptance receipts in the same transaction after all other dependency checks pass; its old idempotency key then performs a fresh server-recomputed accept. It does not rewrite catalog units or provider links. Back up the database and encryption key before starting the upgraded service; startup applies the additive table migration. Receipts retain the original reviewed response and raw source metadata so retries remain stable after restarts or source changes. Existing Archive provenance stays in `provider_links`. For rollback, stop the upgraded service and restore the pre-upgrade backup into a fresh state directory with the previous executable. Older versions reject the newer schema; there is no in-place downgrade.
 
 ## Import policies
 

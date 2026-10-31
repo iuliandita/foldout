@@ -1,5 +1,6 @@
 docs/local/
 /target/
+/.benchmark-*/
 /web/node_modules/
 /tools/node_modules/
 /web/dist/

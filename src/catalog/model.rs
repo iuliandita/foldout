@@ -222,7 +222,7 @@ pub struct UnitUpdate {
     pub date: Option<Option<String>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Unit {
     pub id: String,
     pub edition_id: String,
