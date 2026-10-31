@@ -64,3 +64,6 @@ pub struct LibraryFile {
 
 #[cfg(test)]
 mod coverage_test;
+
+#[cfg(test)]
+mod hints_test;
