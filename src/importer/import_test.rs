@@ -1,6 +1,6 @@
 use std::{
     fs,
-    os::unix::fs::{MetadataExt, symlink},
+    os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::Path,
 };
 
@@ -9,7 +9,9 @@ use uuid::Uuid;
 
 use super::{
     finalize,
-    journal::{ImportError, ImportPhase, ImportPolicy, ImportService, InternalImportRequest},
+    journal::{
+        ImportError, ImportMode, ImportPhase, ImportPolicy, ImportService, InternalImportRequest,
+    },
 };
 use crate::{library::roots::Library, store::sqlite::SqliteStore};
 
@@ -106,10 +108,13 @@ impl Fixture {
                 .library_file_id,
             result.library_file_id
         );
-        assert_eq!(
-            fs::read(self.source.path().join(&self.request.source_relative)).unwrap(),
-            PDF
-        );
+        let source = self.source.path().join(&self.request.source_relative);
+        if self.request.policy == ImportPolicy::Move {
+            assert!(!source.exists());
+            assert_eq!(result.effective_policy.as_deref(), Some("move"));
+        } else {
+            assert_eq!(fs::read(source).unwrap(), PDF);
+        }
         assert_eq!(
             fs::read(
                 self.destination
@@ -141,6 +146,7 @@ impl Fixture {
 async fn recovery_requires_durable_catalog_evidence_before_cleanup() {
     for policy in [
         ImportPolicy::Copy,
+        ImportPolicy::Move,
         ImportPolicy::Hardlink {
             fallback_to_copy: false,
         },
@@ -286,6 +292,10 @@ async fn restart_after_every_committed_phase_preserves_source_and_one_catalog_fi
             for _ in 0..phase_count {
                 fixture.service().step(&fixture.id).await.unwrap();
             }
+            let mut tx = fixture.store.begin_write().await.unwrap();
+            sqlx::query("UPDATE import_operations SET identity_json = json_remove(identity_json, '$.source_mtime_ns', '$.source_parent_identity', '$.mode') WHERE id = ?")
+                .bind(&fixture.id).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
             fixture.store.close().await;
             fixture.store = SqliteStore::open(fixture.state.path()).await.unwrap();
             fixture.assert_done().await;
@@ -396,11 +406,12 @@ async fn replaced_source_inode_with_same_bytes_is_not_the_planned_source() {
 async fn recovers_effects_before_their_database_phase_commits() {
     for policy in [
         ImportPolicy::Copy,
+        ImportPolicy::Move,
         ImportPolicy::Hardlink {
             fallback_to_copy: false,
         },
     ] {
-        let fixture = Fixture::new(policy).await;
+        let fixture = Fixture::new(policy.clone()).await;
         fixture.plan().await;
         let op = fixture.service().get(&fixture.id).await.unwrap();
         finalize::stage(&op).unwrap();
@@ -421,6 +432,10 @@ async fn recovers_effects_before_their_database_phase_commits() {
             .unwrap()
             .cleanup(&cleanup)
             .unwrap();
+        if policy == ImportPolicy::Move {
+            finalize::cleanup_source(&cleanup).unwrap();
+            assert!(!fixture.source.path().join("owned.pdf").exists());
+        }
         fixture.assert_done().await;
     }
 }
@@ -450,9 +465,15 @@ async fn interrupted_partial_copy_is_rebuilt_only_inside_private_staging() {
 }
 
 #[tokio::test]
-async fn changed_stage_or_final_inode_is_never_accepted() {
-    for phase_count in [1, 3, 6] {
-        let fixture = Fixture::new(ImportPolicy::Copy).await;
+async fn changed_stage_or_final_file_is_never_accepted() {
+    for (policy, phase_count, changed_inode) in [ImportPolicy::Copy, ImportPolicy::Move]
+        .into_iter()
+        .flat_map(|policy| {
+            [(1, true), (3, true), (5, true), (6, true), (5, false)]
+                .map(|(phase, changed_inode)| (policy.clone(), phase, changed_inode))
+        })
+    {
+        let fixture = Fixture::new(policy).await;
         fixture.plan().await;
         for _ in 0..phase_count {
             fixture.service().step(&fixture.id).await.unwrap();
@@ -466,12 +487,215 @@ async fn changed_stage_or_final_inode_is_never_accepted() {
         } else {
             fixture.destination.path().join("imported.pdf")
         };
-        fs::rename(&path, path.with_extension("preserved")).unwrap();
-        fs::write(&path, PDF).unwrap();
+        if changed_inode {
+            fs::rename(&path, path.with_extension("preserved")).unwrap();
+            fs::write(&path, PDF).unwrap();
+        } else {
+            let mut bytes = PDF.to_vec();
+            bytes[0] ^= 1;
+            fs::write(&path, bytes).unwrap();
+        }
         assert!(matches!(
             fixture.service().recover(&fixture.id).await,
             Err(ImportError::Changed)
         ));
+        if phase_count < 6 {
+            assert_eq!(
+                fs::read(fixture.source.path().join("owned.pdf")).unwrap(),
+                PDF
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn move_refuses_source_changes_after_catalog_commit() {
+    for change in [
+        "inode", "content", "size", "mtime", "symlink", "parent", "legacy",
+    ] {
+        let mut fixture = Fixture::new(ImportPolicy::Move).await;
+        fs::create_dir(fixture.source.path().join("nested")).unwrap();
+        fs::rename(
+            fixture.source.path().join("owned.pdf"),
+            fixture.source.path().join("nested/owned.pdf"),
+        )
+        .unwrap();
+        fixture.request.source_relative = "nested/owned.pdf".into();
+        fixture.plan().await;
+        for _ in 0..5 {
+            fixture.service().step(&fixture.id).await.unwrap();
+        }
+        let source = fixture.source.path().join("nested/owned.pdf");
+        match change {
+            "inode" => {
+                fs::rename(&source, source.with_extension("saved")).unwrap();
+                fs::write(&source, PDF).unwrap();
+            }
+            "content" | "size" => {
+                let modified = fs::metadata(&source).unwrap().modified().unwrap();
+                let mut bytes = PDF.to_vec();
+                if change == "size" {
+                    bytes.push(b' ');
+                } else {
+                    bytes[0] ^= 1;
+                }
+                fs::write(&source, bytes).unwrap();
+                if change == "content" {
+                    fs::File::open(&source)
+                        .unwrap()
+                        .set_modified(modified)
+                        .unwrap();
+                }
+            }
+            "mtime" => {
+                let file = fs::File::open(&source).unwrap();
+                let changed = file.metadata().unwrap().modified().unwrap()
+                    + std::time::Duration::from_secs(1);
+                file.set_modified(changed).unwrap();
+            }
+            "symlink" => {
+                let saved = source.with_extension("saved");
+                fs::rename(&source, &saved).unwrap();
+                symlink(saved, &source).unwrap();
+            }
+            "parent" => {
+                fs::rename(
+                    fixture.source.path().join("nested"),
+                    fixture.source.path().join("saved"),
+                )
+                .unwrap();
+                fs::create_dir(fixture.source.path().join("nested")).unwrap();
+                fs::hard_link(fixture.source.path().join("saved/owned.pdf"), &source).unwrap();
+            }
+            "legacy" => {
+                let mut tx = fixture.store.begin_write().await.unwrap();
+                sqlx::query("UPDATE import_operations SET identity_json = json_remove(identity_json, '$.source_mtime_ns', '$.source_parent_identity') WHERE id = ?")
+                    .bind(&fixture.id).execute(&mut *tx).await.unwrap();
+                tx.commit().await.unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = fs::read(&source).unwrap();
+        fixture.store.close().await;
+        fixture.store = SqliteStore::open(fixture.state.path()).await.unwrap();
+        let error = fixture.service().recover(&fixture.id).await.unwrap_err();
+        if change == "legacy" {
+            assert!(matches!(error, ImportError::InvalidJournal));
+        } else if change == "symlink" {
+            assert!(matches!(error, ImportError::Io(_)));
+        } else {
+            assert!(matches!(error, ImportError::Changed), "{change}: {error}");
+        }
+        assert_eq!(fs::read(&source).unwrap(), before);
+        assert_eq!(
+            fs::read(fixture.destination.path().join("imported.pdf")).unwrap(),
+            PDF
+        );
+        let operation = fixture.service().get(&fixture.id).await.unwrap();
+        assert_eq!(operation.phase, ImportPhase::CleanupPending);
+        assert!(operation.last_error.is_some());
+        assert!(operation.library_file_id.is_some());
+    }
+}
+
+#[tokio::test]
+async fn move_unlink_permission_failure_retains_source_and_retries() {
+    let fixture = Fixture::new(ImportPolicy::Move).await;
+    fixture.plan().await;
+    for _ in 0..5 {
+        fixture.service().step(&fixture.id).await.unwrap();
+    }
+    fs::set_permissions(fixture.source.path(), fs::Permissions::from_mode(0o500)).unwrap();
+    let result = fixture.service().recover(&fixture.id).await;
+    fs::set_permissions(fixture.source.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        matches!(result, Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+    );
+    assert_eq!(
+        fs::read(fixture.source.path().join("owned.pdf")).unwrap(),
+        PDF
+    );
+    assert_eq!(
+        fs::read(fixture.destination.path().join("imported.pdf")).unwrap(),
+        PDF
+    );
+    let operation = fixture.service().get(&fixture.id).await.unwrap();
+    assert_eq!(operation.phase, ImportPhase::CleanupPending);
+    assert!(operation.last_error.is_some());
+    fixture.assert_done().await;
+}
+
+#[tokio::test]
+async fn move_copy_disk_full_preserves_source_and_rebuilds_partial_stage() {
+    use std::io::Write;
+
+    let fixture = Fixture::new(ImportPolicy::Move).await;
+    fixture.plan().await;
+    let operation = fixture.service().get(&fixture.id).await.unwrap();
+    let result = finalize::stage_with_copy(&operation, |_, target| {
+        target.write_all(b"%PDF-")?;
+        Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
+    });
+    assert!(
+        matches!(result, Err(ImportError::Io(error)) if error.raw_os_error() == Some(libc::ENOSPC))
+    );
+    assert_eq!(
+        fs::read(fixture.source.path().join("owned.pdf")).unwrap(),
+        PDF
+    );
+    assert!(!fixture.destination.path().join("imported.pdf").exists());
+    assert_eq!(
+        fixture.service().get(&fixture.id).await.unwrap().phase,
+        ImportPhase::Planned
+    );
+    assert_eq!(
+        fs::read(
+            fixture
+                .destination
+                .path()
+                .join(".library-imports")
+                .join(format!("{}.tmp", fixture.id))
+        )
+        .unwrap(),
+        b"%PDF-"
+    );
+    fixture.assert_done().await;
+}
+
+#[tokio::test]
+async fn torrent_preserving_policy_rejects_move_before_any_journal_or_staging_write() {
+    for policy in [
+        ImportPolicy::Move,
+        ImportPolicy::Copy,
+        ImportPolicy::Hardlink {
+            fallback_to_copy: false,
+        },
+    ] {
+        let fixture = Fixture::new(policy.clone()).await;
+        let result = fixture
+            .service()
+            .plan_with_mode(
+                &fixture.id,
+                fixture.request.clone(),
+                ImportMode::TorrentPreserving,
+            )
+            .await;
+        if policy == ImportPolicy::Move {
+            assert!(matches!(result, Err(ImportError::TorrentPreserving)));
+            assert!(matches!(
+                fixture.service().get(&fixture.id).await,
+                Err(ImportError::NotFound)
+            ));
+            assert!(!fixture.destination.path().join(".library-imports").exists());
+            assert_eq!(
+                fs::read(fixture.source.path().join("owned.pdf")).unwrap(),
+                PDF
+            );
+        } else {
+            let operation = result.unwrap();
+            assert_eq!(operation.identity.mode, ImportMode::TorrentPreserving);
+            fixture.assert_done().await;
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-//! Linux descriptor-relative operations. No source unlink, truncation, or permission change.
+//! Linux descriptor-relative operations; source unlink is restricted to Move cleanup.
 use std::{
     ffi::CString,
     fs::File,
@@ -13,7 +13,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::journal::{ImportError, ImportOperation, ImportPolicy, InternalImportRequest};
+use super::journal::{
+    ImportError, ImportMode, ImportOperation, ImportPhase, ImportPolicy, InternalImportRequest,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Identity {
@@ -45,6 +47,12 @@ pub(crate) struct IntentIdentity {
     pub destination_root_identity: Identity,
     pub destination_parent_identity: Identity,
     pub source: Identity,
+    #[serde(default)]
+    pub source_parent_identity: Option<Identity>,
+    #[serde(default)]
+    pub source_mtime_ns: Option<i64>,
+    #[serde(default)]
+    pub mode: ImportMode,
     pub signature: String,
     pub size: i64,
     pub format: String,
@@ -197,6 +205,7 @@ pub(crate) fn inspect_intent(
     source: PathBuf,
     destination: PathBuf,
     request: &InternalImportRequest,
+    mode: ImportMode,
 ) -> Result<IntentIdentity, ImportError> {
     let source_root = root(&source)?;
     let destination_root = root(&destination)?;
@@ -219,7 +228,7 @@ pub(crate) fn inspect_intent(
     )?;
     absent(&destination_parent, &destination_name)?;
     let mut source_file = regular(&source_parent, &source_name)?;
-    let (signature, size, _) = hash(&mut source_file)?;
+    let (signature, size, mtime) = hash(&mut source_file)?;
     let format = Path::new(&request.source_relative)
         .extension()
         .and_then(|s| s.to_str())
@@ -242,6 +251,9 @@ pub(crate) fn inspect_intent(
         destination_root_identity: Identity::of(&destination_root)?,
         destination_parent_identity: Identity::of(&destination_parent)?,
         source: Identity::of(&source_file)?,
+        source_parent_identity: Some(Identity::of(&source_parent)?),
+        source_mtime_ns: Some(mtime),
+        mode,
         signature,
         size,
         format,
@@ -467,6 +479,13 @@ fn unlink(parent: &File, name: &str) -> Result<(), ImportError> {
 }
 
 pub(crate) fn stage(operation: &ImportOperation) -> Result<(Identity, &'static str), ImportError> {
+    stage_with_copy(operation, |source, target| std::io::copy(source, target))
+}
+
+pub(crate) fn stage_with_copy(
+    operation: &ImportOperation,
+    copy: impl FnOnce(&mut std::io::Take<&mut File>, &mut File) -> std::io::Result<u64>,
+) -> Result<(Identity, &'static str), ImportError> {
     let dest = destination(operation)?;
     dest.check(operation)?;
     absent(&dest.parent, &dest.name)?;
@@ -495,16 +514,10 @@ pub(crate) fn stage(operation: &ImportOperation) -> Result<(Identity, &'static s
             fallback_to_copy: true
         }
     );
-    let mut policy = match operation.request.policy {
-        ImportPolicy::Copy => "copy",
-        ImportPolicy::Hardlink { .. } if same_device => "hardlink",
-        ImportPolicy::Hardlink {
-            fallback_to_copy: true,
-        } => "copy",
-        ImportPolicy::Hardlink {
-            fallback_to_copy: false,
-        } => return Err(ImportError::CrossFilesystem),
-    };
+    let mut policy = operation
+        .request
+        .policy
+        .resolve(operation.identity.mode, same_device)?;
     // A crash can leave a complete or partial stage before the phase commit. Only our
     // UUID in the owner-only staging directory may be reconciled; never a final path.
     match dest.stage_file() {
@@ -571,7 +584,7 @@ pub(crate) fn stage(operation: &ImportOperation) -> Result<(Identity, &'static s
         )?;
         source.seek(SeekFrom::Start(0))?;
         // Bound a concurrently growing source to the size authorized by the intent.
-        let copied = std::io::copy(
+        let copied = copy(
             &mut (&mut source).take(operation.identity.size as u64 + 1),
             &mut file,
         )?;
@@ -601,4 +614,67 @@ pub(crate) fn verify_stage(operation: &ImportOperation) -> Result<File, ImportEr
         .check(&file)?;
     check_content(&mut file, &operation.identity)?;
     Ok(file)
+}
+
+pub(crate) fn cleanup_source(operation: &ImportOperation) -> Result<(), ImportError> {
+    if operation.phase != ImportPhase::CleanupPending
+        || operation.request.policy != ImportPolicy::Move
+        || operation.effective_policy.as_deref() != Some("move")
+        || operation.library_file_id.is_none()
+    {
+        return Err(ImportError::InvalidJournal);
+    }
+    operation
+        .request
+        .policy
+        .resolve(operation.identity.mode, true)?;
+    destination(operation)?.verify_final(operation)?;
+    let source_root = root(&operation.identity.source_root)?;
+    operation
+        .identity
+        .source_root_identity
+        .check(&source_root)?;
+    let (source_parent, source_name) = parent(&source_root, &operation.request.source_relative)?;
+    operation
+        .identity
+        .source_parent_identity
+        .as_ref()
+        .ok_or(ImportError::InvalidJournal)?
+        .check(&source_parent)?;
+    let source_path = operation
+        .identity
+        .source_root
+        .join(&operation.request.source_relative);
+    let expected_parent = source_path.parent().ok_or(ImportError::UnsafePath)?;
+    check_location(&source_parent, expected_parent)?;
+    let mut source = match regular(&source_parent, &source_name) {
+        Ok(file) => file,
+        Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Replay must also persist an unlink whose directory fsync was interrupted.
+            source_parent.sync_all()?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    operation.identity.source.check(&source)?;
+    let before = source.metadata()?;
+    let mtime = check_content(&mut source, &operation.identity)?;
+    if operation.identity.source_mtime_ns != Some(mtime) {
+        return Err(ImportError::Changed);
+    }
+    let current = regular(&source_parent, &source_name)?;
+    operation.identity.source.check(&current)?;
+    let after = current.metadata()?;
+    if before.len() != after.len()
+        || before.mtime() != after.mtime()
+        || before.mtime_nsec() != after.mtime_nsec()
+        || before.ctime() != after.ctime()
+        || before.ctime_nsec() != after.ctime_nsec()
+    {
+        return Err(ImportError::Changed);
+    }
+    check_location(&source_parent, expected_parent)?;
+    unlink(&source_parent, &source_name)?;
+    source_parent.sync_all()?;
+    Ok(())
 }

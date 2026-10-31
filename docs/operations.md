@@ -200,6 +200,32 @@ Restore to a fresh directory for rollback; do not point an older executable at a
 database migrated by a newer version. There is no promise of backward schema
 compatibility or automated downgrade.
 
+## Import policies
+
+The internal importer supports Copy, Hardlink with explicit copy fallback, and
+Move. Move copies into private staging and keeps the source through destination
+verification, publication, and the catalog/coverage transaction. Only
+`CleanupPending` can unlink it, after revalidating the destination and durable
+catalog evidence. Cleanup rechecks the registered source root, parent and file
+identities, size, nanosecond mtime, and SHA-256. A changed source or unlink failure
+retains that phase and a visible error for review. Recovery accepts an already
+missing source only after the same destination/catalog checks; directory sync
+precedes the Done commit.
+
+Use Move only with sources under exclusive importer control: another process
+must not write or replace them during cleanup. Filesystem identity checks and
+unlink are separate system calls. Existing Copy/Hardlink journals remain
+recoverable; Move refuses source cleanup without its journaled identity evidence.
+
+Torrent callers use `ImportService::plan_with_mode` with
+`ImportMode::TorrentPreserving`. Policy resolution rejects Move before planning
+and again when staging or cleaning up. The acquisition pipeline selects that
+mode for qBittorrent regardless of whether the client currently reports seeding.
+Both production acquisition paths continue to request Copy. Move is available
+only through the internal importer API; HTTP and UI exposure are deferred by
+owner decision. Downloader job/payload cleanup remains separate from import
+source cleanup.
+
 ## Verification
 
 Run `cargo test --locked --offline --test backup_restore`. It imports the exported

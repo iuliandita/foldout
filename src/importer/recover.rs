@@ -10,7 +10,7 @@ use sqlx::Row;
 
 use super::{
     finalize,
-    journal::{ImportError, ImportOperation, ImportPhase, ImportService},
+    journal::{ImportError, ImportOperation, ImportPhase, ImportPolicy, ImportService},
 };
 
 impl ImportService {
@@ -108,8 +108,14 @@ impl ImportService {
             ImportPhase::CleanupPending => {
                 self.verify_completed(&operation).await?;
                 let op = operation.clone();
-                self.blocking(move || finalize::destination(&op)?.cleanup(&op))
-                    .await?;
+                self.blocking(move || {
+                    finalize::destination(&op)?.cleanup(&op)?;
+                    if op.request.policy == ImportPolicy::Move {
+                        finalize::cleanup_source(&op)?;
+                    }
+                    Ok(())
+                })
+                .await?;
                 self.advance(&operation, ImportPhase::Done, None, None, None)
                     .await?;
             }

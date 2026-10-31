@@ -106,7 +106,8 @@ fn importer_recovery_child() {
             "verified" | "published_uncommitted" => ImportPhase::Verified,
             "finalized" => ImportPhase::Finalized,
             "cataloged" => ImportPhase::Cataloged,
-            "cleanup_pending" => ImportPhase::CleanupPending,
+            "cleanup_pending" | "unlinked_uncommitted" => ImportPhase::CleanupPending,
+            "done" => ImportPhase::Done,
             _ => panic!("unknown child boundary"),
         };
         for _ in 0..6 {
@@ -124,6 +125,15 @@ fn importer_recovery_child() {
             assert_eq!(service.get(&scenario.operation).await.unwrap().phase, ImportPhase::Verified);
             assert_eq!(fs::read(root.join("destination/imported.cbz")).unwrap(), CBZ);
         }
+        if scenario.boundary == "unlinked_uncommitted" {
+            let mut tx = store.begin_write().await.unwrap();
+            sqlx::query("CREATE TRIGGER test_hold_import_cleanup BEFORE UPDATE OF phase ON import_operations WHEN NEW.phase='done' BEGIN SELECT RAISE(IGNORE); END")
+                .execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+            assert!(matches!(service.step(&scenario.operation).await, Err(ImportError::Busy)));
+            assert_eq!(service.get(&scenario.operation).await.unwrap().phase, ImportPhase::CleanupPending);
+            assert!(!root.join("source/owned.cbz").exists());
+        }
         // Publish the marker only after the intended durable state and all step tasks settled.
         let mut marker = private_file(&root.join("ready.pending"));
         marker.write_all(scenario.nonce.as_bytes()).unwrap();
@@ -137,7 +147,9 @@ fn importer_recovery_child() {
     });
 }
 
-async fn scenario(boundary: &str, hardlink: bool, collision: bool) {
+async fn scenario(boundary: &str, policy: ImportPolicy, collision: bool) {
+    let hardlink = matches!(policy, ImportPolicy::Hardlink { .. });
+    let moving = policy == ImportPolicy::Move;
     let temp = tempfile::Builder::new()
         .prefix("import-process-recovery-")
         .tempdir()
@@ -188,13 +200,7 @@ async fn scenario(boundary: &str, hardlink: bool, collision: bool) {
                 .id,
             destination_relative: "imported.cbz".into(),
             unit_id: "unit".into(),
-            policy: if hardlink {
-                ImportPolicy::Hardlink {
-                    fallback_to_copy: false,
-                }
-            } else {
-                ImportPolicy::Copy
-            },
+            policy,
         },
     };
     let mut config = private_file(&root.join("scenario.json"));
@@ -213,6 +219,7 @@ async fn scenario(boundary: &str, hardlink: bool, collision: bool) {
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env(CHILD_ROOT, root)
         .env(CHILD_NONCE, &input.nonce)
+        .env("TMPDIR", root)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().unwrap()))
         .stderr(Stdio::from(log));
@@ -247,16 +254,21 @@ async fn scenario(boundary: &str, hardlink: bool, collision: bool) {
     let store = SqliteStore::open(&root.join("state")).await.unwrap();
     let service = ImportService::new(store.clone());
     let operation = service.get(&input.operation).await.unwrap();
-    let expected_phase = if boundary == "published_uncommitted" {
-        "verified"
-    } else {
-        boundary
+    let expected_phase = match boundary {
+        "published_uncommitted" => "verified",
+        "unlinked_uncommitted" => "cleanup_pending",
+        other => other,
     };
     assert_eq!(operation.phase.as_str(), expected_phase);
     let target = root.join("destination/imported.cbz");
     let published = matches!(
         boundary,
-        "published_uncommitted" | "finalized" | "cataloged" | "cleanup_pending"
+        "published_uncommitted"
+            | "finalized"
+            | "cataloged"
+            | "cleanup_pending"
+            | "unlinked_uncommitted"
+            | "done"
     );
     assert_eq!(target.exists(), published);
     let published_identity = published.then(|| identity(&target));
@@ -266,8 +278,17 @@ async fn scenario(boundary: &str, hardlink: bool, collision: bool) {
     .fetch_one(store.reader())
     .await
     .unwrap();
-    let cataloged = matches!(boundary, "cataloged" | "cleanup_pending");
+    let cataloged = matches!(
+        boundary,
+        "cataloged" | "cleanup_pending" | "unlinked_uncommitted" | "done"
+    );
     assert_eq!(before_counts, if cataloged { (1, 1) } else { (0, 0) });
+    if moving && matches!(boundary, "unlinked_uncommitted" | "done") {
+        assert!(!root.join("source/owned.cbz").exists());
+    } else {
+        assert_eq!(fs::read(root.join("source/owned.cbz")).unwrap(), CBZ);
+        assert_eq!(identity(&root.join("source/owned.cbz")), original);
+    }
     if matches!(
         boundary,
         "staged" | "verified" | "published_uncommitted" | "finalized"
@@ -285,6 +306,14 @@ async fn scenario(boundary: &str, hardlink: bool, collision: bool) {
     if boundary == "published_uncommitted" {
         let mut tx = store.begin_write().await.unwrap();
         sqlx::query("DROP TRIGGER test_hold_import_publication")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    if boundary == "unlinked_uncommitted" {
+        let mut tx = store.begin_write().await.unwrap();
+        sqlx::query("DROP TRIGGER test_hold_import_cleanup")
             .execute(&mut *tx)
             .await
             .unwrap();
@@ -362,8 +391,12 @@ async fn scenario(boundary: &str, hardlink: bool, collision: bool) {
             1
         );
     }
-    assert_eq!(fs::read(root.join("source/owned.cbz")).unwrap(), CBZ);
-    assert_eq!(identity(&root.join("source/owned.cbz")), original);
+    if moving && !collision {
+        assert!(!root.join("source/owned.cbz").exists());
+    } else {
+        assert_eq!(fs::read(root.join("source/owned.cbz")).unwrap(), CBZ);
+        assert_eq!(identity(&root.join("source/owned.cbz")), original);
+    }
     assert!(
         sqlx::query("PRAGMA foreign_key_check")
             .fetch_all(store.reader())
@@ -382,7 +415,13 @@ fn killed_importer_recovers_durable_and_published_boundaries_without_overwrite()
     nice();
     runtime().block_on(async {
         // One child at a time; tiny owned archive, no clients/network or elevated privileges.
-        for hardlink in [false, true] {
+        for policy in [
+            ImportPolicy::Copy,
+            ImportPolicy::Hardlink {
+                fallback_to_copy: false,
+            },
+            ImportPolicy::Move,
+        ] {
             for boundary in [
                 "planned",
                 "staged",
@@ -391,17 +430,29 @@ fn killed_importer_recovers_durable_and_published_boundaries_without_overwrite()
                 "finalized",
                 "cataloged",
                 "cleanup_pending",
+                "done",
             ] {
-                tokio::time::timeout(Duration::from_secs(90), scenario(boundary, hardlink, false))
-                    .await
-                    .expect("bounded recovery scenario");
+                tokio::time::timeout(
+                    Duration::from_secs(90),
+                    scenario(boundary, policy.clone(), false),
+                )
+                .await
+                .expect("bounded recovery scenario");
             }
             tokio::time::timeout(
                 Duration::from_secs(90),
-                scenario("verified", hardlink, true),
+                scenario("verified", policy.clone(), true),
             )
             .await
             .expect("bounded collision scenario");
+            if policy == ImportPolicy::Move {
+                tokio::time::timeout(
+                    Duration::from_secs(90),
+                    scenario("unlinked_uncommitted", policy, false),
+                )
+                .await
+                .expect("bounded unlink recovery scenario");
+            }
         }
     });
 }

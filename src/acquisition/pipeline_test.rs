@@ -1060,6 +1060,20 @@ async fn all_three_content_types_require_explicit_association_then_copy_to_journ
             .await
             .unwrap();
         assert_eq!(phase, "done");
+        let operation = ImportService::new(f.store.clone())
+            .get(final_view.import_id.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(operation.request.policy, ImportPolicy::Copy);
+        assert_eq!(operation.effective_policy.as_deref(), Some("copy"));
+        assert_eq!(
+            operation.identity.mode,
+            if torrent {
+                ImportMode::TorrentPreserving
+            } else {
+                ImportMode::Standalone
+            }
+        );
         let original = std::fs::read(f.source.path().join("owned.cbz")).unwrap();
         assert_eq!(
             original,

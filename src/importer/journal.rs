@@ -16,6 +16,37 @@ use crate::{
 pub enum ImportPolicy {
     Copy,
     Hardlink { fallback_to_copy: bool },
+    Move,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ImportMode {
+    #[default]
+    Standalone,
+    TorrentPreserving,
+}
+
+impl ImportPolicy {
+    pub(crate) fn resolve(
+        &self,
+        mode: ImportMode,
+        same_device: bool,
+    ) -> Result<&'static str, ImportError> {
+        match self {
+            Self::Move if mode == ImportMode::TorrentPreserving => {
+                Err(ImportError::TorrentPreserving)
+            }
+            Self::Move => Ok("move"),
+            Self::Copy => Ok("copy"),
+            Self::Hardlink { .. } if same_device => Ok("hardlink"),
+            Self::Hardlink {
+                fallback_to_copy: true,
+            } => Ok("copy"),
+            Self::Hardlink {
+                fallback_to_copy: false,
+            } => Err(ImportError::CrossFilesystem),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -82,6 +113,8 @@ pub enum ImportError {
     Changed,
     #[error("hardlink crosses filesystems and copy fallback is disabled")]
     CrossFilesystem,
+    #[error("move is forbidden for a torrent-preserving import")]
+    TorrentPreserving,
     #[error("another importer owns the destination root; retry later")]
     Busy,
     #[error("file format validation failed")]
@@ -121,6 +154,18 @@ impl ImportService {
         operation_id: &str,
         request: InternalImportRequest,
     ) -> Result<ImportOperation, ImportError> {
+        self.plan_with_mode(operation_id, request, ImportMode::Standalone)
+            .await
+    }
+
+    /// Torrent callers must select TorrentPreserving even while requesting Copy.
+    pub async fn plan_with_mode(
+        &self,
+        operation_id: &str,
+        request: InternalImportRequest,
+        mode: ImportMode,
+    ) -> Result<ImportOperation, ImportError> {
+        request.policy.resolve(mode, true)?;
         let id = Uuid::parse_str(operation_id)
             .map_err(|_| ImportError::UnsafePath)?
             .to_string();
@@ -140,7 +185,7 @@ impl ImportService {
         let destination = self.root_path(&request.destination_root).await?;
         let req = request.clone();
         let identity = self
-            .blocking(move || finalize::inspect_intent(source, destination, &req))
+            .blocking(move || finalize::inspect_intent(source, destination, &req, mode))
             .await?;
         let destination_path = identity.destination_path(&request);
         let request_json =

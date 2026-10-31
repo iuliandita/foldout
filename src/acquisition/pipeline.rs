@@ -10,7 +10,7 @@ use crate::{
         self, AuthorizedPayload, ClientError, ClientKind, DownloadState, OwnedJob,
         SubmissionAttempt,
     },
-    importer::journal::{ImportPolicy, ImportService, InternalImportRequest},
+    importer::journal::{ImportMode, ImportPolicy, ImportService, InternalImportRequest},
     jobs::store::{canonical_json, enqueue_in_transaction, fingerprint, validate_label},
     search::selection::{SelectionError, SelectionRepository},
     search::{self, SearchError, digest, now, source_fingerprint},
@@ -862,7 +862,12 @@ impl Pipeline {
             policy: ImportPolicy::Copy,
         };
         let service = ImportService::new(self.store.clone());
-        match service.plan(&import_id, request).await {
+        let mode = match row.try_get::<&str, _>("client_kind")? {
+            "qbittorrent" => ImportMode::TorrentPreserving,
+            "sabnzbd" => ImportMode::Standalone,
+            _ => return Err(PipelineError::Database),
+        };
+        match service.plan_with_mode(&import_id, request, mode).await {
             Ok(_) => {}
             Err(crate::importer::journal::ImportError::Busy) => return self.defer(claim, 5).await,
             Err(_) => {
