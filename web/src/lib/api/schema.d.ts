@@ -634,6 +634,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/acquisition/{id}/correct-mapping": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires manage scope. Corrects only the explicit local source-file association after import planning stops with import_review_required and before any journal exists. Revision and polling_fingerprint must match the terminal review snapshot. Revalidates owner, completed owned receipts, current client configuration, complete actual-return lifecycle evidence and absence of outstanding work in one write transaction. Filesystem validation runs in a blocking worker before the write transaction; the transaction rechecks the revision, evidence and exact validated root/path values. Registered roots and safe relative paths are required; symlinks and traversal are rejected. Sources must be cbz, cbr or pdf and match the destination extension, case-insensitively. The action records the path only, not file identity; the import worker revalidates and imports what is at that path when it runs. Preserves the import UUID, unit, destination reservation and attempted-submission fence. Appends an audit event and queues import planning with no client writes. Does not change client remote/local path settings or an existing journal. Stale actions and replays return 409. Cookie authentication requires a matching Origin. */
+        post: operations["correctAcquisitionMapping"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/acquisition/{id}/files": {
         parameters: {
             query?: never;
@@ -1658,6 +1675,19 @@ export interface components {
             revision: number;
             polling_fingerprint: string;
         };
+        CorrectMapping: {
+            /** Format: int64 */
+            revision: number;
+            /** @description Pass unchanged from the terminal review snapshot. */
+            polling_fingerprint: string;
+            /**
+             * Format: uuid
+             * @description Canonical lowercase, hyphenated, non-nil UUID.
+             */
+            source_root_id: string;
+            /** @description Relative path at most 4096 UTF-8 bytes. No control characters, backslashes, empty segments, dot segments, parent traversal, or leading slash. */
+            source_relative_path: string;
+        };
         AcquisitionReview: {
             acquisition: components["schemas"]["Acquisition"];
             /**
@@ -1670,7 +1700,7 @@ export interface components {
              * @enum {string}
              */
             lifecycle: "returned" | "unproven";
-            /** @description Opaque receipt and configuration snapshot fence; pass unchanged to resume polling. */
+            /** @description Opaque receipt, mapping and configuration snapshot fence; pass unchanged to resume polling or correct mapping. */
             polling_fingerprint: string;
         };
         Acquisition: {
@@ -4674,6 +4704,96 @@ export interface operations {
                 };
             };
             /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    correctAcquisitionMapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CorrectMapping"];
+            };
+        };
+        responses: {
+            /** @description Local source mapping corrected and import planning queued */
+            202: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Acquisition"];
+                };
+            };
+            /** @description invalid_request: invalid input, unsafe path, unsupported or mismatched extension, or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: acquisition not found for caller or source root not registered */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description acquisition_conflict: stale or replayed snapshot, changed evidence or validated root/path values, existing journal or destination file, active or uncertain work, or unsafe correction */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: filesystem I/O failure (including missing files or unavailable roots), blocking worker failure, or operation could not be completed */
             500: {
                 headers: {
                     [name: string]: unknown;
