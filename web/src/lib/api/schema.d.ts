@@ -1776,7 +1776,7 @@ export interface components {
             /** @enum {string} */
             last_state: "scheduled" | "disabled" | "awaiting_release" | "needs_review" | "source_error";
             /** @enum {string|null} */
-            reason: "source_cooldown" | "source_changed" | "source_not_configured" | "source_unsupported" | "search_storage_error" | "source_unavailable" | null;
+            reason: "source_cooldown" | "source_changed" | "source_not_configured" | "source_unsupported" | "search_storage_error" | "schedule_error" | "source_unavailable" | null;
             /** @description An unexpired worker lease exists; may remain true while an older revision finishes. */
             running: boolean;
             candidates: components["schemas"]["MonitorCandidate"][];

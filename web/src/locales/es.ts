@@ -201,6 +201,7 @@ export const es: Record<keyof typeof en, string> = {
   source_not_configured: 'La fuente está desactivada o le faltan credenciales.',
   source_unsupported: 'La fuente no admite esta búsqueda.',
   search_storage_error: 'No se pudieron guardar los resultados.',
+  schedule_error: 'No se pudo programar la siguiente ejecución. Revisa la programación y la zona horaria.',
   monitorUpdateHint:
     'Cambiar ajustes, activar o pausar borra los candidatos y programa la siguiente ejecución. Actualiza después de un conflicto de revisión.',
   runNow: 'Ejecutar ahora',

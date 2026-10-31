@@ -22,6 +22,17 @@ pub enum MonitorSchedule {
 }
 
 impl MonitorSchedule {
+    pub(super) fn canonical_timezone(&self, timezone: &str) -> Result<String, MonitorError> {
+        if matches!(self, Self::Interval) && timezone != "UTC" {
+            return Err(MonitorError::Invalid);
+        }
+        TimeZone::get(timezone)
+            .map_err(|_| MonitorError::Invalid)?
+            .iana_name()
+            .map(str::to_owned)
+            .ok_or(MonitorError::Invalid)
+    }
+
     pub(super) fn columns(&self) -> (&'static str, Option<&str>, Option<i8>) {
         match self {
             Self::Interval => ("interval", None, None),

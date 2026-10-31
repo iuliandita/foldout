@@ -16,6 +16,8 @@ pub use indexer::*;
 pub use metadata::{ComicVine, MangaDex, MangaUpdates};
 use serde::Serialize;
 
+pub(crate) const MAX_RETRY_AFTER_SECONDS: u64 = 30 * 24 * 60 * 60;
+
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderError {

@@ -11,7 +11,7 @@ use crate::{
         ContentType,
         wanted::{UnitContext, context_row},
     },
-    providers::ProviderError,
+    providers::{MAX_RETRY_AFTER_SECONDS, ProviderError},
     search::{ReleaseSearch, Releases, Search, SearchError},
     settings::{IntegrationKind, IntegrationOptions, Settings, SettingsError},
     store::sqlite::SqliteStore,
@@ -200,6 +200,7 @@ impl Monitor {
         request: CreateMonitor,
     ) -> Result<MonitorView, MonitorError> {
         validate(&request.query, request.interval_seconds)?;
+        let timezone = request.schedule.canonical_timezone(&request.timezone)?;
         let (schedule_kind, schedule_time, schedule_weekday) = request.schedule.columns();
         let content_type = self.content_type(&request.unit_id).await?;
         let source = self.settings.get(&request.integration_id).await?;
@@ -219,14 +220,13 @@ impl Monitor {
         }
         let id = Uuid::new_v4().to_string();
         let mut tx = self.store.begin_write().await?;
-        let next_run =
-            request
-                .schedule
-                .next_run(now(), request.interval_seconds, &request.timezone)?;
+        let next_run = request
+            .schedule
+            .next_run(now(), request.interval_seconds, &timezone)?;
         sqlx::query("INSERT INTO monitors (id, owner, unit_id, integration_id, content_type, query, interval_seconds, selection_policy, enabled, next_run, last_state, schedule_kind, schedule_time, schedule_weekday, timezone) VALUES (?, ?, ?, ?, ?, ?, ?, 'review_only', ?, ?, ?, ?, ?, ?, ?)")
             .bind(&id).bind(owner).bind(&request.unit_id).bind(&request.integration_id).bind(content_type.as_str()).bind(request.query.trim()).bind(request.interval_seconds).bind(request.enabled)
             .bind(next_run).bind(if request.enabled { "scheduled" } else { "disabled" })
-            .bind(schedule_kind).bind(schedule_time).bind(schedule_weekday).bind(&request.timezone).execute(&mut *tx).await?;
+            .bind(schedule_kind).bind(schedule_time).bind(schedule_weekday).bind(timezone).execute(&mut *tx).await?;
         let row = sqlx::query(monitor_target_query!("WHERE id = ?"))
             .bind(&id)
             .fetch_one(&mut *tx)
@@ -314,7 +314,7 @@ impl Monitor {
         let interval = request.interval_seconds.unwrap_or(old.interval_seconds);
         let enabled = request.enabled.unwrap_or(old.enabled);
         let schedule = request.schedule.unwrap_or(old.schedule);
-        let timezone = request.timezone.unwrap_or(old.timezone);
+        let timezone = schedule.canonical_timezone(&request.timezone.unwrap_or(old.timezone))?;
         validate(&query, interval)?;
         let next_run = schedule.next_run(now(), interval, &timezone)?;
         let (schedule_kind, schedule_time, schedule_weekday) = schedule.columns();
@@ -461,11 +461,14 @@ impl Monitor {
         };
         let mut candidates = Vec::new();
         let mut truncated = false;
-        let mut next_run = claim.item.schedule.next_run(
-            now(),
-            claim.item.interval_seconds,
-            &claim.item.timezone,
-        )?;
+        let finished_at = now();
+        let mut after = finished_at.max(claim.item.next_run);
+        // next_run is exclusive; a cooldown may end exactly on an occurrence.
+        let cooldown_after = |seconds: u64| {
+            finished_at
+                .saturating_add(seconds.min(MAX_RETRY_AFTER_SECONDS) as i64)
+                .saturating_sub(1)
+        };
         let (state, reason) = match result {
             Ok(page) => {
                 let found = !page.releases.is_empty();
@@ -505,17 +508,13 @@ impl Monitor {
                     SearchError::Cooldown {
                         retry_after_seconds,
                     } => {
-                        next_run = next_run.max(
-                            now().saturating_add(retry_after_seconds.min(i64::MAX as u64) as i64),
-                        );
+                        after = after.max(cooldown_after(retry_after_seconds));
                         "source_cooldown"
                     }
                     SearchError::Provider(ProviderError::RateLimited {
                         retry_after_seconds,
                     }) => {
-                        next_run = next_run.max(now().saturating_add(
-                            retry_after_seconds.unwrap_or(60).min(i64::MAX as u64) as i64,
-                        ));
+                        after = after.max(cooldown_after(retry_after_seconds.unwrap_or(60)));
                         "source_cooldown"
                     }
                     SearchError::Changed => "source_changed",
@@ -527,13 +526,22 @@ impl Monitor {
                 ("source_error", Some(reason))
             }
         };
-        if next_run > now() {
-            next_run = claim.item.schedule.next_run(
-                next_run - 1,
-                claim.item.interval_seconds,
-                &claim.item.timezone,
-            )?;
-        }
+        let (next_run, state, reason) = match claim.item.schedule.next_run(
+            after,
+            claim.item.interval_seconds,
+            &claim.item.timezone,
+        ) {
+            Ok(next_run) => (next_run, state, reason),
+            Err(_) => {
+                candidates.clear();
+                truncated = false;
+                (
+                    finished_at.saturating_add(claim.item.interval_seconds),
+                    "source_error",
+                    Some("schedule_error"),
+                )
+            }
+        };
         let json = serde_json::to_string(&candidates).map_err(|_| MonitorError::Database)?;
         sqlx::query("UPDATE monitors SET revision = revision + 1, next_run = ?, last_run_at = unixepoch(), last_state = ?, reason = ?, candidates = ?, candidates_truncated = ?, lease_token = NULL, lease_until = NULL, updated_at = unixepoch() WHERE id = ? AND revision = ? AND lease_token = ?")
             .bind(next_run).bind(state).bind(reason).bind(json).bind(truncated).bind(&claim.item.id).bind(claim.item.revision).bind(&claim.token).execute(&mut *tx).await?;

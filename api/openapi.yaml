@@ -8568,6 +8568,7 @@
               "source_not_configured",
               "source_unsupported",
               "search_storage_error",
+              "schedule_error",
               "source_unavailable",
               null
             ]

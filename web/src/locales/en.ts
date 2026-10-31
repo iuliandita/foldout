@@ -199,6 +199,7 @@ export const en = {
   source_not_configured: 'The source is disabled or lacks credentials.',
   source_unsupported: 'The source does not support this search.',
   search_storage_error: 'Search results could not be stored.',
+  schedule_error: 'The next run could not be scheduled. Check the schedule and timezone.',
   monitorUpdateHint:
     'Changing settings, enabling, or pausing clears candidates and schedules the next run. Refresh after a revision conflict.',
   runNow: 'Run now',
