@@ -292,15 +292,23 @@ impl InternetArchive {
     }
 
     fn texts(&self, value: &Value, field: &str) -> Result<Vec<String>, ProviderError> {
+        let text = |raw: &str| {
+            let validated = self.http.text(raw)?;
+            if matches!(field, "date" | "issue" | "volume") {
+                if raw.len() > 4096 || raw.chars().any(char::is_control) {
+                    return Err(ProviderError::InvalidResponse);
+                }
+                Ok(raw.to_string())
+            } else {
+                Ok(validated)
+            }
+        };
         match value.get(field) {
             None | Some(Value::Null) => Ok(Vec::new()),
-            Some(Value::String(s)) => Ok(vec![self.http.text(s)?]),
+            Some(Value::String(s)) => Ok(vec![text(s)?]),
             Some(Value::Array(values)) if values.len() <= 64 => values
                 .iter()
-                .map(|v| {
-                    self.http
-                        .text(v.as_str().ok_or(ProviderError::InvalidResponse)?)
-                })
+                .map(|value| text(value.as_str().ok_or(ProviderError::InvalidResponse)?))
                 .collect(),
             _ => Err(ProviderError::InvalidResponse),
         }

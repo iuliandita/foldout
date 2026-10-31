@@ -443,6 +443,7 @@ impl CatalogRepository {
             id,
             "SELECT COUNT(*) FROM provider_links WHERE id = ?",
             "DELETE FROM provider_links WHERE id = ?",
+            None,
             &[],
         )
         .await
@@ -452,6 +453,7 @@ impl CatalogRepository {
             id,
             "SELECT COUNT(*) FROM editions WHERE id = ?",
             "DELETE FROM editions WHERE id = ?",
+            None,
             &[
                 ("units", "SELECT COUNT(*) FROM units WHERE edition_id = ?"),
                 (
@@ -467,6 +469,7 @@ impl CatalogRepository {
             id,
             "SELECT COUNT(*) FROM units WHERE id = ?",
             "DELETE FROM units WHERE id = ?",
+            Some("DELETE FROM archive_unit_acceptances WHERE unit_id = ?"),
             &[
                 (
                     "provider_links",
@@ -513,6 +516,7 @@ impl CatalogRepository {
         id: &str,
         exists_sql: &'static str,
         delete_sql: &'static str,
+        cleanup_sql: Option<&'static str>,
         dependencies: &[(&str, &'static str)],
     ) -> Result<(), CatalogError> {
         let mut tx = self.store.begin_write().await?;
@@ -535,6 +539,9 @@ impl CatalogRepository {
         }
         if !blocking.is_empty() {
             return Err(CatalogError::Dependencies(blocking.join(", ")));
+        }
+        if let Some(query) = cleanup_sql {
+            sqlx::query(query).bind(id).execute(&mut *tx).await?;
         }
         sqlx::query(delete_sql)
             .bind(id)

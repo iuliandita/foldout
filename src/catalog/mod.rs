@@ -2,7 +2,7 @@ mod identity;
 mod model;
 mod repository;
 
-pub(crate) use identity::date as validate_date;
+pub(crate) use identity::{date as validate_date, required as validate_required};
 pub use model::*;
 pub use repository::*;
 

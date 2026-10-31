@@ -7,6 +7,8 @@ export class ApiError extends Error {
     public code: string,
     message: string,
     public trace?: string,
+    public existingUnitId?: string,
+    public archiveConflict?: { existingUnit: Schema['ArchiveUnitMatch']; proposal: Schema['ArchiveUnitProposal'] },
   ) {
     super(message);
   }
@@ -60,7 +62,11 @@ async function fetchResponse(path: string, options: RequestInit = {}): Promise<R
         : undefined;
     if (response.status === 401 && !['/auth/setup', '/auth/login', '/auth/session'].includes(path))
       window.dispatchEvent(new Event('library:unauthorized'));
-    throw new ApiError(response.status, code, message, trace);
+    const existingUnitId = body && typeof body === 'object' && 'existing_unit_id' in body && typeof body.existing_unit_id === 'string'
+      ? body.existing_unit_id : undefined;
+    const archiveConflict = isRecord(body) && isArchiveUnitMatch(body.existing_unit) && isArchiveUnitProposal(body.proposal)
+      ? { existingUnit: body.existing_unit, proposal: body.proposal } : undefined;
+    throw new ApiError(response.status, code, message, trace, existingUnitId, archiveConflict);
   }
   return response;
 }
@@ -101,3 +107,21 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
 }
 export const post = <T>(path: string, body: unknown) =>
   request<T>(path, { method: 'POST', body: JSON.stringify(body) });
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object';
+}
+function isArchiveUnitMatch(value: unknown): value is Schema['ArchiveUnitMatch'] {
+  return isRecord(value) && typeof value.id === 'string' && typeof value.label === 'string'
+    && typeof value.edition_id === 'string' && typeof value.publication_id === 'string';
+}
+function isArchiveUnitProposal(value: unknown): value is Schema['ArchiveUnitProposal'] {
+  const strings = (items: unknown): items is string[] => Array.isArray(items) && items.every((item: unknown) => typeof item === 'string');
+  return isRecord(value) && typeof value.edition_id === 'string' && typeof value.label === 'string'
+    && typeof value.kind === 'string' && ['issue', 'chapter', 'volume', 'special', 'combined'].includes(value.kind)
+    && (value.date === null || typeof value.date === 'string')
+    && (value.date_precision === null || value.date_precision === 'year' || value.date_precision === 'month' || value.date_precision === 'day')
+    && strings(value.raw_labels) && strings(value.raw_volumes) && strings(value.raw_dates)
+    && typeof value.combined === 'boolean' && typeof value.identifier === 'string' && typeof value.source_url === 'string'
+    && Array.isArray(value.date_warnings) && value.date_warnings.every(isArchiveUnitMatch);
+}

@@ -5,7 +5,10 @@ use super::{
 use crate::{
     auth::Scope,
     providers::ProviderError,
-    search::{ReleaseAssessmentRequest, ReleaseSearch, Search, SearchError},
+    search::{
+        ArchiveAcceptRequest, ArchiveProposalError, ArchiveProposalRequest,
+        ReleaseAssessmentRequest, ReleaseSearch, Search, SearchError,
+    },
 };
 use axum::{
     Json, Router,
@@ -28,6 +31,8 @@ pub fn routes(context: SearchContext) -> Router {
         .route("/api/v1/search/metadata", get(metadata))
         .route("/api/v1/search/archive", get(archive))
         .route("/api/v1/search/archive/item", get(archive_item))
+        .route("/api/v1/search/archive/proposal", get(archive_proposal))
+        .route("/api/v1/search/archive/accept", post(archive_accept))
         .route("/api/v1/search/releases", post(releases))
         .route(
             "/api/v1/search/release-assessments",
@@ -194,5 +199,62 @@ impl From<SearchError> for ApiError {
             SearchError::Settings(error) => error.into(),
             SearchError::Database => Self::internal(),
         }
+    }
+}
+
+async fn archive_proposal(
+    State(context): State<SearchContext>,
+    headers: HeaderMap,
+    ApiQuery(request): ApiQuery<ArchiveProposalRequest>,
+) -> Response {
+    if let Err(error) = authorize(&context.auth, &headers, &Method::GET, Scope::Manage).await {
+        return error.into_response();
+    }
+    match context.search.archive_unit_proposal(&request).await {
+        Ok(proposal) => ([(header::CACHE_CONTROL, "no-store")], Json(proposal)).into_response(),
+        Err(error) => archive_proposal_error(error),
+    }
+}
+
+async fn archive_accept(
+    State(context): State<SearchContext>,
+    headers: HeaderMap,
+    ApiJson(request): ApiJson<ArchiveAcceptRequest>,
+) -> Response {
+    let principal = match authorize(&context.auth, &headers, &Method::POST, Scope::Manage).await {
+        Ok(principal) => principal,
+        Err(error) => return error.into_response(),
+    };
+    match context
+        .search
+        .accept_archive_unit(&principal.user_id, request)
+        .await
+    {
+        Ok(accepted) => (
+            StatusCode::CREATED,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(accepted),
+        )
+            .into_response(),
+        Err(error) => archive_proposal_error(error),
+    }
+}
+
+fn archive_proposal_error(error: ArchiveProposalError) -> Response {
+    match error {
+        ArchiveProposalError::Duplicate { existing_unit, proposal } => (
+            StatusCode::CONFLICT,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({
+                "error": { "code": "duplicate_unit", "message": "This Archive proposal matches an existing catalog unit", "trace_id": uuid::Uuid::new_v4().to_string() },
+                "existing_unit_id": existing_unit.id,
+                "existing_unit": existing_unit,
+                "proposal": proposal,
+            })),
+        ).into_response(),
+        ArchiveProposalError::Search(error) => ApiError::from(error).into_response(),
+        ArchiveProposalError::Catalog(error) => ApiError::from(error).into_response(),
+        ArchiveProposalError::IdempotencyConflict => ApiError::new(StatusCode::CONFLICT, "idempotency_conflict", "Idempotency key was already used with a different request").into_response(),
+        ArchiveProposalError::Database(_) => ApiError::internal().into_response(),
     }
 }
