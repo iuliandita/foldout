@@ -1261,3 +1261,56 @@ async fn metadata_refresh_preserves_explicit_locks_and_rolls_back_invalid_values
     assert_eq!(refreshed.date, locked.date);
     assert_eq!(refreshed.date_precision, Some(DatePrecision::Month));
 }
+
+#[tokio::test]
+async fn delete_records_refuses_dependencies_and_preserves_them() {
+    let (_directory, repository) = repository().await;
+    let publication = repository
+        .create_publication(publication("Delete", None))
+        .await
+        .unwrap();
+    let edition = repository
+        .create_edition(NewEdition {
+            publication_id: publication.id,
+            language: "en".into(),
+            region: None,
+            publisher: None,
+        })
+        .await
+        .unwrap();
+    let unit = repository
+        .create_unit(NewUnit {
+            edition_id: edition.id.clone(),
+            label: "1".into(),
+            kind: UnitKind::Issue,
+            sort_key: None,
+            date: None,
+        })
+        .await
+        .unwrap();
+    let link = repository
+        .create_provider_link(NewProviderLink {
+            provider: "test".into(),
+            external_id: "1".into(),
+            publication_id: None,
+            edition_id: Some(edition.id.clone()),
+            unit_id: None,
+        })
+        .await
+        .unwrap();
+    let error = repository.delete_edition(&edition.id).await.unwrap_err();
+    assert!(
+        matches!(error, CatalogError::Dependencies(ref message) if message.contains("units: 1") && message.contains("provider_links: 1"))
+    );
+    assert!(matches!(
+        repository.delete_unit("missing").await,
+        Err(CatalogError::NotFound)
+    ));
+    repository.delete_provider_link(&link.id).await.unwrap();
+    repository.delete_unit(&unit.id).await.unwrap();
+    repository.delete_edition(&edition.id).await.unwrap();
+    assert!(matches!(
+        repository.delete_edition(&edition.id).await,
+        Err(CatalogError::NotFound)
+    ));
+}
