@@ -16,6 +16,7 @@ class ClassificationTest(unittest.TestCase):
         self.assertEqual(benchmark.classify(None, 300, True), "unmeasured")
         result = {"failures": [], "cleanup_completed": True, "measurements": {
             "overlap_verified": True, "idle_rss_bytes": 1, "idle_settle_seconds": 3,
+            "children_accounting": "available; child processes not exercised",
             "mixed_rss_bytes": 1, "corpus": {"files": 50000, "total_bytes": 100},
             "http": {"catalog_http": {"p95_ms": 1, "count": 100},
                      "warm_reader_http": {"max_ms": 1, "count": 100}}}}
@@ -31,6 +32,9 @@ class ClassificationTest(unittest.TestCase):
             result["measurements"]["corpus"]["files"] = files
             self.assertTrue(all(x["fixture result"] == "unmeasured" for x in benchmark.classifications(result, profile).values()))
         result["measurements"]["corpus"]["files"] = 50000
+        result["measurements"]["children_accounting"] = "unavailable; 0 children counted"
+        self.assertEqual(benchmark.classifications(result, "release")["idle RSS < 250 MiB"]["fixture result"], "unmeasured")
+        result["measurements"]["children_accounting"] = "available; child processes not exercised"
         result["measurements"]["idle_settle_seconds"] = 0
         self.assertEqual(benchmark.classifications(result, "release")["idle RSS < 250 MiB"]["fixture result"], "unmeasured")
         result["measurements"]["overlap_verified"] = False

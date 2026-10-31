@@ -31,7 +31,8 @@ def classifications(result, profile):
     targets = {
         "query p95 < 300 ms at five sessions": (catalog.get("p95_ms"), 300, catalog.get("count", 0) >= 100),
         "idle RSS < 250 MiB": (measurements.get("idle_rss_bytes"), 250 * 1024**2,
-                                measurements.get("idle_settle_seconds", 0) >= 3),
+                                measurements.get("idle_settle_seconds", 0) >= 3
+                                and measurements.get("children_accounting", "").startswith("available;")),
         "mixed RSS < 1 GiB": (measurements.get("mixed_rss_bytes"), 1024**3, False),
         "warm page delivery < 1 s": (pages.get("max_ms"), 1000, pages.get("count", 0) >= 100),
     }
@@ -127,6 +128,7 @@ def main() -> int:
                    "corpus_and_state_mount": subprocess.check_output(["findmnt", "-T", str(root), "-no", "TARGET,FSTYPE,SOURCE"], text=True).strip(),
                    "network_path": "loopback" if args.binary else "in-process",
                    "artifact": None,
+                   "mixed_children": "child processes not exercised" if args.binary else "unmeasured",
                    "fixture_class": "synthetic fixture", "reference_host_asserted": args.assert_reference_host,
                    "host_metadata": args.host_metadata, "network_metadata": args.network_metadata,
                    "cache_state": "warm after explicit requests; OS cache not dropped" if args.binary else
