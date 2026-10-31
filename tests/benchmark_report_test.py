@@ -10,19 +10,28 @@ loader.exec_module(benchmark)
 
 
 class ClassificationTest(unittest.TestCase):
-    def test_threshold_and_reference_guard(self):
+    def test_thresholds_and_guards(self):
         self.assertEqual(benchmark.classify(299, 300, True), "pass")
         self.assertEqual(benchmark.classify(300, 300, True), "fail")
         self.assertEqual(benchmark.classify(None, 300, True), "unmeasured")
-        self.assertEqual(benchmark.classify(1, 300, False), "unmeasured")
-        result = {"failures": [], "cleanup_completed": True, "measurements": {"overlap_verified": True,
-                  "idle_rss_bytes": 1, "mixed_rss_bytes": 1,
-                  "http": {"catalog_http": {"p95_ms": 1}, "warm_reader_http": {"max_ms": 1}}}}
-        targets = benchmark.classifications(result)
-        self.assertTrue(all(x["fixture result"] == "pass" and x["reference-environment acceptance"] == "unmeasured" for x in targets.values()))
+        result = {"failures": [], "cleanup_completed": True, "measurements": {
+            "overlap_verified": True, "idle_rss_bytes": 1, "idle_settle_seconds": 3,
+            "mixed_rss_bytes": 1, "corpus": {"files": 50000, "total_bytes": 100},
+            "http": {"catalog_http": {"p95_ms": 1, "count": 100},
+                     "warm_reader_http": {"max_ms": 1, "count": 100}}}}
+        targets = benchmark.classifications(result, "release")
+        self.assertTrue(all(x["reference-environment acceptance"] == "unmeasured" for x in targets.values()))
+        self.assertEqual(targets["query p95 < 300 ms at five sessions"]["fixture result"], "pass")
+        self.assertEqual(targets["mixed RSS < 1 GiB"]["fixture result"], "unmeasured")
+        result["measurements"]["http"]["catalog_http"]["p95_ms"] = 300
+        self.assertEqual(benchmark.classifications(result, "release")["query p95 < 300 ms at five sessions"]["fixture result"], "fail")
+        result["measurements"]["http"]["catalog_http"]["count"] = 99
+        self.assertEqual(benchmark.classifications(result, "release")["query p95 < 300 ms at five sessions"]["fixture result"], "unmeasured")
+        for profile, files in [("debug", 50000), ("release", 1000)]:
+            result["measurements"]["corpus"]["files"] = files
+            self.assertTrue(all(x["fixture result"] == "unmeasured" for x in benchmark.classifications(result, profile).values()))
+        result["measurements"]["corpus"]["files"] = 50000
+        result["measurements"]["idle_settle_seconds"] = 0
+        self.assertEqual(benchmark.classifications(result, "release")["idle RSS < 250 MiB"]["fixture result"], "unmeasured")
         result["measurements"]["overlap_verified"] = False
-        self.assertTrue(all(x["fixture result"] == "unmeasured" for x in benchmark.classifications(result).values()))
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertTrue(all(x["fixture result"] == "unmeasured" for x in benchmark.classifications(result, "release").values()))

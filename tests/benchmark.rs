@@ -1171,6 +1171,28 @@ impl Drop for BinarySampler {
 
 struct OwnedServer(std::process::Child);
 
+fn owns_listener(pid: u32, port: u16) -> Result<bool> {
+    let table = fs::read_to_string(format!("/proc/{pid}/net/tcp"))?;
+    let address = format!("0100007F:{port:04X}");
+    let inodes: HashSet<String> = table
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            (fields.len() > 9 && fields[1] == address && fields[3] == "0A")
+                .then(|| format!("socket:[{}]", fields[9]))
+        })
+        .collect();
+    for entry in fs::read_dir(format!("/proc/{pid}/fd"))? {
+        let entry = entry?;
+        if let Ok(target) = fs::read_link(entry.path())
+            && inodes.contains(&target.to_string_lossy().into_owned())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl Drop for OwnedServer {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -1254,16 +1276,15 @@ async fn binary_run(directory: &Path, count: usize) -> Result<Value> {
             .await
             .is_ok_and(|r| r.status().is_success())
         {
+            if !owns_listener(server.0.id(), address.port())? {
+                return Err("readiness listener does not belong to spawned libraryd".into());
+            }
             break;
         }
         if Instant::now() >= deadline {
             return Err("libraryd readiness timed out".into());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let idle = rss_tree(server.0.id(), &mut HashSet::new());
-    if idle == 0 {
-        return Err("unable to read libraryd RSS".into());
     }
     for (client, token) in clients.iter().zip(&tokens) {
         for path in [
@@ -1274,6 +1295,19 @@ async fn binary_run(directory: &Path, count: usize) -> Result<Value> {
             loopback_get(client, &format!("{origin}{path}"), token).await?;
         }
     }
+    let settle = Instant::now();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let idle_settle_seconds = settle.elapsed().as_secs_f64();
+    let idle = rss_tree(server.0.id(), &mut HashSet::new());
+    if idle == 0 {
+        return Err("unable to read libraryd RSS".into());
+    }
+    let children_supported = fs::read_to_string(format!(
+        "/proc/{}/task/{}/children",
+        server.0.id(),
+        server.0.id()
+    ))
+    .is_ok();
     let stop = Arc::new(AtomicBool::new(false));
     let peak = Arc::new(AtomicU64::new(0));
     let (sample_stop, sample_peak, pid) = (stop.clone(), peak.clone(), server.0.id());
@@ -1400,15 +1434,21 @@ async fn binary_run(directory: &Path, count: usize) -> Result<Value> {
         .iter()
         .filter(|at| **at >= common_start && **at <= common_end)
         .count();
-    Ok(
-        json!({"corpus":corpus, "http":summary(times), "idle_rss_bytes":idle,
+    let mut http = summary(times);
+    for value in http.as_object_mut().unwrap().values_mut() {
+        let values = value.as_object_mut().unwrap();
+        values.remove("aspirational_300ms_p95_met");
+        values.remove("aspirational_1000ms_p95_met");
+    }
+    Ok(json!({"corpus":corpus, "http":http, "idle_rss_bytes":idle,
+        "idle_settle_seconds":idle_settle_seconds, "binary_path":env!("CARGO_BIN_EXE_libraryd"),
         "mixed_rss_bytes":mixed_rss, "session_windows_seconds":windows,
         "five_session_common_window_seconds":[common_start,common_end],
         "overlap_verified":common_end > common_start && overlap > 0,
         "scan_running_observed_seconds":scan_observations, "scan_observations_in_five_session_window":overlap,
         "mixed_workload":"five catalog and warm page sessions with a queued scan; no import",
-        "rss_sampling":"50 ms /proc process tree; short-lived child peaks may be missed"}),
-    )
+        "children_accounting":if children_supported {"available; child processes not exercised"} else {"unavailable; 0 children counted"},
+        "rss_sampling":"50 ms /proc process tree; summed VmRSS overcounts shared pages; short-lived child peaks may be missed"}))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]

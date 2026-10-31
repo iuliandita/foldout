@@ -4,6 +4,7 @@ umask 077
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 cd "$(dirname "$0")/.."
+python3 -I -B -m unittest discover -s tests -p benchmark_report_test.py
 ./scripts/bun test tools/check-docs-facts.test.ts
 ./scripts/bun tools/check-docs-facts.ts
 ./scripts/bun test tools/check-docs-map.test.ts
