@@ -227,7 +227,7 @@ impl From<PipelineError> for ApiError {
             PipelineError::Search(error) => error.into(),
             PipelineError::Settings(error) => error.into(),
             PipelineError::Selection(error) => error.into(),
-            PipelineError::Database => Self::internal(),
+            PipelineError::Database | PipelineError::Filesystem => Self::internal(),
         }
     }
 }

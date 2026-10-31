@@ -12,7 +12,7 @@ use crate::{
     },
     importer::{
         finalize,
-        journal::{ImportMode, ImportPolicy, ImportService, InternalImportRequest},
+        journal::{ImportError, ImportMode, ImportPolicy, ImportService, InternalImportRequest},
     },
     jobs::store::{canonical_json, enqueue_in_transaction, fingerprint, validate_label},
     search::selection::{SelectionError, SelectionRepository},
@@ -40,6 +40,8 @@ pub enum PipelineError {
     Selection(#[from] SelectionError),
     #[error("acquisition database operation failed")]
     Database,
+    #[error("acquisition filesystem validation failed")]
+    Filesystem,
 }
 impl From<sqlx::Error> for PipelineError {
     fn from(error: sqlx::Error) -> Self {
@@ -150,6 +152,17 @@ pub struct CorrectMapping {
     pub polling_fingerprint: String,
     pub source_root_id: String,
     pub source_relative_path: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MappingValidation {
+    revision: i64,
+    polling_fingerprint: String,
+    source_root_id: String,
+    source_relative_path: String,
+    source_root: String,
+    destination: DestinationSelection,
+    destination_root: String,
 }
 
 #[derive(Clone)]
@@ -365,75 +378,48 @@ impl Pipeline {
         id: &str,
         request: CorrectMapping,
     ) -> Result<Acquisition, PipelineError> {
+        let validated = self.prepare_mapping(owner, id, &request).await?;
+        self.apply_mapping(settings, owner, id, &request, validated)
+            .await
+    }
+
+    async fn prepare_mapping(
+        &self,
+        owner: &str,
+        id: &str,
+        request: &CorrectMapping,
+    ) -> Result<MappingValidation, PipelineError> {
+        let mut tx = self.store.reader().begin().await?;
+        let (_, validated) = mapping_review_in(&mut tx, owner, id, request).await?;
+        tx.commit().await?;
+        ImportService::new(self.store.clone())
+            .blocking(move || {
+                finalize::check_mapping(
+                    Path::new(&validated.source_root),
+                    &validated.source_relative_path,
+                    Path::new(&validated.destination_root),
+                    &validated.destination.relative_path,
+                )?;
+                Ok(validated)
+            })
+            .await
+            .map_err(mapping_error)
+    }
+
+    async fn apply_mapping(
+        &self,
+        settings: &Settings,
+        owner: &str,
+        id: &str,
+        request: &CorrectMapping,
+        validated: MappingValidation,
+    ) -> Result<Acquisition, PipelineError> {
         let mut tx = self.store.begin_write().await?;
-        let (row, revision, lifecycle) = review_in(&mut tx, owner, id).await?;
-        if revision != request.revision
-            || polling_fingerprint_in(&mut tx, id).await? != request.polling_fingerprint
-            || lifecycle != ReviewLifecycle::Returned
-            || row.try_get::<&str, _>("state")? != "needs_review"
-            || row.try_get::<Option<&str>, _>("reason")? != Some("import_review_required")
-            || row.try_get::<&str, _>("job_state")? != "needs_review"
-            || row.try_get::<Option<&str>, _>("job_reason")? != Some("import_review_required")
-            || row.try_get::<Option<String>, _>("job_worker")?.is_some()
-            || row.try_get::<Option<i64>, _>("job_lease")?.is_some()
-            || row.try_get::<Option<i64>, _>("job_retry")?.is_some()
-            || !row.try_get::<bool, _>("attempted")?
-            || row
-                .try_get::<Option<String>, _>("payload_digest")?
-                .is_none()
-            || row.try_get::<i64, _>("receipt_count")? == 0
-            || row.try_get::<Option<String>, _>("source_root")?.is_none()
-            || row
-                .try_get::<Option<String>, _>("source_relative")?
-                .is_none()
-        {
+        let (row, current) = mapping_review_in(&mut tx, owner, id, request).await?;
+        if current != validated {
             return Err(PipelineError::Conflict);
         }
-        let import_id: Option<&str> = row.try_get("import_id")?;
-        valid_id(import_id.ok_or(PipelineError::Conflict)?).map_err(|_| PipelineError::Conflict)?;
         validate_owned_receipts_in(&mut tx, settings, id, &row).await?;
-        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM acquisition_receipts WHERE acquisition_id = ? AND completed = 0)")
-            .bind(id).fetch_one(&mut *tx).await?;
-        if pending
-            || (row.try_get::<Option<&str>, _>("source_root")? == Some(&request.source_root_id)
-                && row.try_get::<Option<&str>, _>("source_relative")?
-                    == Some(&request.source_relative_path))
-        {
-            return Err(PipelineError::Conflict);
-        }
-        valid_id(&request.source_root_id)?;
-        relative(&request.source_relative_path)?;
-        let destination = DestinationSelection {
-            root_id: row
-                .try_get::<Option<String>, _>("destination_root")?
-                .ok_or(PipelineError::Conflict)?,
-            relative_path: row
-                .try_get::<Option<String>, _>("destination_relative")?
-                .ok_or(PipelineError::Conflict)?,
-        };
-        validate_destination(&destination)?;
-        if row.try_get::<Option<String>, _>("destination_path")?
-            != Some(destination_path(&mut tx, &destination).await?)
-        {
-            return Err(PipelineError::Conflict);
-        }
-        let source: String = sqlx::query_scalar("SELECT path FROM library_roots WHERE id = ?")
-            .bind(&request.source_root_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(PipelineError::NotFound)?;
-        let destination_root: String =
-            sqlx::query_scalar("SELECT path FROM library_roots WHERE id = ?")
-                .bind(&destination.root_id)
-                .fetch_one(&mut *tx)
-                .await?;
-        finalize::check_mapping(
-            Path::new(&source),
-            &request.source_relative_path,
-            Path::new(&destination_root),
-            &destination.relative_path,
-        )
-        .map_err(|_| PipelineError::Invalid)?;
         // No journal exists yet. Preserve its reserved UUID, destination and submission fence.
         let changed = sqlx::query("UPDATE acquisition_runs SET source_root = ?, source_relative = ?, state = 'importing', reason = NULL, next_poll_at = 0, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND reason = 'import_review_required' AND attempted = 1")
             .bind(&request.source_root_id).bind(&request.source_relative_path).bind(id).execute(&mut *tx).await?.rows_affected();
@@ -1100,6 +1086,96 @@ async fn selection_authorized_in(
     Ok(false)
 }
 
+fn mapping_error(error: ImportError) -> PipelineError {
+    match error {
+        ImportError::Conflict => PipelineError::Conflict,
+        ImportError::Io(_) | ImportError::Worker | ImportError::Database(_) => {
+            PipelineError::Filesystem
+        }
+        _ => PipelineError::Invalid,
+    }
+}
+
+async fn mapping_review_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    owner: &str,
+    id: &str,
+    request: &CorrectMapping,
+) -> Result<(sqlx::sqlite::SqliteRow, MappingValidation), PipelineError> {
+    let (row, revision, lifecycle) = review_in(tx, owner, id).await?;
+    if revision != request.revision
+        || polling_fingerprint_in(tx, id).await? != request.polling_fingerprint
+        || lifecycle != ReviewLifecycle::Returned
+        || row.try_get::<&str, _>("state")? != "needs_review"
+        || row.try_get::<Option<&str>, _>("reason")? != Some("import_review_required")
+        || row.try_get::<&str, _>("job_state")? != "needs_review"
+        || row.try_get::<Option<&str>, _>("job_reason")? != Some("import_review_required")
+        || row.try_get::<Option<String>, _>("job_worker")?.is_some()
+        || row.try_get::<Option<i64>, _>("job_lease")?.is_some()
+        || row.try_get::<Option<i64>, _>("job_retry")?.is_some()
+        || !row.try_get::<bool, _>("attempted")?
+        || row
+            .try_get::<Option<String>, _>("payload_digest")?
+            .is_none()
+        || row.try_get::<i64, _>("receipt_count")? == 0
+        || row.try_get::<Option<String>, _>("source_root")?.is_none()
+        || row
+            .try_get::<Option<String>, _>("source_relative")?
+            .is_none()
+    {
+        return Err(PipelineError::Conflict);
+    }
+    let import_id: Option<&str> = row.try_get("import_id")?;
+    valid_id(import_id.ok_or(PipelineError::Conflict)?).map_err(|_| PipelineError::Conflict)?;
+    let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM acquisition_receipts WHERE acquisition_id = ? AND completed = 0)")
+        .bind(id).fetch_one(&mut **tx).await?;
+    if pending
+        || (row.try_get::<Option<&str>, _>("source_root")? == Some(&request.source_root_id)
+            && row.try_get::<Option<&str>, _>("source_relative")?
+                == Some(&request.source_relative_path))
+    {
+        return Err(PipelineError::Conflict);
+    }
+    valid_id(&request.source_root_id)?;
+    relative(&request.source_relative_path)?;
+    let destination = DestinationSelection {
+        root_id: row
+            .try_get::<Option<String>, _>("destination_root")?
+            .ok_or(PipelineError::Conflict)?,
+        relative_path: row
+            .try_get::<Option<String>, _>("destination_relative")?
+            .ok_or(PipelineError::Conflict)?,
+    };
+    validate_destination(&destination)?;
+    if row.try_get::<Option<String>, _>("destination_path")?
+        != Some(destination_path(tx, &destination).await?)
+    {
+        return Err(PipelineError::Conflict);
+    }
+    let source: String = sqlx::query_scalar("SELECT path FROM library_roots WHERE id = ?")
+        .bind(&request.source_root_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(PipelineError::NotFound)?;
+    let destination_root: String =
+        sqlx::query_scalar("SELECT path FROM library_roots WHERE id = ?")
+            .bind(&destination.root_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    Ok((
+        row,
+        MappingValidation {
+            revision,
+            polling_fingerprint: request.polling_fingerprint.clone(),
+            source_root_id: request.source_root_id.clone(),
+            source_relative_path: request.source_relative_path.clone(),
+            source_root: source,
+            destination,
+            destination_root,
+        },
+    ))
+}
+
 async fn validate_owned_receipts_in(
     tx: &mut Transaction<'_, Sqlite>,
     settings: &Settings,
@@ -1187,7 +1263,7 @@ async fn client_configuration_current_in(
     if source_fingerprint(&current)? != saved_fingerprint {
         return Ok(false);
     }
-    // The held write lock keeps this committed reader snapshot current.
+    // A caller holding the writer lock keeps this committed reader snapshot current.
     match settings.load_private(client_id).await {
         Ok(private) => Ok(private.integration.credentials_configured),
         Err(SettingsError::Database) => Err(PipelineError::Database),

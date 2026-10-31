@@ -346,6 +346,84 @@ async fn mapping_correction_fences_stale_replayed_and_racing_actions_across_reop
 }
 
 #[tokio::test]
+async fn mapping_correction_binds_blocking_validation_to_revision_and_paths() {
+    for change in ["revision", "relative_path", "source_root", "file_removed"] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("mapping-validation").await;
+        let review = f.failed_mapping(&intent.id).await;
+        let mut request = mapping_request(&f, &review);
+        let alternate = tempfile::tempdir().unwrap();
+        if change == "source_root" {
+            std::fs::copy(
+                f.source.path().join("owned.cbz"),
+                alternate.path().join("owned.cbz"),
+            )
+            .unwrap();
+            request.source_root_id = Library::new(f.store.clone())
+                .register_root("alternate", alternate.path())
+                .await
+                .unwrap()
+                .id;
+        }
+        let validated = f
+            .pipeline
+            .prepare_mapping("owner", &intent.id, &request)
+            .await
+            .unwrap();
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        let mut tx = f.store.begin_write().await.unwrap();
+        match change {
+            "revision" => lifecycle_event(&mut tx, &intent.id, "mapping_test", None)
+                .await
+                .unwrap(),
+            "relative_path" => request.source_relative_path = "different.cbz".into(),
+            "source_root" => {
+                sqlx::query("UPDATE library_roots SET path = ? WHERE id = ?")
+                    .bind(alternate.path().join("changed").to_str().unwrap())
+                    .bind(&request.source_root_id)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+            }
+            "file_removed" => {}
+            _ => unreachable!(),
+        }
+        tx.commit().await.unwrap();
+        if change == "revision" {
+            request.revision = f
+                .pipeline
+                .review("owner", &intent.id)
+                .await
+                .unwrap()
+                .revision;
+            assert!(request.revision > validated.revision);
+        }
+        // Applying a prepared mapping uses DB facts only, even when the source is now absent.
+        std::fs::remove_file(f.source.path().join("owned.cbz")).unwrap();
+        let result = f
+            .pipeline
+            .apply_mapping(&f.settings, "owner", &intent.id, &request, validated)
+            .await;
+        if change == "file_removed" {
+            assert!(result.is_ok());
+        } else {
+            assert!(matches!(result, Err(PipelineError::Conflict)), "{change}");
+        }
+        let after = f.pipeline.get("owner", &intent.id).await.unwrap();
+        assert_eq!(
+            after.state,
+            if change == "file_removed" {
+                AcquisitionState::Importing
+            } else {
+                AcquisitionState::NeedsReview
+            }
+        );
+        assert_eq!(after.import_id, review.acquisition.import_id);
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+    }
+}
+
+#[tokio::test]
 async fn mapping_correction_rejects_unsafe_work_and_journals_without_client_io_or_audit() {
     for change in [
         "DELETE FROM acquisition_receipts WHERE acquisition_id = ?",
@@ -377,11 +455,16 @@ async fn mapping_correction_rejects_unsafe_work_and_journals_without_client_io_o
         "DELETE FROM job_events WHERE event = 'acquisition_claim_returned' AND job_id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
         "INSERT INTO import_operations(id,source_root,destination_root,destination_relative,destination_path,unit_id,request_json,identity_json,phase) SELECT import_id,source_root,destination_root,destination_relative,destination_path,unit_id,'{}','{}','planned' FROM acquisition_runs WHERE id = ?",
         "INSERT INTO import_operations(id,source_root,destination_root,destination_relative,destination_path,unit_id,request_json,identity_json,phase) SELECT 'other-journal',source_root,destination_root,destination_relative,destination_path,unit_id,'{}','{}','done' FROM acquisition_runs WHERE id = ?",
+        "INSERT INTO import_operations(id,source_root,destination_root,destination_relative,destination_path,unit_id,request_json,identity_json,phase) SELECT import_id,source_root,destination_root,destination_relative || '.other',destination_path || '.other','unrelated-unit','{}','{}','planned' FROM acquisition_runs WHERE id = ?",
     ] {
         let f = Fixture::new(ContentType::Comic, false).await;
         let intent = f.create("unsafe-mapping").await;
         let review = f.failed_mapping(&intent.id).await;
         let mut tx = f.store.begin_write().await.unwrap();
+        if change.contains("unrelated-unit") {
+            sqlx::query("INSERT INTO units(id,edition_id,label,kind) SELECT 'unrelated-unit',edition_id,'unrelated','issue' FROM units WHERE id = ?")
+                .bind(&intent.unit_id).execute(&mut *tx).await.unwrap();
+        }
         sqlx::query(change)
             .bind(&intent.id)
             .execute(&mut *tx)
@@ -508,28 +591,41 @@ async fn mapping_correction_rejects_paths_outside_registered_roots() {
     )
     .unwrap();
     let requests = f.server.seen.lock().unwrap().requests.clone();
-    for path in [
-        "/owned.cbz",
-        "../owned.cbz",
-        "sub/../../owned.cbz",
-        "./owned.cbz",
-        "a//owned.cbz",
-        "a\\owned.cbz",
-        "escape/selected.cbz",
-        "linked.cbz",
-        ".library-imports/owned.cbz",
-        "missing.cbz",
+    for (path, expected) in [
+        ("/owned.cbz", PipelineError::Invalid),
+        ("../owned.cbz", PipelineError::Invalid),
+        ("sub/../../owned.cbz", PipelineError::Invalid),
+        ("./owned.cbz", PipelineError::Invalid),
+        ("a//owned.cbz", PipelineError::Invalid),
+        ("a\\owned.cbz", PipelineError::Invalid),
+        ("escape/selected.cbz", PipelineError::Invalid),
+        ("linked.cbz", PipelineError::Invalid),
+        (".library-imports/owned.cbz", PipelineError::Invalid),
+        ("missing.cbz", PipelineError::Conflict),
+        ("different-missing.cbz", PipelineError::Filesystem),
+        ("owned.txt", PipelineError::Invalid),
+        ("owned.pdf", PipelineError::Invalid),
+        ("owned.cbr", PipelineError::Invalid),
     ] {
         let mut request = mapping_request(&f, &review);
         request.source_relative_path = path.into();
-        assert!(
-            matches!(
-                f.pipeline
-                    .correct_mapping(&f.settings, "owner", &intent.id, request)
-                    .await,
-                Err(PipelineError::Invalid | PipelineError::Conflict)
-            ),
-            "{path}"
+        let error = f
+            .pipeline
+            .correct_mapping(&f.settings, "owner", &intent.id, request)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            std::mem::discriminant(&error),
+            std::mem::discriminant(&expected),
+            "{path}: {error:?}"
+        );
+        assert_eq!(
+            review.revision,
+            f.pipeline
+                .review("owner", &intent.id)
+                .await
+                .unwrap()
+                .revision
         );
     }
     let mut request = mapping_request(&f, &review);
@@ -933,6 +1029,53 @@ async fn assert_reviewed_action_http(mapping: bool) {
     if mapping {
         body["source_root_id"] = f.source_id.clone().into();
         body["source_relative_path"] = "owned.cbz".into();
+    }
+    if mapping {
+        for (path, expected_status, expected_code) in [
+            ("owned.txt", StatusCode::BAD_REQUEST, "invalid_request"),
+            (
+                "different-missing.cbz",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ),
+            ("owned.cbz", StatusCode::CONFLICT, "acquisition_conflict"),
+        ] {
+            if expected_status == StatusCode::CONFLICT {
+                std::fs::write(f.destination.path().join("selected.cbz"), b"appeared").unwrap();
+            }
+            let mut failed_body = body.clone();
+            failed_body["source_relative_path"] = path.into();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/acquisition/{}/correct-mapping", intent.id))
+                        .header(header::COOKIE, format!("library_session={}", login.token))
+                        .header(header::ORIGIN, "http://127.0.0.1:8787")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(failed_body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+            let error: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(error["error"]["code"], expected_code);
+            assert_eq!(
+                review.revision,
+                f.pipeline
+                    .review(&login.principal.user_id, &intent.id)
+                    .await
+                    .unwrap()
+                    .revision
+            );
+            if expected_status == StatusCode::CONFLICT {
+                std::fs::remove_file(f.destination.path().join("selected.cbz")).unwrap();
+            }
+        }
     }
     let body = body.to_string();
     let requests = f.server.seen.lock().unwrap().requests.clone();

@@ -643,7 +643,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Requires manage scope. Corrects only the explicit local source-file association after import planning stops with import_review_required and before any journal exists. Revision and polling_fingerprint must match the terminal review snapshot. Revalidates owner, completed owned receipts, current client configuration, complete actual-return lifecycle evidence and absence of outstanding work in one write transaction. Registered roots and safe relative paths are required; symlinks and traversal are rejected. Preserves the import UUID, unit, destination reservation and attempted-submission fence. Appends an audit event and queues import planning with no client writes. Does not change client remote/local path settings or an existing journal. Stale actions and replays return 409. Cookie authentication requires a matching Origin. */
+        /** @description Requires manage scope. Corrects only the explicit local source-file association after import planning stops with import_review_required and before any journal exists. Revision and polling_fingerprint must match the terminal review snapshot. Revalidates owner, completed owned receipts, current client configuration, complete actual-return lifecycle evidence and absence of outstanding work in one write transaction. Filesystem validation runs in a blocking worker before the write transaction; the transaction rechecks the revision, evidence and exact validated root/path values. Registered roots and safe relative paths are required; symlinks and traversal are rejected. Sources must be cbz, cbr or pdf and match the destination extension, case-insensitively. The action records the path only, not file identity; the import worker revalidates and imports what is at that path when it runs. Preserves the import UUID, unit, destination reservation and attempted-submission fence. Appends an audit event and queues import planning with no client writes. Does not change client remote/local path settings or an existing journal. Stale actions and replays return 409. Cookie authentication requires a matching Origin. */
         post: operations["correctAcquisitionMapping"];
         delete?: never;
         options?: never;
@@ -4720,7 +4720,7 @@ export interface operations {
                     "application/json": components["schemas"]["Acquisition"];
                 };
             };
-            /** @description invalid_request: invalid input or mixed authentication methods */
+            /** @description invalid_request: invalid input, unsafe path, unsupported or mismatched extension, or mixed authentication methods */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4756,7 +4756,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description acquisition_conflict: stale or replayed snapshot, changed receipts or configuration, existing import journal, active or uncertain work, or mapping correction is unsafe */
+            /** @description acquisition_conflict: stale or replayed snapshot, changed evidence or validated root/path values, existing journal or destination file, active or uncertain work, or unsafe correction */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4765,7 +4765,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description internal_error: operation could not be completed */
+            /** @description internal_error: filesystem I/O failure (including missing files or unavailable roots), blocking worker failure, or operation could not be completed */
             500: {
                 headers: {
                     [name: string]: unknown;

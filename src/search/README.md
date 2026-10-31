@@ -109,8 +109,11 @@ uncertain work, changed evidence, stale revisions and replays. The corrected pat
 must stay under a registered root without symlink traversal. The unit, destination
 reservation, reserved import UUID and submission fence stay intact. The worker
 then plans the import using the corrected source; the action performs no client
-writes or filesystem writes. Client remote/local path settings and catalog unit
-reassociation are outside this action. Recovery of existing immutable import
+writes or filesystem writes. Validation runs in a blocking worker before the
+write transaction, which rechecks the exact validated roots, paths and revision.
+The correction records a path, not file identity; the import worker revalidates
+and imports what is at that path when it runs. Client remote/local path settings
+and catalog unit reassociation are outside this action. Recovery of existing immutable import
 journals, selection reassessment, monitoring integration and broader review UI
 remain separate slices. Do not mark plan tasks 7-10 wholly complete from these
 focused workflows alone.
