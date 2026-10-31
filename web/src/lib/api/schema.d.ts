@@ -616,6 +616,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/acquisition/{id}/resume-polling": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires manage scope. Revision and polling_fingerprint must match the terminal review snapshot. Only needs_review acquisitions stopped by client polling errors are eligible. Revalidates owned receipts, current configuration, complete actual-return lifecycle evidence and absence of import or outstanding work in one write transaction. Appends an audit event and resumes polling without client writes or resetting the submission fence. Replays return 409. Cookie authentication requires a matching Origin. */
+        post: operations["resumeAcquisitionPolling"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/acquisition/{id}/files": {
         parameters: {
             query?: never;
@@ -1589,6 +1606,11 @@ export interface components {
         AcquisitionState: "queued" | "downloading" | "downloaded" | "importing" | "completed" | "needs_review" | "canceled";
         /** @enum {string} */
         AcquisitionReason: "uncertain_submission" | "source_unavailable" | "configuration_changed" | "unsupported_torrent" | "invalid_payload" | "client_unavailable" | "client_job_missing" | "download_failed" | "unknown_client_state" | "file_association_required" | "import_review_required" | "cancel_requires_review" | "selection_review_required" | "duplicate_torrent";
+        ResumePolling: {
+            /** Format: int64 */
+            revision: number;
+            polling_fingerprint: string;
+        };
         AcquisitionReview: {
             acquisition: components["schemas"]["Acquisition"];
             /**
@@ -1597,10 +1619,12 @@ export interface components {
              */
             revision: number;
             /**
-             * @description Claim returns only, not recovery validation.
+             * @description Complete recorded claim returns only, not recovery eligibility; unproven includes historical, outstanding or malformed coverage.
              * @enum {string}
              */
             lifecycle: "returned" | "unproven";
+            /** @description Opaque receipt and configuration snapshot fence; pass unchanged to resume polling. */
+            polling_fingerprint: string;
         };
         Acquisition: {
             id: string;
@@ -4377,8 +4401,152 @@ export interface operations {
                     "application/json": components["schemas"]["AcquisitionReview"];
                 };
             };
-            /** @description Request failed */
-            default: {
+            /** @description invalid_request: invalid input or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: acquisition not found for caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description acquisition_conflict: acquisition is not in a terminal review state */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    resumeAcquisitionPolling: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResumePolling"];
+            };
+        };
+        responses: {
+            /** @description Polling re-queued for the same owned receipts */
+            202: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Acquisition"];
+                };
+            };
+            /** @description invalid_request: invalid input or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: acquisition not found for caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description acquisition_conflict: stale or replayed snapshot, changed configuration or receipts, or polling recovery is unsafe */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

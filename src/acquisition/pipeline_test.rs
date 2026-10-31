@@ -181,6 +181,22 @@ impl Fixture {
             .await
             .unwrap()
     }
+    async fn stop_polling(&self, id: &str) -> AcquisitionReview {
+        let mut tx = self.store.begin_write().await.unwrap();
+        sqlx::query("UPDATE acquisition_runs SET state = 'needs_review', reason = 'client_unavailable' WHERE id = ?")
+            .bind(id).execute(&mut *tx).await.unwrap();
+        job_state(
+            &mut tx,
+            id,
+            "needs_review",
+            "polling_stopped",
+            Some("client_unavailable"),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        self.pipeline.review("owner", id).await.unwrap()
+    }
     async fn submit(&self, id: &str) {
         self.server.seen.lock().unwrap().own_tag = format!("libraryd-{id}");
         mock::allow_search(&self.store).await;
@@ -189,6 +205,235 @@ impl Fixture {
             .await
             .unwrap();
     }
+}
+
+fn resume_request(review: &AcquisitionReview) -> ResumePolling {
+    ResumePolling {
+        revision: review.revision,
+        polling_fingerprint: review.polling_fingerprint.clone(),
+    }
+}
+
+#[tokio::test]
+async fn resume_polling_fences_stale_replayed_and_racing_actions_across_reopen() {
+    for torrent in [false, true] {
+        let f = Fixture::new(ContentType::Comic, torrent).await;
+        let intent = f.create("resume").await;
+        f.submit(&intent.id).await;
+        let stale = f.stop_polling(&intent.id).await;
+        let review = f.stop_polling(&intent.id).await;
+        assert!(review.revision > stale.revision);
+        assert!(matches!(
+            f.pipeline
+                .resume_polling(&f.settings, "other", &intent.id, resume_request(&review))
+                .await,
+            Err(PipelineError::NotFound)
+        ));
+        assert!(matches!(
+            f.pipeline
+                .resume_polling(&f.settings, "owner", &intent.id, resume_request(&stale))
+                .await,
+            Err(PipelineError::Conflict)
+        ));
+        let receipts: Vec<(i64, String, bool)> = sqlx::query_as("SELECT ordinal, external_id, completed FROM acquisition_receipts WHERE acquisition_id = ? ORDER BY ordinal")
+            .bind(&intent.id).fetch_all(f.store.reader()).await.unwrap();
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        f.store.close().await;
+        let store = SqliteStore::open(f.dir.path()).await.unwrap();
+        let settings = Settings::new(
+            store.clone(),
+            EncryptionKey::load_or_create(f.dir.path()).await.unwrap(),
+        );
+        let pipeline = Pipeline::new(store.clone());
+        let other = Pipeline::new(SqliteStore::open(f.dir.path()).await.unwrap());
+        let (a, b) = tokio::join!(
+            pipeline.resume_polling(&settings, "owner", &intent.id, resume_request(&review)),
+            other.resume_polling(&settings, "owner", &intent.id, resume_request(&review))
+        );
+        assert!(matches!(
+            (&a, &b),
+            (Ok(_), Err(PipelineError::Conflict)) | (Err(PipelineError::Conflict), Ok(_))
+        ));
+        assert!(matches!(
+            pipeline
+                .resume_polling(&settings, "owner", &intent.id, resume_request(&review))
+                .await,
+            Err(PipelineError::Conflict)
+        ));
+        let acquisition = pipeline.get("owner", &intent.id).await.unwrap();
+        assert_eq!(acquisition.state, AcquisitionState::Downloading);
+        assert!(acquisition.submitted);
+        let after: Vec<(i64, String, bool)> = sqlx::query_as("SELECT ordinal, external_id, completed FROM acquisition_receipts WHERE acquisition_id = ? ORDER BY ordinal")
+            .bind(&intent.id).fetch_all(store.reader()).await.unwrap();
+        assert_eq!(receipts, after);
+        let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event = 'acquisition_polling_resumed' AND from_state = 'needs_review' AND to_state = 'running'")
+            .bind(&intent.job_id).fetch_one(store.reader()).await.unwrap();
+        assert_eq!(audits, 1);
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+        pipeline.tick_job(settings, &intent.id).await.unwrap();
+        let seen = f.server.seen.lock().unwrap();
+        assert_eq!(seen.submissions, 1);
+        assert!(seen.requests.len() > requests.len());
+        assert!(seen.requests[requests.len()..].iter().all(|request| {
+            request.starts_with("POST /api ")
+                || request.contains("/api/v2/auth/login ")
+                || request.starts_with("GET /api/v2/app/version ")
+                || request.contains("/api/v2/torrents/info?")
+        }));
+    }
+}
+
+#[tokio::test]
+async fn resume_polling_rejects_unsafe_evidence_without_client_io_or_audit() {
+    for change in [
+        "DELETE FROM acquisition_receipts WHERE acquisition_id = ?",
+        "UPDATE acquisition_receipts SET external_id = 'invalid' WHERE acquisition_id = ? AND ordinal = 0",
+        "UPDATE acquisition_receipts SET ordinal = -1 WHERE acquisition_id = ? AND ordinal = 0",
+        "UPDATE acquisition_runs SET reason = 'uncertain_submission' WHERE id = ?",
+        "UPDATE acquisition_runs SET import_id = 'existing' WHERE id = ?",
+        "UPDATE acquisition_runs SET source_root = destination_root, source_relative = 'owned.cbz' WHERE id = ?",
+        "UPDATE acquisition_runs SET work_token = 'expired', work_until = 0 WHERE id = ?",
+        "UPDATE acquisition_runs SET work_until = 0 WHERE id = ?",
+        "UPDATE acquisition_runs SET state = 'downloaded' WHERE id = ?",
+        "UPDATE acquisition_runs SET state = 'completed' WHERE id = ?",
+        "UPDATE acquisition_runs SET state = 'canceled' WHERE id = ?",
+        "UPDATE acquisition_runs SET category = 'foreign' WHERE id = ?",
+        "UPDATE acquisition_intents SET request = json_set(request, '$.client_id', 'foreign') WHERE id = ?",
+        "UPDATE search_releases SET owner = 'foreign' WHERE handle = (SELECT release_handle FROM acquisition_runs WHERE id = ?)",
+        "UPDATE jobs SET worker = 'expired', lease_until = 0 WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "UPDATE jobs SET state = 'cancel_requested' WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "DELETE FROM job_events WHERE event = 'acquisition_lifecycle_v1' AND job_id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "DELETE FROM job_events WHERE event = 'acquisition_claim_returned' AND job_id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "INSERT INTO import_operations(id,source_root,destination_root,destination_relative,destination_path,unit_id,request_json,identity_json,phase) SELECT 'journal',destination_root,destination_root,destination_relative,destination_path,unit_id,'{}','{}','planned' FROM acquisition_runs WHERE id = ?",
+    ] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("unsafe-resume").await;
+        f.submit(&intent.id).await;
+        f.stop_polling(&intent.id).await;
+        let mut tx = f.store.begin_write().await.unwrap();
+        sqlx::query(change)
+            .bind(&intent.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        assert!(
+            matches!(
+                f.pipeline
+                    .resume_polling(&f.settings, "owner", &intent.id, resume_request(&review))
+                    .await,
+                Err(PipelineError::Conflict)
+            ),
+            "{change}"
+        );
+        assert_eq!(
+            review.revision,
+            f.pipeline
+                .review("owner", &intent.id)
+                .await
+                .unwrap()
+                .revision
+        );
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+    }
+}
+
+#[tokio::test]
+async fn resume_polling_rechecks_receipts_and_configuration_without_new_events() {
+    for change in [
+        "UPDATE acquisition_receipts SET external_id = 'SABnzbd_nzo_changed' WHERE acquisition_id = ? AND ordinal = 0",
+        "UPDATE acquisition_receipts SET completed = 1 WHERE acquisition_id = ?",
+        "UPDATE integrations SET label = 'changed' WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET enabled = 0 WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET base_url = 'http://127.0.0.1:1' WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET options = '{\"category\":\"changed\"}' WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET secret_nonce = zeroblob(24), secret_ciphertext = zeroblob(28) WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+    ] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("changed-resume").await;
+        f.submit(&intent.id).await;
+        let review = f.stop_polling(&intent.id).await;
+        let mut tx = f.store.begin_write().await.unwrap();
+        sqlx::query(change)
+            .bind(&intent.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let changed = f.pipeline.review("owner", &intent.id).await.unwrap();
+        assert_eq!(review.revision, changed.revision);
+        assert_ne!(review.polling_fingerprint, changed.polling_fingerprint);
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        assert!(
+            matches!(
+                f.pipeline
+                    .resume_polling(&f.settings, "owner", &intent.id, resume_request(&review))
+                    .await,
+                Err(PipelineError::Conflict)
+            ),
+            "{change}"
+        );
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+        if change.contains("enabled")
+            || change.contains("base_url")
+            || change.contains("options")
+            || change.contains("secret_nonce")
+        {
+            assert!(
+                matches!(
+                    f.pipeline
+                        .resume_polling(&f.settings, "owner", &intent.id, resume_request(&changed))
+                        .await,
+                    Err(PipelineError::Conflict)
+                ),
+                "{change}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn resume_polling_never_treats_reopen_or_cleared_expired_claim_as_return() {
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("lost-polling").await;
+    f.submit(&intent.id).await;
+    let mut tx = f.store.begin_write().await.unwrap();
+    lifecycle_event(
+        &mut tx,
+        &intent.id,
+        "acquisition_claim_started",
+        Some("lost-worker"),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE acquisition_runs SET work_token = NULL, work_until = NULL WHERE id = ?")
+        .bind(&intent.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let review = f.stop_polling(&intent.id).await;
+    assert_eq!(review.lifecycle, ReviewLifecycle::Unproven);
+    f.store.close().await;
+    let store = SqliteStore::open(f.dir.path()).await.unwrap();
+    let settings = Settings::new(
+        store.clone(),
+        EncryptionKey::load_or_create(f.dir.path()).await.unwrap(),
+    );
+    let pipeline = Pipeline::new(store);
+    let reopened = pipeline.review("owner", &intent.id).await.unwrap();
+    assert_eq!(review.revision, reopened.revision);
+    assert_eq!(reopened.lifecycle, ReviewLifecycle::Unproven);
+    let requests = f.server.seen.lock().unwrap().requests.clone();
+    assert!(matches!(
+        pipeline
+            .resume_polling(&settings, "owner", &intent.id, resume_request(&reopened))
+            .await,
+        Err(PipelineError::Conflict)
+    ));
+    assert_eq!(requests, f.server.seen.lock().unwrap().requests);
 }
 
 #[tokio::test]
@@ -364,6 +609,14 @@ async fn lifecycle_displaced_claim_returns_only_when_its_work_returns() {
     let events = lifecycle_events(&f.store, &intent.job_id).await;
     assert_eq!(events.len(), 5);
     assert_eq!(events[4], ("acquisition_claim_returned".into(), old_worker));
+    assert_eq!(
+        f.pipeline
+            .review("owner", &intent.id)
+            .await
+            .unwrap()
+            .lifecycle,
+        ReviewLifecycle::Returned
+    );
     assert_eq!(f.server.seen.lock().unwrap().submissions, 0);
 }
 
