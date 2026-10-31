@@ -490,3 +490,231 @@ async fn inventory_associations_follow_current_content_without_consuming_scan_st
             .all(|item| item.associated_units.is_empty())
     );
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scan_persists_identity_hints_without_changing_original_or_coverage() {
+    use sha2::{Digest, Sha256};
+    use std::process::Command;
+    let (_state, library) = library().await;
+    let root = tempdir().unwrap();
+    let source = tempdir().unwrap();
+    fs::create_dir(source.path().join("metadata")).unwrap();
+    fs::write(source.path().join("metadata/ComicInfo.xml"), b"<ComicInfo><ISBN>9780306406157</ISBN><MangaDexID>f9c33607-9180-4ba6-b85c-e4b5faee7192</MangaDexID></ComicInfo>").unwrap();
+    let archive = root.path().join("book.cbz");
+    assert!(
+        Command::new("7z")
+            .current_dir(source.path())
+            .args(["a", "-tzip", "-bd", "-y"])
+            .arg(&archive)
+            .arg("metadata/ComicInfo.xml")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let before = Sha256::digest(fs::read(&archive).unwrap());
+    let registered = library.register_root("fixture", root.path()).await.unwrap();
+    let report = library.scan(&registered.id).await.unwrap();
+    assert_eq!(report.errors, 0);
+    let rows: Vec<(String, String, String, String, i64)> = sqlx::query_as("SELECT kind,status,source_field,container_path,extracted_at FROM identity_hints ORDER BY kind").fetch_all(library.store.reader()).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        (&*rows[0].0, &*rows[0].1, &*rows[0].2, &*rows[0].3),
+        ("isbn", "usable", "ISBN", "metadata/ComicInfo.xml")
+    );
+    assert!(rows.iter().all(|row| row.4 > 0));
+    let (entry_id, signature): (String, String) =
+        sqlx::query_as("SELECT id,signature FROM scan_entries")
+            .fetch_one(library.store.reader())
+            .await
+            .unwrap();
+    let count: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM library_files),(SELECT COUNT(*) FROM file_coverage)",
+    )
+    .fetch_one(library.store.reader())
+    .await
+    .unwrap();
+    assert_eq!(count, (0, 0));
+    let mut tx = library.store.begin_write().await.unwrap();
+    sqlx::query("INSERT INTO library_files(id,path,format,signature,size_bytes,root_id,relative_path) VALUES('file',?,'cbz',?,?,?,'book.cbz')").bind(archive.to_str().unwrap()).bind(&signature).bind(fs::metadata(&archive).unwrap().len() as i64).bind(&registered.id).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        library
+            .usable_identity_hints_for_file("file")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    library.scan(&registered.id).await.unwrap();
+    let after: Vec<(String, String, String, String, i64)> = sqlx::query_as("SELECT kind,status,source_field,container_path,extracted_at FROM identity_hints WHERE entry_id=? ORDER BY kind").bind(entry_id).fetch_all(library.store.reader()).await.unwrap();
+    assert_eq!(rows, after);
+    assert_eq!(before, Sha256::digest(fs::read(&archive).unwrap()));
+
+    fs::write(
+        source.path().join("metadata/ComicInfo.xml"),
+        b"<ComicInfo><ISBN>0306406152</ISBN></ComicInfo>",
+    )
+    .unwrap();
+    let replacement = root.path().join("replacement.zip");
+    assert!(
+        Command::new("7z")
+            .current_dir(source.path())
+            .args(["a", "-tzip", "-bd", "-y"])
+            .arg(&replacement)
+            .arg("metadata/ComicInfo.xml")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::rename(replacement, &archive).unwrap();
+    let changed_hash = Sha256::digest(fs::read(&archive).unwrap());
+    library.scan(&registered.id).await.unwrap();
+    let updated: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT kind,raw_value,status FROM identity_hints ORDER BY kind")
+            .fetch_all(library.store.reader())
+            .await
+            .unwrap();
+    assert_eq!(
+        updated,
+        vec![("isbn".into(), "0306406152".into(), "usable".into())]
+    );
+    assert!(
+        library
+            .usable_identity_hints_for_file("file")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(changed_hash, Sha256::digest(fs::read(&archive).unwrap()));
+
+    let mut tx = library.store.begin_write().await.unwrap();
+    sqlx::query("UPDATE identity_hints SET status='needs_review', value=NULL")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    fs::write(
+        source.path().join("metadata/ComicInfo.xml"),
+        b"<ComicInfo><ISBN>9791090636071</ISBN></ComicInfo>",
+    )
+    .unwrap();
+    let replacement = root.path().join("replacement.zip");
+    assert!(
+        Command::new("7z")
+            .current_dir(source.path())
+            .args(["a", "-tzip", "-bd", "-y"])
+            .arg(&replacement)
+            .arg("metadata/ComicInfo.xml")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::rename(replacement, &archive).unwrap();
+    let latest_hash = Sha256::digest(fs::read(&archive).unwrap());
+    library.scan(&registered.id).await.unwrap();
+    let status: (String, Option<String>) =
+        sqlx::query_as("SELECT status,value FROM identity_hints")
+            .fetch_one(library.store.reader())
+            .await
+            .unwrap();
+    assert_eq!(status, ("needs_review".into(), None));
+    assert_eq!(latest_hash, Sha256::digest(fs::read(&archive).unwrap()));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn failed_identity_extraction_retries_with_backoff_and_keeps_original() {
+    use sha2::{Digest, Sha256};
+    use std::process::Command;
+    let (_state, library) = library().await;
+    let root = tempdir().unwrap();
+    let source = tempdir().unwrap();
+    let archive = root.path().join("bad.cbz");
+    fs::write(
+        source.path().join("ComicInfo.xml"),
+        vec![b' '; crate::reader::archive::MAX_COMIC_INFO_BYTES + 1],
+    )
+    .unwrap();
+    assert!(
+        Command::new("7z")
+            .current_dir(source.path())
+            .args(["a", "-tzip", "-bd", "-y"])
+            .arg(&archive)
+            .arg("ComicInfo.xml")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let original = Sha256::digest(fs::read(&archive).unwrap());
+    let registered = library.register_root("fixture", root.path()).await.unwrap();
+    assert_eq!(library.scan(&registered.id).await.unwrap().errors, 0);
+    let first: (Option<String>, i64, i64) = sqlx::query_as(
+        "SELECT hints_signature,hints_attempts,hints_next_attempt FROM scan_entries",
+    )
+    .fetch_one(library.store.reader())
+    .await
+    .unwrap();
+    assert_eq!(first.0, None);
+    assert_eq!(first.1, 1);
+    assert!(first.2 > 0);
+    assert_eq!(library.scan(&registered.id).await.unwrap().errors, 0);
+    let next: (Option<String>, i64, i64) = sqlx::query_as(
+        "SELECT hints_signature,hints_attempts,hints_next_attempt FROM scan_entries",
+    )
+    .fetch_one(library.store.reader())
+    .await
+    .unwrap();
+    assert_eq!(first, next);
+    let mut tx = library.store.begin_write().await.unwrap();
+    sqlx::query("UPDATE scan_entries SET hints_next_attempt=0")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(library.scan(&registered.id).await.unwrap().errors, 0);
+    let attempts: i64 = sqlx::query_scalar("SELECT hints_attempts FROM scan_entries")
+        .fetch_one(library.store.reader())
+        .await
+        .unwrap();
+    assert_eq!(attempts, 2);
+    assert_eq!(original, Sha256::digest(fs::read(&archive).unwrap()));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn reader_metadata_ignores_invalid_identity_fields_in_archive() {
+    use std::{process::Command, sync::Arc};
+    let root = tempdir().unwrap();
+    let source = tempdir().unwrap();
+    let xml = format!(
+        "<ComicInfo><Title>Readable</Title><ISBN>0306406152</ISBN><ISBN><nested>bad</nested></ISBN><EAN>{}</EAN></ComicInfo>",
+        "9".repeat(5000)
+    );
+    fs::write(source.path().join("ComicInfo.xml"), xml).unwrap();
+    let archive = root.path().join("book.cbz");
+    assert!(
+        Command::new("7z")
+            .current_dir(source.path())
+            .args(["a", "-tzip", "-bd", "-y"])
+            .arg(&archive)
+            .arg("ComicInfo.xml")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let decoder = crate::reader::archive::ArchiveDecoder::new();
+    let metadata = crate::library::metadata::EmbeddedMetadata::read(
+        &decoder,
+        Arc::new(fs::File::open(&archive).unwrap()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(metadata.title.as_deref(), Some("Readable"));
+}
