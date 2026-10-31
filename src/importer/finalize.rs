@@ -206,6 +206,69 @@ pub(crate) fn check_content(file: &mut File, intent: &IntentIdentity) -> Result<
     Ok(mtime)
 }
 
+fn mapping_format(
+    source_relative: &str,
+    destination_relative: &str,
+) -> Result<String, ImportError> {
+    let format = Path::new(source_relative)
+        .extension()
+        .and_then(|s| s.to_str())
+        .ok_or(ImportError::InvalidFormat)?
+        .to_ascii_lowercase();
+    if !matches!(format.as_str(), "cbz" | "cbr" | "pdf")
+        || Path::new(destination_relative)
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+            != Some(&format)
+    {
+        return Err(ImportError::InvalidFormat);
+    }
+    Ok(format)
+}
+
+pub(crate) fn check_mapping(
+    source: &Path,
+    source_relative: &str,
+    destination: &Path,
+    destination_relative: &str,
+) -> Result<(), ImportError> {
+    mapping_format(source_relative, destination_relative)?;
+    (|| {
+        let source_root = root(source)?;
+        let destination_root = root(destination)?;
+        let (source_parent, source_name) = parent(&source_root, source_relative)?;
+        let (destination_parent, destination_name) =
+            parent(&destination_root, destination_relative)?;
+        check_location(
+            &source_parent,
+            source
+                .join(source_relative)
+                .parent()
+                .ok_or(ImportError::UnsafePath)?,
+        )?;
+        check_location(
+            &destination_parent,
+            destination
+                .join(destination_relative)
+                .parent()
+                .ok_or(ImportError::UnsafePath)?,
+        )?;
+        regular(&source_parent, &source_name)?;
+        absent(&destination_parent, &destination_name)
+    })()
+    .map_err(|error| match error {
+        ImportError::Io(error)
+            if error.kind() == std::io::ErrorKind::NotADirectory
+                || error.raw_os_error() == Some(libc::ELOOP) =>
+        {
+            ImportError::UnsafePath
+        }
+        other => other,
+    })
+}
+
 pub(crate) fn inspect_intent(
     source: PathBuf,
     destination: PathBuf,
@@ -237,21 +300,7 @@ pub(crate) fn inspect_intent(
     absent(&destination_parent, &destination_name)?;
     let mut source_file = regular(&source_parent, &source_name)?;
     let (signature, size, mtime) = hash(&mut source_file)?;
-    let format = Path::new(&request.source_relative)
-        .extension()
-        .and_then(|s| s.to_str())
-        .ok_or(ImportError::InvalidFormat)?
-        .to_ascii_lowercase();
-    if !matches!(format.as_str(), "cbz" | "cbr" | "pdf")
-        || Path::new(&request.destination_relative)
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-            != Some(&format)
-    {
-        return Err(ImportError::InvalidFormat);
-    }
+    let format = mapping_format(&request.source_relative, &request.destination_relative)?;
     Ok(IntentIdentity {
         source_root: source,
         destination_root: destination,

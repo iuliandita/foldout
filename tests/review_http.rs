@@ -419,7 +419,7 @@ async fn acquisition_review_states_and_resume_http_guards() {
             assert_eq!(error["error"]["code"], "acquisition_conflict");
             assert_eq!(
                 error["error"]["message"],
-                "Acquisition is not reviewable, the snapshot changed, or polling recovery is not safe"
+                "Acquisition is not reviewable, the snapshot changed, or the reviewed action is not safe"
             );
         }
     }
@@ -482,7 +482,7 @@ async fn acquisition_review_states_and_resume_http_guards() {
             assert_eq!(error["error"]["code"], "acquisition_conflict");
             assert_eq!(
                 error["error"]["message"],
-                "Acquisition is not reviewable, the snapshot changed, or polling recovery is not safe"
+                "Acquisition is not reviewable, the snapshot changed, or the reviewed action is not safe"
             );
         }
     }
