@@ -97,7 +97,7 @@ automatic reconciliation of uncertain submissions without receipts.
 
 Terminal review exposes an owner-scoped job-event revision and an opaque evidence
 fingerprint. Resume polling accepts only proven-safe owned receipts; it never
-submits another client job. Both reviewed actions revalidate the snapshot,
+submits another client job. Reviewed actions revalidate the snapshot,
 configuration, ownership and complete actual-return claim history in one write
 transaction and append an audit event. Historical or unmatched claims fail closed,
 even after lease expiry or restart.
@@ -113,9 +113,28 @@ writes or filesystem writes. Validation runs in a blocking worker before the
 write transaction, which rechecks the exact validated roots, paths and revision.
 The correction records a path, not file identity; the import worker revalidates
 and imports what is at that path when it runs. Client remote/local path settings
-and catalog unit reassociation are outside this action. Recovery of existing immutable import
-journals, selection reassessment, monitoring integration and broader review UI
-remain separate slices. Do not mark plan tasks 7-10 wholly complete from these
+and catalog unit reassociation are outside this action. Monitoring integration and broader review UI remain separate slices. Do not mark plan tasks 7-10 wholly complete from these
 focused workflows alone.
+
+`POST /api/v1/acquisition/{id}/reassess-selection` handles only an unsubmitted
+`needs_review` intent stopped with `selection_review_required`. Refresh an expired
+release handle with an explicit search for the same release, assess it through
+`release-assessments` (acknowledging that exact assessment for unknown evidence),
+then obtain a new terminal review. Pass its `revision` and `polling_fingerprint`
+and any `acknowledged_assessment_id`. Reassessment uses cached evidence only; an
+expired or evidence-less handle returns `selection_refresh_required`. A still
+valid original selection returns `selection_current`.
+
+The action revalidates the original owner/unit/release binding, client and indexer
+configuration, current assessment and rejection history, revision and complete
+claim returns in one write transaction. Receipts, attempted or uncertain
+submission, import/source association and active or unproven work block it. The
+existing selection service records a new decision, the old intent becomes
+`canceled`, and its job event records the new decision ID. The old selection and
+immutable acquisition request remain unchanged. Rejection revocation cannot
+revive a superseded decision. Use the returned decision and release handle with a
+new idempotency key through normal acquisition creation. The action queues
+nothing; creation and submission retain all authorization checks. Replaying the
+original acquisition key still returns the retired intent.
 
 Parser reference: [bendy decoding API](https://docs.rs/bendy/0.6.1/bendy/decoding/index.html).

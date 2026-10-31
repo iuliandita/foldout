@@ -41,6 +41,18 @@ impl SelectionRepository {
         key: &str,
         request: NewDecision,
     ) -> Result<Decision, SelectionError> {
+        let fingerprint = Self::prepare_decision(owner, key, &request)?;
+        let mut tx = self.store.begin_write().await?;
+        let decision = Self::decide_in(&mut tx, owner, key, request, &fingerprint).await?;
+        tx.commit().await?;
+        Ok(decision)
+    }
+
+    pub(crate) fn prepare_decision(
+        owner: &str,
+        key: &str,
+        request: &NewDecision,
+    ) -> Result<String, SelectionError> {
         validate_actor_key(owner, key)?;
         valid_id(&request.assessment_id)?;
         if let Some(id) = &request.acknowledged_assessment_id {
@@ -51,24 +63,31 @@ impl SelectionRepository {
         }) {
             return Err(SelectionError::Invalid);
         }
-        let fingerprint = digest(&versioned_json("decision-v1", &request)?);
-        let mut tx = self.store.begin_write().await?;
+        Ok(digest(&versioned_json("decision-v1", request)?))
+    }
+
+    pub(crate) async fn decide_in(
+        connection: &mut SqliteConnection,
+        owner: &str,
+        key: &str,
+        request: NewDecision,
+        fingerprint: &str,
+    ) -> Result<Decision, SelectionError> {
         if let Some(row) =
             sqlx::query("SELECT * FROM release_decisions WHERE owner = ? AND idempotency_key = ?")
                 .bind(owner)
                 .bind(key)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut *connection)
                 .await?
         {
             if row.try_get::<String, _>("request_fingerprint")? != fingerprint {
                 return Err(SelectionError::Conflict);
             }
             let decision = decision_row(row)?;
-            tx.commit().await?;
             return Ok(decision);
         }
-        let assessment = load_assessment(&mut tx, owner, &request.assessment_id).await?;
-        validate_current(&mut tx, owner, &assessment).await?;
+        let assessment = load_assessment(connection, owner, &request.assessment_id).await?;
+        validate_current(connection, owner, &assessment).await?;
         match request.action {
             DecisionAction::Selected => {
                 match assessment.evaluation.eligibility {
@@ -86,7 +105,10 @@ impl SelectionRepository {
                         }
                     }
                 }
-                if rejection_for(&mut tx, owner, &assessment).await?.is_some() {
+                if rejection_for(connection, owner, &assessment)
+                    .await?
+                    .is_some()
+                {
                     return Err(SelectionError::Rejected);
                 }
             }
@@ -94,7 +116,10 @@ impl SelectionRepository {
                 return Err(SelectionError::Invalid);
             }
             DecisionAction::Rejected => {
-                if rejection_for(&mut tx, owner, &assessment).await?.is_some() {
+                if rejection_for(connection, owner, &assessment)
+                    .await?
+                    .is_some()
+                {
                     return Err(SelectionError::Conflict);
                 }
             }
@@ -105,12 +130,11 @@ impl SelectionRepository {
         };
         let row = sqlx::query("INSERT INTO release_decisions (id, owner, assessment_id, action, reason, acknowledged_assessment_id, idempotency_key, request_fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
             .bind(Uuid::new_v4().to_string()).bind(owner).bind(&request.assessment_id).bind(action).bind(&request.reason).bind(&request.acknowledged_assessment_id).bind(key).bind(fingerprint)
-            .fetch_one(&mut *tx).await?;
+            .fetch_one(&mut *connection).await?;
         let decision = decision_row(row)?;
         if decision.action == DecisionAction::Rejected {
-            supersede_selections(&mut tx, owner, &assessment, &decision.id).await?;
+            supersede_selections(connection, owner, &assessment, &decision.id).await?;
         }
-        tx.commit().await?;
         Ok(decision)
     }
 

@@ -3094,3 +3094,647 @@ async fn manage_discovery_exposes_choices_without_private_configuration() {
             .contains("selected.cbz")
     );
 }
+
+impl Fixture {
+    async fn expired_selection(&self, id: &str) -> AcquisitionReview {
+        let mut tx = self.store.begin_write().await.unwrap();
+        sqlx::query("UPDATE release_assessments SET created_at = 0, expires_at = 1 WHERE id = (SELECT assessment_id FROM release_decisions WHERE id = ?)")
+            .bind(&self.request.selection_decision_id).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        self.pipeline
+            .tick_job(self.settings.clone(), id)
+            .await
+            .unwrap();
+        let review = self.pipeline.review("owner", id).await.unwrap();
+        assert_eq!(
+            review.acquisition.reason,
+            Some(AcquisitionReason::SelectionReviewRequired)
+        );
+        assert!(!review.acquisition.submitted);
+        assert_eq!(review.lifecycle, ReviewLifecycle::Returned);
+        review
+    }
+
+    async fn reassessment_request(&self, review: &AcquisitionReview) -> ReassessSelection {
+        let assessment = Search::new(self.store.clone(), self.settings.clone())
+            .assess_release(
+                "owner",
+                search::ReleaseAssessmentRequest {
+                    unit_id: self.request.unit_id.clone(),
+                    release_handle: self.request.release_handle.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        ReassessSelection {
+            revision: review.revision,
+            polling_fingerprint: review.polling_fingerprint.clone(),
+            acknowledged_assessment_id: (assessment.evaluation.eligibility == Eligibility::Unknown)
+                .then_some(assessment.assessment_id),
+        }
+    }
+}
+
+#[tokio::test]
+async fn reassessment_retires_only_unsubmitted_intent_and_normal_creation_survives_reopen() {
+    for (torrent, stale_target) in [(false, false), (true, false), (false, true)] {
+        let f = Fixture::new(ContentType::Comic, torrent).await;
+        let intent = f.create("expired-selection").await;
+        let review = if stale_target {
+            let mut tx = f.store.begin_write().await.unwrap();
+            sqlx::query("UPDATE editions SET region = 'US'")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            f.pipeline
+                .tick_job(f.settings.clone(), &intent.id)
+                .await
+                .unwrap();
+            f.pipeline.review("owner", &intent.id).await.unwrap()
+        } else {
+            f.expired_selection(&intent.id).await
+        };
+        let request = f.reassessment_request(&review).await;
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        let result = f
+            .pipeline
+            .reassess_selection(&f.settings, "owner", &intent.id, request)
+            .await
+            .unwrap();
+        assert_eq!(f.server.seen.lock().unwrap().requests, requests);
+        assert_eq!(result.acquisition.state, AcquisitionState::Canceled);
+        assert!(!result.acquisition.submitted);
+        assert_eq!(result.acquisition.receipt_count, 0);
+        assert_eq!(result.release_handle, f.request.release_handle);
+        assert_ne!(
+            Some(&result.decision.id),
+            f.request.selection_decision_id.as_ref()
+        );
+        let old: String = sqlx::query_scalar("SELECT json_extract(request, '$.selection_decision_id') FROM acquisition_intents WHERE id = ?")
+            .bind(&intent.id).fetch_one(f.store.reader()).await.unwrap();
+        assert_eq!(Some(old), f.request.selection_decision_id);
+        let audited: String = sqlx::query_scalar("SELECT reason FROM job_events WHERE job_id = ? AND event = 'acquisition_selection_reassessed'")
+            .bind(&intent.job_id).fetch_one(f.store.reader()).await.unwrap();
+        assert_eq!(audited, result.decision.id);
+        let store = SqliteStore::open(f.dir.path()).await.unwrap();
+        let pipeline = Pipeline::new(store.clone());
+        let settings = Settings::new(
+            store,
+            EncryptionKey::load_or_create(f.dir.path()).await.unwrap(),
+        );
+        let replay = pipeline
+            .create(&settings, "owner", "expired-selection", f.request.clone())
+            .await
+            .unwrap();
+        assert_eq!(replay.id, intent.id);
+        assert_eq!(replay.state, AcquisitionState::Canceled);
+        assert!(matches!(
+            pipeline
+                .reassess_selection(
+                    &settings,
+                    "owner",
+                    &intent.id,
+                    f.reassessment_request(&review).await
+                )
+                .await,
+            Err(PipelineError::Conflict)
+        ));
+        let mut fresh = f.request.clone();
+        fresh.selection_decision_id = Some(result.decision.id);
+        let replacement = pipeline
+            .create(&settings, "owner", "fresh-selection", fresh.clone())
+            .await
+            .unwrap();
+        f.server.seen.lock().unwrap().own_tag = format!("libraryd-{}", replacement.id);
+        mock::allow_search(&f.store).await;
+        pipeline
+            .tick_job(settings.clone(), &replacement.id)
+            .await
+            .unwrap();
+        assert!(
+            pipeline
+                .get("owner", &replacement.id)
+                .await
+                .unwrap()
+                .submitted
+        );
+        let submissions = f.server.seen.lock().unwrap().submissions;
+        assert!(submissions > 0);
+        assert_eq!(
+            pipeline
+                .create(&settings, "owner", "fresh-selection", fresh)
+                .await
+                .unwrap()
+                .id,
+            replacement.id
+        );
+        pipeline.tick_job(settings, &intent.id).await.unwrap();
+        assert_eq!(submissions, f.server.seen.lock().unwrap().submissions);
+    }
+}
+
+#[tokio::test]
+async fn reassessment_fences_stale_revision_races_and_unauthorized_owner() {
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("reassessment-fences").await;
+    let review = f.expired_selection(&intent.id).await;
+    assert!(matches!(
+        f.pipeline
+            .reassess_selection(
+                &f.settings,
+                "other",
+                &intent.id,
+                f.reassessment_request(&review).await
+            )
+            .await,
+        Err(PipelineError::NotFound)
+    ));
+    let mut stale = f.reassessment_request(&review).await;
+    stale.revision -= 1;
+    assert!(matches!(
+        f.pipeline
+            .reassess_selection(&f.settings, "owner", &intent.id, stale)
+            .await,
+        Err(PipelineError::Conflict)
+    ));
+    let original = f.reassessment_request(&review).await;
+    let validated = f
+        .pipeline
+        .prepare_reassessment(&f.settings, "owner", &intent.id, &original)
+        .await
+        .unwrap();
+    let mut tx = f.store.begin_write().await.unwrap();
+    lifecycle_event(&mut tx, &intent.id, "snapshot_changed", None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+    let updated = f.reassessment_request(&review).await;
+    assert!(matches!(
+        f.pipeline
+            .apply_reassessment(&f.settings, "owner", &intent.id, &updated, validated)
+            .await,
+        Err(PipelineError::Conflict)
+    ));
+    let a = f.reassessment_request(&review).await;
+    let b = f.reassessment_request(&review).await;
+    let (a, b) = tokio::join!(
+        f.pipeline
+            .reassess_selection(&f.settings, "owner", &intent.id, a),
+        f.pipeline
+            .reassess_selection(&f.settings, "owner", &intent.id, b),
+    );
+    assert_ne!(a.is_ok(), b.is_ok());
+    assert!(matches!(a.err().or(b.err()), Some(PipelineError::Conflict)));
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM job_events WHERE event = 'acquisition_selection_reassessed'",
+    )
+    .fetch_one(f.store.reader())
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(f.server.seen.lock().unwrap().submissions, 0);
+}
+
+#[tokio::test]
+async fn reassessment_revalidates_all_fences_after_preparation_without_audit_or_writes() {
+    for change in [
+        "CREATE TRIGGER ignore_reassessment BEFORE UPDATE ON acquisition_runs BEGIN SELECT RAISE(IGNORE); END",
+        "CREATE TRIGGER ignore_reassessment BEFORE UPDATE ON jobs BEGIN SELECT RAISE(IGNORE); END",
+        "INSERT INTO job_events(job_id,event,to_state,created_at) SELECT job_id,'changed','needs_review',unixepoch() FROM acquisition_intents WHERE id = ?",
+        "UPDATE acquisition_runs SET attempted = 1, payload_digest = 'attempted' WHERE id = ?",
+        "UPDATE acquisition_runs SET reason = 'uncertain_submission' WHERE id = ?",
+        "INSERT INTO acquisition_receipts(acquisition_id,ordinal,external_id) VALUES(?,0,'SABnzbd_nzo_owned')",
+        "UPDATE acquisition_runs SET payload_digest = 'uncertain' WHERE id = ?",
+        "UPDATE acquisition_runs SET torrent_hash = 'uncertain' WHERE id = ?",
+        "UPDATE acquisition_runs SET import_id = 'existing' WHERE id = ?",
+        "UPDATE acquisition_runs SET source_root = destination_root, source_relative = 'owned.cbz' WHERE id = ?",
+        "UPDATE acquisition_runs SET work_token = 'expired', work_until = 0 WHERE id = ?",
+        "UPDATE acquisition_runs SET work_until = 0 WHERE id = ?",
+        "UPDATE acquisition_runs SET work_token = 'active' WHERE id = ?",
+        "UPDATE acquisition_runs SET state = 'completed' WHERE id = ?",
+        "UPDATE acquisition_runs SET state = 'canceled' WHERE id = ?",
+        "UPDATE acquisition_runs SET category = 'foreign' WHERE id = ?",
+        "UPDATE acquisition_intents SET caller = 'other' WHERE id = ?",
+        "UPDATE acquisition_intents SET request = json_set(request,'$.unit_id','other') WHERE id = ?",
+        "UPDATE acquisition_intents SET request = json_set(request,'$.client_id','other') WHERE id = ?",
+        "UPDATE acquisition_intents SET request = json_set(request,'$.release_handle','other') WHERE id = ?",
+        "UPDATE jobs SET worker = 'expired', lease_until = 0 WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "UPDATE jobs SET state = 'cancel_requested' WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "UPDATE jobs SET reason = 'uncertain_submission' WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "UPDATE jobs SET lease_until = 0 WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "UPDATE jobs SET retry_at = 0 WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "DELETE FROM job_events WHERE event = 'acquisition_lifecycle_v1' AND job_id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "DELETE FROM job_events WHERE event = 'acquisition_claim_returned' AND job_id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "UPDATE integrations SET label = 'changed' WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET enabled = 0 WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET base_url = 'http://127.0.0.1:1' WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET secret_nonce = zeroblob(24), secret_ciphertext = zeroblob(28) WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET base_url = 'http://127.0.0.1:1' WHERE id = (SELECT integration_id FROM search_releases WHERE handle = (SELECT release_handle FROM acquisition_runs WHERE id = ?))",
+        "UPDATE release_assessments SET created_at = 0, expires_at = 1 WHERE unit_id = (SELECT unit_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET options = '{\"category\":\"changed\"}' WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET label = 'changed' WHERE id = (SELECT integration_id FROM search_releases WHERE handle = (SELECT release_handle FROM acquisition_runs WHERE id = ?))",
+        "UPDATE search_releases SET evidence_json = '{}' WHERE handle = (SELECT release_handle FROM acquisition_runs WHERE id = ?)",
+        "UPDATE search_releases SET owner = 'other' WHERE handle = (SELECT release_handle FROM acquisition_runs WHERE id = ?)",
+        "UPDATE units SET label = 'changed' WHERE id = (SELECT unit_id FROM acquisition_runs WHERE id = ?)",
+        "INSERT INTO import_operations(id,source_root,destination_root,destination_relative,destination_path,unit_id,request_json,identity_json,phase) SELECT 'journal',destination_root,destination_root,destination_relative,destination_path,unit_id,'{}','{}','planned' FROM acquisition_runs WHERE id = ?",
+    ] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("reassessment-unsafe").await;
+        let review = f.expired_selection(&intent.id).await;
+        let request = f.reassessment_request(&review).await;
+        let validated = f
+            .pipeline
+            .prepare_reassessment(&f.settings, "owner", &intent.id, &request)
+            .await
+            .unwrap();
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        let mut tx = f.store.begin_write().await.unwrap();
+        let query = sqlx::query(change);
+        let query = if change.starts_with("CREATE TRIGGER") {
+            query
+        } else {
+            query.bind(&intent.id)
+        };
+        query.execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        assert!(
+            f.pipeline
+                .apply_reassessment(&f.settings, "owner", &intent.id, &request, validated)
+                .await
+                .is_err(),
+            "{change}"
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM release_decisions WHERE action = 'selected'")
+                .fetch_one(f.store.reader())
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "{change}");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM job_events WHERE event = 'acquisition_selection_reassessed'",
+        )
+        .fetch_one(f.store.reader())
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "{change}");
+        if !change.contains("UPDATE units")
+            && !change.contains("SELECT job_id,'changed'")
+            && !change.contains("SET label = 'changed'")
+        {
+            // A newly reviewed unsafe state must also fail: the snapshot fence alone is insufficient.
+            let current = f.pipeline.review("owner", &intent.id).await;
+            if let Ok(current) = current {
+                let current_request = ReassessSelection {
+                    revision: current.revision,
+                    polling_fingerprint: current.polling_fingerprint,
+                    acknowledged_assessment_id: request.acknowledged_assessment_id.clone(),
+                };
+                assert!(
+                    f.pipeline
+                        .reassess_selection(&f.settings, "owner", &intent.id, current_request)
+                        .await
+                        .is_err(),
+                    "fresh unsafe review: {change}"
+                );
+            }
+        }
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests, "{change}");
+    }
+}
+
+#[tokio::test]
+async fn reassessment_requires_fresh_evidence_and_exact_acknowledgement() {
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("reassessment-freshness").await;
+    let mut tx = f.store.begin_write().await.unwrap();
+    sqlx::query("UPDATE acquisition_runs SET state = 'needs_review', reason = 'selection_review_required' WHERE id = ?")
+        .bind(&intent.id).execute(&mut *tx).await.unwrap();
+    job_state(
+        &mut tx,
+        &intent.id,
+        "needs_review",
+        "fixture",
+        Some("selection_review_required"),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+    assert!(matches!(
+        f.pipeline
+            .reassess_selection(
+                &f.settings,
+                "owner",
+                &intent.id,
+                f.reassessment_request(&review).await
+            )
+            .await,
+        Err(PipelineError::SelectionCurrent)
+    ));
+    // A fresh selected decision must not silently replace an exact acknowledgement.
+    let review = f.expired_selection(&intent.id).await;
+    let mut request = f.reassessment_request(&review).await;
+    assert!(request.acknowledged_assessment_id.is_some());
+    request.acknowledged_assessment_id = None;
+    assert!(matches!(
+        f.pipeline
+            .reassess_selection(&f.settings, "owner", &intent.id, request)
+            .await,
+        Err(PipelineError::Selection(
+            SelectionError::AcknowledgementRequired
+        ))
+    ));
+    let mut tx = f.store.begin_write().await.unwrap();
+    sqlx::query("UPDATE search_releases SET expires_at = 1 WHERE handle = ?")
+        .bind(&f.request.release_handle)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+    assert!(matches!(
+        f.pipeline
+            .reassess_selection(
+                &f.settings,
+                "owner",
+                &intent.id,
+                ReassessSelection {
+                    revision: review.revision,
+                    polling_fingerprint: review.polling_fingerprint,
+                    acknowledged_assessment_id: None
+                }
+            )
+            .await,
+        Err(PipelineError::SelectionRefreshRequired)
+    ));
+    assert_eq!(f.server.seen.lock().unwrap().submissions, 0);
+    // Explicit search refreshes the same durable handle; reassessment itself never searches.
+    let integration_id: String =
+        sqlx::query_scalar("SELECT integration_id FROM search_releases WHERE handle = ?")
+            .bind(&f.request.release_handle)
+            .fetch_one(f.store.reader())
+            .await
+            .unwrap();
+    mock::allow_search(&f.store).await;
+    let refreshed = Search::new(f.store.clone(), f.settings.clone())
+        .releases(
+            "owner",
+            ReleaseSearch {
+                integration_id,
+                content_type: ContentType::Comic,
+                query: "Owned Fixture".into(),
+                unit_id: Some(f.request.unit_id.clone()),
+                offset: 0,
+                limit: 20,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        refreshed.releases[0].release_handle,
+        f.request.release_handle
+    );
+    let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+    let requests = f.server.seen.lock().unwrap().requests.clone();
+    f.pipeline
+        .reassess_selection(
+            &f.settings,
+            "owner",
+            &intent.id,
+            f.reassessment_request(&review).await,
+        )
+        .await
+        .unwrap();
+    assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+}
+
+#[tokio::test]
+async fn reassessment_keeps_rejection_history_and_submission_rechecks() {
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("reassessment-rejection").await;
+    let review = f.expired_selection(&intent.id).await;
+    let request = f.reassessment_request(&review).await;
+    let validated = f
+        .pipeline
+        .prepare_reassessment(&f.settings, "owner", &intent.id, &request)
+        .await
+        .unwrap();
+    let assessment_id = validated.decision_request.assessment_id.clone();
+    let repo = SelectionRepository::new(f.store.clone());
+    let rejection = repo
+        .decide(
+            "owner",
+            "reject-during-reassessment",
+            NewDecision {
+                assessment_id: assessment_id.clone(),
+                action: DecisionAction::Rejected,
+                acknowledged_assessment_id: None,
+                reason: Some("wrong release".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        f.pipeline
+            .apply_reassessment(&f.settings, "owner", &intent.id, &request, validated)
+            .await,
+        Err(PipelineError::Conflict | PipelineError::Selection(SelectionError::Rejected))
+    ));
+    let rejected = f.pipeline.review("owner", &intent.id).await.unwrap();
+    assert!(matches!(
+        f.pipeline
+            .reassess_selection(
+                &f.settings,
+                "owner",
+                &intent.id,
+                f.reassessment_request(&rejected).await
+            )
+            .await,
+        Err(PipelineError::Selection(SelectionError::Rejected))
+    ));
+    repo.revoke_rejection("owner", "revoke", &rejection.id)
+        .await
+        .unwrap();
+    let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+    let result = f
+        .pipeline
+        .reassess_selection(
+            &f.settings,
+            "owner",
+            &intent.id,
+            f.reassessment_request(&review).await,
+        )
+        .await
+        .unwrap();
+    let superseded: bool =
+        sqlx::query_scalar("SELECT superseded_by IS NOT NULL FROM release_decisions WHERE id = ?")
+            .bind(&f.request.selection_decision_id)
+            .fetch_one(f.store.reader())
+            .await
+            .unwrap();
+    assert!(superseded);
+    let mut fresh = f.request.clone();
+    fresh.selection_decision_id = Some(result.decision.id.clone());
+    let replacement = f
+        .pipeline
+        .create(&f.settings, "owner", "replacement", fresh)
+        .await
+        .unwrap();
+    let mut tx = f.store.begin_write().await.unwrap();
+    sqlx::query("UPDATE release_assessments SET created_at = 0, expires_at = 1 WHERE id = ?")
+        .bind(&assessment_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    f.pipeline
+        .tick_job(f.settings.clone(), &replacement.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.pipeline
+            .get("owner", &replacement.id)
+            .await
+            .unwrap()
+            .reason,
+        Some(AcquisitionReason::SelectionReviewRequired)
+    );
+    assert_eq!(f.server.seen.lock().unwrap().submissions, 0);
+}
+
+#[tokio::test]
+async fn reassessment_http_returns_distinct_conflicts_and_safe_decision_without_queuing() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("reassessment-http").await;
+    let auth = crate::auth::AuthService::new(f.store.clone());
+    let login = auth
+        .setup("fixture-admin", "fixture-secure-password")
+        .await
+        .unwrap();
+    let owner = login.principal.user_id;
+    let key = auth
+        .create_key("manager", crate::auth::Scope::Manage)
+        .await
+        .unwrap();
+    let mut tx = f.store.begin_write().await.unwrap();
+    job_state(
+        &mut tx,
+        &intent.id,
+        "needs_review",
+        "fixture",
+        Some("selection_review_required"),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE acquisition_runs SET state = 'needs_review', reason = 'selection_review_required' WHERE id = ?")
+        .bind(&intent.id).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE acquisition_intents SET caller = ?")
+        .bind(&owner)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for statement in [
+        "UPDATE search_releases SET owner = ?",
+        "UPDATE release_selection_policies SET owner = ?",
+        "UPDATE release_assessments SET owner = ?",
+        "UPDATE release_decisions SET owner = ?",
+    ] {
+        sqlx::query(statement)
+            .bind(&owner)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    tx.commit().await.unwrap();
+    let app =
+        crate::httpapi::acquisition::routes(crate::httpapi::acquisition::AcquisitionContext {
+            pipeline: f.pipeline.clone(),
+            settings: f.settings.clone(),
+            auth: crate::httpapi::auth::AuthContext {
+                service: auth,
+                origin: "http://localhost".into(),
+            },
+        });
+    let mut ack = None;
+    for expected in [
+        "selection_current",
+        "selection_refresh_required",
+        "assessment_acknowledgement_required",
+        "success",
+        "acquisition_conflict",
+    ] {
+        if expected == "selection_refresh_required" {
+            let mut tx = f.store.begin_write().await.unwrap();
+            sqlx::query("UPDATE release_assessments SET created_at = 0, expires_at = 1")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE search_releases SET expires_at = 1")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        if expected == "assessment_acknowledgement_required" {
+            let mut tx = f.store.begin_write().await.unwrap();
+            sqlx::query("UPDATE search_releases SET expires_at = unixepoch() + 3600")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        if expected == "success" {
+            let assessed = Search::new(f.store.clone(), f.settings.clone())
+                .assess_release(
+                    &owner,
+                    search::ReleaseAssessmentRequest {
+                        release_handle: f.request.release_handle.clone(),
+                        unit_id: f.request.unit_id.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            ack = Some(assessed.assessment_id);
+        }
+        let review = f.pipeline.review(&owner, &intent.id).await.unwrap();
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        let response = app.clone().oneshot(Request::builder()
+            .method("POST").uri(format!("/api/v1/acquisition/{}/reassess-selection",intent.id))
+            .header("authorization",format!("Bearer {}",key.secret)).header("content-type","application/json")
+            .body(Body::from(serde_json::json!({"revision":review.revision,"polling_fingerprint":review.polling_fingerprint,"acknowledged_assessment_id":ack}).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        if expected == "success" {
+            assert_eq!(response.headers()["cache-control"], "no-store");
+        }
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        if expected == "success" {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["acquisition"]["state"], "canceled");
+            assert_eq!(body["acquisition"]["submitted"], false);
+            assert_eq!(body["release_handle"], f.request.release_handle);
+            assert_eq!(body["decision"]["action"], "selected");
+            for private in ["base_url", "external_id", "api_key", "selected.cbz"] {
+                assert!(!body.to_string().contains(private));
+            }
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["error"]["code"], expected);
+        }
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(f.store.reader())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}

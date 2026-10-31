@@ -4,8 +4,8 @@ use super::{
 };
 use crate::{
     acquisition::pipeline::{
-        AcquisitionRequest, CorrectMapping, FileAssociation, Pipeline, PipelineError, ResumeImport,
-        ResumePolling,
+        AcquisitionRequest, CorrectMapping, FileAssociation, Pipeline, PipelineError,
+        ReassessSelection, ResumeImport, ResumePolling,
     },
     auth::Scope,
     settings::Settings,
@@ -43,6 +43,10 @@ pub fn routes(context: AcquisitionContext) -> Router {
         .route(
             "/api/v1/acquisition/{id}/correct-mapping",
             post(correct_mapping),
+        )
+        .route(
+            "/api/v1/acquisition/{id}/reassess-selection",
+            post(reassess_selection),
         )
         .route("/api/v1/acquisition/{id}/files", post(associate_file))
         .layer(DefaultBodyLimit::max(16 * 1024))
@@ -180,6 +184,26 @@ async fn correct_mapping(
         .into_response())
 }
 
+async fn reassess_selection(
+    State(context): State<AcquisitionContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    ApiJson(request): ApiJson<ReassessSelection>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(&context.auth, &headers, &Method::POST, Scope::Manage).await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(
+            context
+                .pipeline
+                .reassess_selection(&context.settings, &principal.user_id, &id, request)
+                .await
+                .map_err(review_error)?,
+        ),
+    )
+        .into_response())
+}
+
 fn review_error(error: PipelineError) -> ApiError {
     match error {
         PipelineError::Conflict => ApiError::new(
@@ -251,6 +275,16 @@ impl From<PipelineError> for ApiError {
                 "Acquisition or selection not found",
             ),
             PipelineError::ImportCleanupReview => review_error(error),
+            PipelineError::SelectionCurrent => Self::new(
+                StatusCode::CONFLICT,
+                "selection_current",
+                "Selection is still current; reassessment is unnecessary",
+            ),
+            PipelineError::SelectionRefreshRequired => Self::new(
+                StatusCode::CONFLICT,
+                "selection_refresh_required",
+                "Refresh the same release in search before reassessing",
+            ),
             PipelineError::Conflict => Self::new(
                 StatusCode::CONFLICT,
                 "acquisition_conflict",
