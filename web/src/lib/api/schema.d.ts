@@ -625,7 +625,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Requires manage scope. Revision and polling_fingerprint must match the terminal review snapshot. Only needs_review acquisitions stopped by client polling errors are eligible. Revalidates owned receipts, current configuration, complete actual-return lifecycle evidence and absence of import or outstanding work in one write transaction. Appends an audit event and resumes polling without client writes or resetting the submission fence. Replays return 409. Cookie authentication requires a matching Origin. */
+        /** @description Requires manage scope. Revision and polling_fingerprint must match the terminal review snapshot. Only needs_review acquisitions stopped with client_unavailable, client_job_missing, or unknown_client_state are eligible; download_failed is excluded. Revalidates owned receipts, current configuration, complete actual-return lifecycle evidence and absence of import or outstanding work in one write transaction. Appends an audit event and resumes polling without client writes or resetting the submission fence. Replays return 409. Cookie authentication requires a matching Origin. */
         post: operations["resumeAcquisitionPolling"];
         delete?: never;
         options?: never;

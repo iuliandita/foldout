@@ -309,12 +309,7 @@ impl Pipeline {
             || row.try_get::<&str, _>("state")? != "needs_review"
             || !matches!(
                 row.try_get::<Option<&str>, _>("reason")?,
-                Some(
-                    "client_unavailable"
-                        | "client_job_missing"
-                        | "download_failed"
-                        | "unknown_client_state"
-                )
+                Some("client_unavailable" | "client_job_missing" | "unknown_client_state")
             )
             || row.try_get::<&str, _>("job_state")? != "needs_review"
             || row.try_get::<Option<String>, _>("job_worker")?.is_some()
@@ -369,9 +364,19 @@ impl Pipeline {
             .map_err(|_| PipelineError::Conflict)?;
         }
         // Keep the submission fence and the original receipts; only polling becomes runnable.
-        sqlx::query("UPDATE acquisition_runs SET state = 'downloading', reason = NULL, next_poll_at = 0, updated_at = unixepoch() WHERE id = ?")
-            .bind(id).execute(&mut *tx).await?;
-        job_state(&mut tx, id, "running", "acquisition_polling_resumed", None).await?;
+        let changed = sqlx::query("UPDATE acquisition_runs SET state = 'downloading', reason = NULL, next_poll_at = 0, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND attempted = 1")
+            .bind(id).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 {
+            return Err(PipelineError::Conflict);
+        }
+        let job_id: &str = row.try_get("job_id")?;
+        let changed = sqlx::query("UPDATE jobs SET state = 'running', reason = NULL, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND worker IS NULL AND lease_until IS NULL AND retry_at IS NULL")
+            .bind(job_id).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 {
+            return Err(PipelineError::Conflict);
+        }
+        sqlx::query("INSERT INTO job_events (job_id, event, from_state, to_state, created_at) VALUES (?, 'acquisition_polling_resumed', 'needs_review', 'running', unixepoch())")
+            .bind(job_id).execute(&mut *tx).await?;
         tx.commit().await?;
         self.get(owner, id).await
     }

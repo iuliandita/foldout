@@ -182,19 +182,12 @@ impl Fixture {
             .unwrap()
     }
     async fn stop_polling(&self, id: &str) -> AcquisitionReview {
-        let mut tx = self.store.begin_write().await.unwrap();
-        sqlx::query("UPDATE acquisition_runs SET state = 'needs_review', reason = 'client_unavailable' WHERE id = ?")
-            .bind(id).execute(&mut *tx).await.unwrap();
-        job_state(
-            &mut tx,
-            id,
-            "needs_review",
-            "polling_stopped",
-            Some("client_unavailable"),
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
+        self.server.seen.lock().unwrap().category = Some("foreign".into());
+        self.pipeline
+            .tick_job(self.settings.clone(), id)
+            .await
+            .unwrap();
+        self.server.seen.lock().unwrap().category = None;
         self.pipeline.review("owner", id).await.unwrap()
     }
     async fn submit(&self, id: &str) {
@@ -221,6 +214,15 @@ async fn resume_polling_fences_stale_replayed_and_racing_actions_across_reopen()
         let intent = f.create("resume").await;
         f.submit(&intent.id).await;
         let stale = f.stop_polling(&intent.id).await;
+        assert_eq!(
+            stale.acquisition.reason,
+            Some(AcquisitionReason::ClientJobMissing)
+        );
+        assert_eq!(stale.lifecycle, ReviewLifecycle::Returned);
+        f.pipeline
+            .resume_polling(&f.settings, "owner", &intent.id, resume_request(&stale))
+            .await
+            .unwrap();
         let review = f.stop_polling(&intent.id).await;
         assert!(review.revision > stale.revision);
         assert!(matches!(
@@ -268,7 +270,7 @@ async fn resume_polling_fences_stale_replayed_and_racing_actions_across_reopen()
         assert_eq!(receipts, after);
         let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event = 'acquisition_polling_resumed' AND from_state = 'needs_review' AND to_state = 'running'")
             .bind(&intent.job_id).fetch_one(store.reader()).await.unwrap();
-        assert_eq!(audits, 1);
+        assert_eq!(audits, 2);
         assert_eq!(requests, f.server.seen.lock().unwrap().requests);
         pipeline.tick_job(settings, &intent.id).await.unwrap();
         let seen = f.server.seen.lock().unwrap();
@@ -290,6 +292,7 @@ async fn resume_polling_rejects_unsafe_evidence_without_client_io_or_audit() {
         "UPDATE acquisition_receipts SET external_id = 'invalid' WHERE acquisition_id = ? AND ordinal = 0",
         "UPDATE acquisition_receipts SET ordinal = -1 WHERE acquisition_id = ? AND ordinal = 0",
         "UPDATE acquisition_runs SET reason = 'uncertain_submission' WHERE id = ?",
+        "UPDATE acquisition_runs SET reason = 'download_failed' WHERE id = ?",
         "UPDATE acquisition_runs SET import_id = 'existing' WHERE id = ?",
         "UPDATE acquisition_runs SET source_root = destination_root, source_relative = 'owned.cbz' WHERE id = ?",
         "UPDATE acquisition_runs SET work_token = 'expired', work_until = 0 WHERE id = ?",
@@ -316,6 +319,13 @@ async fn resume_polling_rejects_unsafe_evidence_without_client_io_or_audit() {
             .execute(&mut *tx)
             .await
             .unwrap();
+        if change.contains("download_failed") {
+            sqlx::query("UPDATE jobs SET reason = 'download_failed' WHERE id = ?")
+                .bind(&intent.job_id)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
         tx.commit().await.unwrap();
         let review = f.pipeline.review("owner", &intent.id).await.unwrap();
         let requests = f.server.seen.lock().unwrap().requests.clone();
@@ -434,6 +444,161 @@ async fn resume_polling_never_treats_reopen_or_cleared_expired_claim_as_return()
         Err(PipelineError::Conflict)
     ));
     assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+}
+
+#[tokio::test]
+async fn resume_polling_rolls_back_when_either_guarded_update_changes_no_rows() {
+    for trigger in [
+        "CREATE TRIGGER ignore_resume BEFORE UPDATE ON acquisition_runs BEGIN SELECT RAISE(IGNORE); END",
+        "CREATE TRIGGER ignore_resume BEFORE UPDATE ON jobs BEGIN SELECT RAISE(IGNORE); END",
+    ] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("guarded-resume").await;
+        f.submit(&intent.id).await;
+        let review = f.stop_polling(&intent.id).await;
+        let mut tx = f.store.begin_write().await.unwrap();
+        sqlx::query(trigger).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        assert!(matches!(
+            f.pipeline
+                .resume_polling(&f.settings, "owner", &intent.id, resume_request(&review))
+                .await,
+            Err(PipelineError::Conflict)
+        ));
+        let after = f.pipeline.review("owner", &intent.id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&review).unwrap(),
+            serde_json::to_value(&after).unwrap()
+        );
+        let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
+            .bind(&intent.job_id)
+            .fetch_one(f.store.reader())
+            .await
+            .unwrap();
+        assert_eq!(state, "needs_review");
+        assert_eq!(f.server.seen.lock().unwrap().submissions, 1);
+    }
+}
+
+#[tokio::test]
+async fn resume_polling_http_success_matches_contract_and_cookie_origin_is_required() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("http-resume").await;
+    f.submit(&intent.id).await;
+    f.stop_polling(&intent.id).await;
+    let auth = crate::auth::AuthService::new(f.store.clone());
+    let login = auth
+        .setup("owner", "correct horse battery staple")
+        .await
+        .unwrap();
+    let mut tx = f.store.begin_write().await.unwrap();
+    sqlx::query("UPDATE acquisition_intents SET caller = ? WHERE id = ?")
+        .bind(&login.principal.user_id)
+        .bind(&intent.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE search_releases SET owner = ? WHERE handle = ?")
+        .bind(&login.principal.user_id)
+        .bind(&f.request.release_handle)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let app = crate::app::router_with_settings(
+        f.store.clone(),
+        "http://127.0.0.1:8787",
+        f.settings.clone(),
+    );
+    let review = f
+        .pipeline
+        .review(&login.principal.user_id, &intent.id)
+        .await
+        .unwrap();
+    let body = serde_json::json!({"revision": review.revision, "polling_fingerprint": review.polling_fingerprint}).to_string();
+    let requests = f.server.seen.lock().unwrap().requests.clone();
+    for origin in [
+        None,
+        Some("http://127.0.0.1:9999"),
+        Some("http://127.0.0.1:8787"),
+    ] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/acquisition/{}/resume-polling", intent.id))
+            .header(header::COOKIE, format!("library_session={}", login.token))
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from(body.clone())).unwrap())
+            .await
+            .unwrap();
+        if origin != Some("http://127.0.0.1:8787") {
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let error: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(error["error"]["code"], "invalid_origin");
+            assert_eq!(
+                f.pipeline
+                    .review(&login.principal.user_id, &intent.id)
+                    .await
+                    .unwrap()
+                    .revision,
+                review.revision
+            );
+            continue;
+        }
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../api/openapi.yaml")).unwrap();
+        let success = &contract["paths"]["/api/v1/acquisition/{id}/resume-polling"]["post"]["responses"]
+            ["202"];
+        assert_eq!(
+            success["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/Acquisition"
+        );
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            success["headers"]["Cache-Control"]["schema"]["const"]
+                .as_str()
+                .unwrap()
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let mut keys: Vec<_> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut required: Vec<_> = contract["components"]["schemas"]["Acquisition"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        keys.sort();
+        required.sort();
+        assert_eq!(keys, required);
+        assert!(body["updated_at"].is_i64());
+        assert_eq!(
+            body,
+            serde_json::json!({"id": intent.id, "job_id": intent.job_id, "unit_id": intent.unit_id, "state": "downloading", "reason": null, "submitted": true, "receipt_count": 2, "import_id": null, "destination_reserved": true, "updated_at": body["updated_at"]})
+        );
+    }
+    assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+    assert_eq!(f.server.seen.lock().unwrap().submissions, 1);
 }
 
 #[tokio::test]

@@ -408,13 +408,20 @@ async fn acquisition_review_states_and_resume_http_guards() {
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        assert_eq!(
-            f.get("/api/v1/acquisition/acq-own/review", Some(&f.read))
-                .await
-                .status(),
-            expected,
-            "{state}"
-        );
+        let response = f
+            .get("/api/v1/acquisition/acq-own/review", Some(&f.read))
+            .await;
+        assert_eq!(response.status(), expected, "{state}");
+        if expected == StatusCode::CONFLICT {
+            let error: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(error["error"]["code"], "acquisition_conflict");
+            assert_eq!(
+                error["error"]["message"],
+                "Acquisition is not reviewable, the snapshot changed, or polling recovery is not safe"
+            );
+        }
     }
     for (id, token, body, expected) in [
         (
@@ -444,6 +451,12 @@ async fn acquisition_review_states_and_resume_http_guards() {
         (
             "acq-own",
             Some(&f.manage),
+            r#"{"revision":-1,"polling_fingerprint":"old"}"#,
+            StatusCode::CONFLICT,
+        ),
+        (
+            "acq-own",
+            Some(&f.manage),
             r#"{"revision":0}"#,
             StatusCode::BAD_REQUEST,
         ),
@@ -462,5 +475,15 @@ async fn acquisition_review_states_and_resume_http_guards() {
             .await
             .unwrap();
         assert_eq!(response.status(), expected);
+        if expected == StatusCode::CONFLICT {
+            let error: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(error["error"]["code"], "acquisition_conflict");
+            assert_eq!(
+                error["error"]["message"],
+                "Acquisition is not reviewable, the snapshot changed, or polling recovery is not safe"
+            );
+        }
     }
 }
