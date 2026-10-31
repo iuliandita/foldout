@@ -873,6 +873,76 @@
           }
         ],
         "description": "Correct catalog metadata. Requires Manage access. Does not rename or move files, change parent identity, or remove file associations."
+      },
+      "delete": {
+        "operationId": "deleteUnit",
+        "description": "Requires Manage scope. Cookie-authenticated requests require a matching Origin. Referenced records are retained; library files and history are never deleted.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Record deleted"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Manage scope or matching Origin required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Catalog record not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Referenced record; message contains blocking record kinds and counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Operation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/wanted": {
@@ -2882,9 +2952,191 @@
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AcquisitionReview"}}},
             "headers": {"Cache-Control": {"schema": {"type": "string", "const": "no-store"}}}
           },
-          "default": {
-            "description": "Request failed",
-            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          "400": {
+            "description": "invalid_request: invalid input or mixed authentication methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized: authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "forbidden or invalid_origin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal_error: operation could not be completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "unavailable: authentication temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found: acquisition not found for caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "acquisition_conflict: acquisition is not in a terminal review state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/acquisition/{id}/resume-polling": {
+      "post": {
+        "operationId": "resumeAcquisitionPolling",
+        "description": "Requires manage scope. Revision and polling_fingerprint must match the terminal review snapshot. Only needs_review acquisitions stopped with client_unavailable, client_job_missing, or unknown_client_state are eligible; download_failed is excluded. Revalidates owned receipts, current configuration, complete actual-return lifecycle evidence and absence of import or outstanding work in one write transaction. Appends an audit event and resumes polling without client writes or resetting the submission fence. Replays return 409. Cookie authentication requires a matching Origin.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResumePolling"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Polling re-queued for the same owned receipts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Acquisition"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request: invalid input or mixed authentication methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized: authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "forbidden or invalid_origin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal_error: operation could not be completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "unavailable: authentication temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found: acquisition not found for caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "acquisition_conflict: stale or replayed snapshot, changed configuration or receipts, or polling recovery is unsafe",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -5253,6 +5505,76 @@
           }
         ],
         "description": "Correct catalog metadata. Requires Manage access. Does not rename or move files, change parent identity, or remove file associations."
+      },
+      "delete": {
+        "operationId": "deleteEdition",
+        "description": "Requires Manage scope. Cookie-authenticated requests require a matching Origin. Referenced records are retained; library files and history are never deleted.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Record deleted"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Manage scope or matching Origin required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Catalog record not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Referenced record; message contains blocking record kinds and counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Operation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/search/release-decisions": {
@@ -5605,6 +5927,78 @@
                 "schema": {
                   "type": "string",
                   "const": "no-store"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/provider-links/{id}": {
+      "delete": {
+        "operationId": "deleteProviderLink",
+        "description": "Requires Manage scope. Cookie-authenticated requests require a matching Origin. Referenced records are retained; library files and history are never deleted.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Record deleted"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Manage scope or matching Origin required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Catalog record not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Referenced record; message contains blocking record kinds and counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Operation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -7981,14 +8375,32 @@
           "duplicate_torrent"
         ]
       },
+      "ResumePolling": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "polling_fingerprint"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "polling_fingerprint": {
+            "type": "string"
+          }
+        }
+      },
       "AcquisitionReview": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["acquisition", "revision", "lifecycle"],
+        "required": ["acquisition", "revision", "lifecycle", "polling_fingerprint"],
         "properties": {
           "acquisition": {"$ref": "#/components/schemas/Acquisition"},
           "revision": {"type": "integer", "format": "int64", "minimum": 0, "description": "Latest job-event ID."},
-          "lifecycle": {"type": "string", "enum": ["returned", "unproven"], "description": "Claim returns only, not recovery validation."}
+          "lifecycle": {"type": "string", "enum": ["returned", "unproven"], "description": "Complete recorded claim returns only, not recovery eligibility; unproven includes historical, outstanding or malformed coverage."},
+          "polling_fingerprint": {"type": "string", "description": "Opaque receipt and configuration snapshot fence; pass unchanged to resume polling."}
         }
       },
       "Acquisition": {
@@ -8332,13 +8744,22 @@
             "format": "int64",
             "minimum": 900,
             "maximum": 31536000,
-            "description": "Fixed interval aligned to UTC epoch boundaries. Missed intervals coalesce into one search."
+            "description": "Fixed interval aligned to UTC epoch boundaries. Retained but unused for calendar schedules. Missed runs coalesce into one search at the next worker tick, never a backlog."
           },
           "enabled": {
             "type": "boolean"
           },
           "selection_policy": {
             "$ref": "#/components/schemas/SelectionPolicy"
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/MonitorSchedule"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "IANA timezone name from the bundled database. Defaults to UTC on creation. Interval schedules require UTC."
           }
         },
         "required": [
@@ -8350,7 +8771,7 @@
           "selection_policy"
         ],
         "additionalProperties": false,
-        "description": "All fields are required. Select an existing unit and an enabled, credential-configured Prowlarr integration with categories configured for the unit content type. Duplicate active caller/unit/integration scope conflicts. Query is trimmed when stored; the first run is scheduled at the next interval boundary."
+        "description": "Select an existing unit and an enabled, credential-configured Prowlarr integration with categories for its content type. Duplicate active caller/unit/integration scope conflicts. Query is trimmed. Schedule defaults to interval and timezone to UTC; the first run is the next occurrence strictly after creation. interval_seconds remains required for compatibility and is retained when using a calendar schedule."
       },
       "UpdateMonitor": {
         "type": "object",
@@ -8370,20 +8791,29 @@
             "format": "int64",
             "minimum": 900,
             "maximum": 31536000,
-            "description": "Fixed interval aligned to UTC epoch boundaries. Missed intervals coalesce into one search."
+            "description": "Fixed interval aligned to UTC epoch boundaries. Retained but unused for calendar schedules. Missed runs coalesce into one search at the next worker tick, never a backlog."
           },
           "enabled": {
             "type": "boolean"
           },
           "selection_policy": {
             "$ref": "#/components/schemas/SelectionPolicy"
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/MonitorSchedule"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "IANA timezone name from the bundled database. Defaults to UTC on creation. Interval schedules require UTC."
           }
         },
         "required": [
           "revision"
         ],
         "additionalProperties": false,
-        "description": "Revision must match the current view. Optional fields cannot be null. Unit and integration cannot change. Every update increments revision, clears candidates/reason, and schedules the next interval boundary."
+        "description": "Revision must match the current view. Optional fields cannot be null. A schedule replaces the entire schedule object; timezone can be edited independently. The resulting schedule and timezone must be valid together. Unit and integration cannot change. Every update increments revision, clears candidates/reason, and schedules the next occurrence. In-flight searches keep their leases but cannot publish results for an older revision."
       },
       "MonitorRevision": {
         "type": "object",
@@ -8497,13 +8927,13 @@
             "format": "int64",
             "minimum": 900,
             "maximum": 31536000,
-            "description": "Fixed interval aligned to UTC epoch boundaries. Missed intervals coalesce into one search."
+            "description": "Fixed interval aligned to UTC epoch boundaries. Retained but unused for calendar schedules. Missed runs coalesce into one search at the next worker tick, never a backlog."
           },
           "timezone": {
             "type": "string",
-            "enum": [
-              "UTC"
-            ]
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "IANA timezone name from the bundled database. Defaults to UTC on creation. Interval schedules require UTC."
           },
           "selection_policy": {
             "$ref": "#/components/schemas/SelectionPolicy"
@@ -8550,6 +8980,7 @@
               "source_not_configured",
               "source_unsupported",
               "search_storage_error",
+              "schedule_error",
               "source_unavailable",
               null
             ]
@@ -8568,6 +8999,9 @@
           "candidates_truncated": {
             "type": "boolean",
             "description": "Search results exceeded the stored candidate window or the provider reported additional results."
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/MonitorSchedule"
           }
         },
         "required": [
@@ -8589,7 +9023,8 @@
           "reason",
           "running",
           "candidates",
-          "candidates_truncated"
+          "candidates_truncated",
+          "schedule"
         ]
       },
       "MonitorPage": {
@@ -10038,6 +10473,80 @@
           "unit_kind"
         ],
         "additionalProperties": false
+      },
+      "MonitorSchedule": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "interval"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "daily"
+                ]
+              },
+              "time": {
+                "type": "string",
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+              }
+            },
+            "required": [
+              "kind",
+              "time"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "weekly"
+                ]
+              },
+              "time": {
+                "type": "string",
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+              },
+              "weekday": {
+                "type": "integer",
+                "enum": [
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7
+                ],
+                "description": "ISO weekday: Monday = 1, Sunday = 7."
+              }
+            },
+            "required": [
+              "kind",
+              "time",
+              "weekday"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "description": "Calendar times are HH:MM in the configured IANA timezone. A nonexistent time runs at the first valid instant that day; a repeated time runs once, at the first occurrence. Dates skipped entirely by a timezone transition are skipped. No cron syntax."
       }
     },
     "securitySchemes": {

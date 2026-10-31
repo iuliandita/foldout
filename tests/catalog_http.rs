@@ -618,3 +618,194 @@ async fn catalog_http_sorts_filters_availability_and_unit_kind() {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
     }
 }
+
+#[tokio::test]
+async fn catalog_deletes_enforce_scope_and_preserve_dependencies() {
+    let directory = tempfile::Builder::new()
+        .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let store = SqliteStore::open(directory.path()).await.unwrap();
+    let app = app::router(store.clone());
+    let setup = request(
+        &app,
+        "POST",
+        "/api/v1/auth/setup",
+        None,
+        json!({"username":"owner","password":"correct horse battery staple"}),
+    )
+    .await;
+    let session = setup.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let key = json(
+        request(
+            &app,
+            "POST",
+            "/api/v1/auth/keys",
+            Some(&session),
+            json!({"name":"reader","scope":"read"}),
+        )
+        .await,
+    )
+    .await["secret"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut tx = store.begin_write().await.unwrap();
+    for sql in [
+        "INSERT INTO publications(id,content_type,title,sort_title,created_at) VALUES ('p','comic','p','p',0)",
+        "INSERT INTO editions(id,publication_id,language) VALUES ('e','p','en')",
+        "INSERT INTO units(id,edition_id,label,kind) VALUES ('u','e','1','issue')",
+        "INSERT INTO editions(id,publication_id,language) VALUES ('empty-e','p','en')",
+        "INSERT INTO units(id,edition_id,label,kind) VALUES ('empty-u','empty-e','2','issue')",
+        "INSERT INTO provider_links(id,provider,external_id,edition_id) VALUES ('l','x','x','e')",
+        "INSERT INTO library_files(id,path,format,signature,size_bytes) VALUES ('f','original.cbz','cbz','x',1)",
+        "INSERT INTO file_coverage(library_file_id,unit_id,evidence) VALUES ('f','u','user_confirmed')",
+        "INSERT INTO integrations(id,kind,label,base_url,enabled,options,secret_version,secret_nonce,secret_ciphertext) VALUES ('i','prowlarr','i','http://localhost',0,'{}',1,zeroblob(24),zeroblob(28))",
+        "INSERT INTO monitors(id,owner,unit_id,integration_id,content_type,query,interval_seconds,selection_policy,enabled,next_run,last_state) VALUES ('m','owner','u','i','comic','q',900,'review_only',0,0,'disabled')",
+        "INSERT INTO provider_links(id,provider,external_id,unit_id) VALUES ('lu','x','unit','u')",
+        "INSERT INTO library_roots(id,label,path) VALUES ('root','root','/fixture')",
+        "INSERT INTO scan_entries(id,root_id,relative_path,state) VALUES ('entry','root','file','skipped')",
+        "INSERT INTO import_previews(id,entry_id,unit_id,signature,source_size,source_mtime_ns,state,created_at) VALUES ('preview','entry','u','x',1,1,'pending',0)",
+        "INSERT INTO import_operations(id,source_root,destination_root,destination_relative,destination_path,unit_id,request_json,identity_json,phase) VALUES ('import','root','root','destination','/fixture/destination','u','{}','{}','planned')",
+        "INSERT INTO release_selection_policies(id,owner,unit_id,revision,mode,fingerprint) VALUES ('policy','owner','u',1,'review_only',printf('%064d',0))",
+        "INSERT INTO release_assessments(id,owner,unit_id,release_handle,integration_id,source_fingerprint,indexer_id,guid_digest,content_type,protocol,policy_id,policy_fingerprint,target_fingerprint,evidence_fingerprint,evidence_json,reasons_json,eligibility,created_at,expires_at) VALUES ('assessment','owner','u','r','i',printf('%064d',0),1,printf('%064d',0),'comic','usenet','policy',printf('%064d',0),printf('%064d',0),printf('%064d',0),'{}','[]','unknown',0,1)",
+        "INSERT INTO direct_selections(handle,owner,integration_id,source_fingerprint,post_path) VALUES ('direct','owner','i','x','/post')",
+        "INSERT INTO direct_acquisitions(id,owner,idempotency_key,request_fingerprint,link_handle,unit_id,download_root_id,destination_root_id,destination_relative,import_id,state,canceled_at) VALUES ('direct-run','owner','direct','x','direct','u','root','root','other','other','canceled',1)",
+        "INSERT INTO jobs(id,kind,scope,payload,payload_fingerprint,state,created_at,updated_at) VALUES ('j','acquisition.intent','x','{}','x','completed',0,0)",
+        "INSERT INTO acquisition_intents(id,caller,idempotency_key,request,request_fingerprint,job_id,created_at) VALUES ('a','owner','a','{\"unit_id\":\"u\"}','x','j',0)",
+        "INSERT INTO search_releases(handle,owner,integration_id,source_fingerprint,indexer_id,guid_digest,content_type,protocol,query,search_offset,search_limit,expires_at) VALUES ('r','owner','i','x',1,'x','comic','usenet','q',0,1,1)",
+        "INSERT INTO acquisition_runs(id,release_handle,client_id,client_fingerprint,client_kind,category,unit_id,state) VALUES ('a','r','i','x','sabnzbd','x','u','completed')",
+    ] {
+        sqlx::query(sql).execute(&mut *tx).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    for path in [
+        "/api/v1/provider-links/l",
+        "/api/v1/editions/e",
+        "/api/v1/units/u",
+    ] {
+        assert_eq!(
+            request(&app, "DELETE", path, None, json!(null))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&app, "DELETE", path, Some(&key), json!(null))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            request(
+                &app,
+                "DELETE",
+                &format!("{path}-missing"),
+                Some(&session),
+                json!(null)
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let no_origin = Request::builder()
+        .method("DELETE")
+        .uri("/api/v1/provider-links/l")
+        .header(header::COOKIE, &session)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(no_origin).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = request(
+        &app,
+        "DELETE",
+        "/api/v1/editions/e",
+        Some(&session),
+        json!(null),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let message = json(response).await["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("units: 1") && message.contains("provider_links: 1"));
+    let response = request(
+        &app,
+        "DELETE",
+        "/api/v1/units/u",
+        Some(&session),
+        json!(null),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let message = json(response).await["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for kind in [
+        "file_coverage: 1",
+        "monitors: 1",
+        "acquisition_runs: 1",
+        "provider_links: 1",
+        "import_previews: 1",
+        "import_operations: 1",
+        "direct_acquisitions: 1",
+        "release_selection_policies: 1",
+        "release_assessments: 1",
+    ] {
+        assert!(message.contains(kind), "{message}");
+    }
+    for table in [
+        "units",
+        "editions",
+        "file_coverage",
+        "library_files",
+        "monitors",
+        "acquisition_intents",
+    ] {
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                .fetch_one(store.reader())
+                .await
+                .unwrap();
+        assert_eq!(
+            count,
+            if table == "units" || table == "editions" {
+                2
+            } else {
+                1
+            },
+            "{table}"
+        );
+    }
+    for path in ["/api/v1/units/empty-u", "/api/v1/editions/empty-e"] {
+        assert_eq!(
+            request(&app, "DELETE", path, Some(&session), json!(null))
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+    assert_eq!(
+        request(
+            &app,
+            "DELETE",
+            "/api/v1/provider-links/l",
+            Some(&session),
+            json!(null)
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+}

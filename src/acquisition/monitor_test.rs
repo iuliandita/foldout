@@ -3,6 +3,7 @@ use crate::{
     search::mock,
     settings::{CreateIntegration, EncryptionKey, SecretUpdate},
 };
+use axum::response::IntoResponse;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -40,15 +41,22 @@ impl Fixture {
         let router = axum::Router::new().route("/7/api", axum::routing::get(
             |axum::extract::State((mode, calls)): axum::extract::State<(Arc<AtomicUsize>, Arc<AtomicUsize>)>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String,String>>| async move {
                 if q.get("t").is_some_and(|t| t == "caps") {
-                    return (axum::http::StatusCode::OK, "<caps><limits max=\"100\"/><searching><search available=\"yes\" supportedParams=\"q\"/></searching><categories><category id=\"7030\"/></categories></caps>".to_string());
+                    return (axum::http::StatusCode::OK, "<caps><limits max=\"100\"/><searching><search available=\"yes\" supportedParams=\"q\"/></searching><categories><category id=\"7030\"/></categories></caps>".to_string()).into_response();
                 }
                 calls.fetch_add(1, Ordering::SeqCst);
                 while mode.load(Ordering::SeqCst) == 3 {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
-                if mode.load(Ordering::SeqCst) == 1 { return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "private failure".into()); }
+                if mode.load(Ordering::SeqCst) == 1 { return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "private failure").into_response(); }
+                if let Some(retry_after) = match mode.load(Ordering::SeqCst) {
+                    4 => Some("300000000000"),
+                    5 => Some("Fri, 31 Dec 9999 23:59:59 GMT"),
+                    _ => None,
+                } {
+                    return (axum::http::StatusCode::TOO_MANY_REQUESTS, [("retry-after", retry_after)], "").into_response();
+                }
                 let item = if mode.load(Ordering::SeqCst) == 2 { "<item><title>Ambiguous issue</title><guid>https://private.invalid/token=secret</guid><enclosure url=\"http://localhost/private?secret=hidden\" length=\"512\" type=\"application/x-nzb\"/><newznab:attr name=\"category\" value=\"7030\"/></item>" } else { "" };
-                (axum::http::StatusCode::OK, format!("<rss xmlns:newznab=\"http://www.newznab.com/DTD/2010/feeds/attributes/\"><channel>{item}</channel></rss>"))
+                (axum::http::StatusCode::OK, format!("<rss xmlns:newznab=\"http://www.newznab.com/DTD/2010/feeds/attributes/\"><channel>{item}</channel></rss>")).into_response()
             }
         )).with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -91,6 +99,8 @@ impl Fixture {
             integration_id: self.source.clone(),
             query: "Fixture 12.5".into(),
             interval_seconds: 900,
+            schedule: MonitorSchedule::Interval,
+            timezone: "UTC".into(),
             enabled: true,
             selection_policy: SelectionPolicy::ReviewOnly,
         }
@@ -102,6 +112,379 @@ impl Fixture {
             .await
             .unwrap()
     }
+}
+
+fn timestamp(value: &str) -> i64 {
+    value.parse::<jiff::Timestamp>().unwrap().as_second()
+}
+
+#[test]
+fn calendar_boundaries_handle_dst_and_local_dates_without_duplicate_folds() {
+    for (zone, time, weekday, after, expected) in [
+        (
+            "Europe/Berlin",
+            "02:30",
+            None,
+            "2026-03-29T00:00:00Z",
+            "2026-03-29T01:00:00Z",
+        ),
+        (
+            "Europe/Berlin",
+            "02:30",
+            Some(7),
+            "2026-03-29T00:00:00Z",
+            "2026-03-29T01:00:00Z",
+        ),
+        (
+            "Europe/Berlin",
+            "02:30",
+            None,
+            "2026-03-29T01:00:00Z",
+            "2026-03-30T00:30:00Z",
+        ),
+        (
+            "Europe/Berlin",
+            "02:30",
+            None,
+            "2026-10-25T00:00:00Z",
+            "2026-10-25T00:30:00Z",
+        ),
+        (
+            "Europe/Berlin",
+            "02:30",
+            None,
+            "2026-10-25T00:30:00Z",
+            "2026-10-26T01:30:00Z",
+        ),
+        (
+            "Europe/Berlin",
+            "02:30",
+            Some(7),
+            "2026-10-25T00:31:00Z",
+            "2026-11-01T01:30:00Z",
+        ),
+        (
+            "America/New_York",
+            "02:30",
+            None,
+            "2026-03-08T05:00:00Z",
+            "2026-03-08T07:00:00Z",
+        ),
+        (
+            "America/New_York",
+            "01:30",
+            None,
+            "2026-11-01T04:00:00Z",
+            "2026-11-01T05:30:00Z",
+        ),
+        (
+            "Australia/Lord_Howe",
+            "02:15",
+            None,
+            "2026-10-03T14:00:00Z",
+            "2026-10-03T15:30:00Z",
+        ),
+        (
+            "Australia/Lord_Howe",
+            "01:45",
+            None,
+            "2026-04-04T13:00:00Z",
+            "2026-04-04T14:45:00Z",
+        ),
+        (
+            "Asia/Kathmandu",
+            "00:15",
+            None,
+            "2026-01-01T18:00:00Z",
+            "2026-01-01T18:30:00Z",
+        ),
+        (
+            "UTC",
+            "00:00",
+            Some(1),
+            "2026-12-31T23:59:59Z",
+            "2027-01-04T00:00:00Z",
+        ),
+        (
+            "Pacific/Apia",
+            "12:00",
+            None,
+            "2011-12-30T00:00:00Z",
+            "2011-12-30T22:00:00Z",
+        ),
+        (
+            "Pacific/Apia",
+            "12:00",
+            Some(5),
+            "2011-12-30T00:00:00Z",
+            "2012-01-05T22:00:00Z",
+        ),
+    ] {
+        let schedule = match weekday {
+            Some(weekday) => MonitorSchedule::Weekly {
+                time: time.into(),
+                weekday,
+            },
+            None => MonitorSchedule::Daily { time: time.into() },
+        };
+        assert_eq!(
+            schedule.next_run(timestamp(after), 900, zone).unwrap(),
+            timestamp(expected),
+            "{schedule:?} {zone} after {after}"
+        );
+    }
+    for (after, interval, expected) in [
+        (0, 900, 900),
+        (899, 900, 900),
+        (900, 900, 1800),
+        (1000, 3600, 3600),
+    ] {
+        assert_eq!(
+            MonitorSchedule::Interval
+                .next_run(after, interval, "UTC")
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_calendar_inputs_do_not_mutate_the_monitor() {
+    let f = Fixture::new().await;
+    let item = f.monitor.create("owner", f.request()).await.unwrap();
+    for (schedule, zone) in [
+        (
+            MonitorSchedule::Daily {
+                time: "24:00".into(),
+            },
+            "UTC",
+        ),
+        (
+            MonitorSchedule::Daily {
+                time: "09:60".into(),
+            },
+            "UTC",
+        ),
+        (
+            MonitorSchedule::Daily {
+                time: "9:00".into(),
+            },
+            "UTC",
+        ),
+        (
+            MonitorSchedule::Daily {
+                time: "09:00:00".into(),
+            },
+            "UTC",
+        ),
+        (
+            MonitorSchedule::Daily {
+                time: "09:00".into(),
+            },
+            "Invalid/Zone",
+        ),
+        (
+            MonitorSchedule::Daily {
+                time: "09:00".into(),
+            },
+            "+02:00",
+        ),
+        (MonitorSchedule::Interval, "Europe/Berlin"),
+        (
+            MonitorSchedule::Weekly {
+                time: "09:00".into(),
+                weekday: 0,
+            },
+            "UTC",
+        ),
+        (
+            MonitorSchedule::Weekly {
+                time: "09:00".into(),
+                weekday: 8,
+            },
+            "UTC",
+        ),
+    ] {
+        assert!(
+            matches!(
+                f.monitor
+                    .update(
+                        "owner",
+                        &item.id,
+                        UpdateMonitor {
+                            revision: item.revision,
+                            schedule: Some(schedule.clone()),
+                            timezone: Some(zone.into()),
+                            ..Default::default()
+                        }
+                    )
+                    .await,
+                Err(MonitorError::Invalid)
+            ),
+            "{schedule:?} {zone}"
+        );
+        let mut request = f.request();
+        request.schedule = schedule;
+        request.timezone = zone.into();
+        assert!(matches!(
+            f.monitor.create("other", request).await,
+            Err(MonitorError::Invalid)
+        ));
+    }
+    for json in [
+        r#"{"revision":1,"schedule":null}"#,
+        r#"{"revision":1,"timezone":null}"#,
+        r#"{"revision":1,"schedule":{"kind":"cron","time":"09:00"}}"#,
+        r#"{"revision":1,"schedule":{"kind":"daily","time":"09:00","weekday":1}}"#,
+        r#"{"revision":1,"schedule":{"kind":"weekly","time":"09:00"}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<UpdateMonitor>(json).is_err(),
+            "{json}"
+        );
+    }
+    let current = f.monitor.get("owner", &item.id).await.unwrap();
+    assert_eq!(current.revision, item.revision);
+    assert_eq!(current.next_run, item.next_run);
+    assert_eq!(current.schedule, MonitorSchedule::Interval);
+    assert_eq!(current.timezone, "UTC");
+}
+
+#[tokio::test]
+async fn calendar_restart_coalesces_missed_runs_and_schedule_edits_keep_leases() {
+    for schedule in [
+        MonitorSchedule::Daily {
+            time: "02:30".into(),
+        },
+        MonitorSchedule::Weekly {
+            time: "02:30".into(),
+            weekday: 7,
+        },
+    ] {
+        let f = Fixture::new().await;
+        let mut request = f.request();
+        request.schedule = schedule.clone();
+        request.timezone = "Europe/Berlin".into();
+        let item = f.monitor.create("owner", request).await.unwrap();
+        let mut tx = f.store.begin_write().await.unwrap();
+        sqlx::query("UPDATE monitors SET next_run = unixepoch() - 2592000 WHERE id = ?")
+            .bind(&item.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        mock::allow_search(&f.store).await;
+        let worker = Monitor::new(
+            SqliteStore::open(f.dir.path()).await.unwrap(),
+            f.settings.clone(),
+        );
+        assert!(worker.tick().await.unwrap());
+        assert!(!worker.tick().await.unwrap());
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+        let current = worker.get("owner", &item.id).await.unwrap();
+        assert_eq!(current.schedule, schedule);
+        assert_eq!(current.timezone, "Europe/Berlin");
+        assert!(current.next_run > now());
+        let due = f.due(&current).await;
+        let claim = worker.claim().await.unwrap().unwrap();
+        let edited = worker
+            .update(
+                "owner",
+                &item.id,
+                UpdateMonitor {
+                    revision: due.revision,
+                    schedule: Some(MonitorSchedule::Weekly {
+                        time: "11:15".into(),
+                        weekday: 1,
+                    }),
+                    timezone: Some("America/New_York".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(edited.running);
+        assert!(matches!(
+            worker
+                .update(
+                    "owner",
+                    &item.id,
+                    UpdateMonitor {
+                        revision: due.revision,
+                        timezone: Some("UTC".into()),
+                        ..Default::default()
+                    }
+                )
+                .await,
+            Err(MonitorError::Conflict)
+        ));
+        f.due(&edited).await;
+        assert!(worker.claim().await.unwrap().is_none());
+        let result = Ok(Releases {
+            releases: vec![],
+            offset: 0,
+            total: None,
+            next_offset: None,
+            target: None,
+        });
+        assert!(!worker.finish(&claim, result).await.unwrap());
+        assert!(worker.claim().await.unwrap().is_some());
+        let current = worker.get("owner", &item.id).await.unwrap();
+        assert_eq!(current.timezone, "America/New_York");
+        assert!(current.candidates.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn calendar_migration_preserves_legacy_rows_and_rejects_inconsistent_schedules() {
+    use sqlx::Connection;
+    let mut db = sqlx::SqliteConnection::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let migrations = sqlx::migrate!("./migrations");
+    migrations.run_to(18, &mut db).await.unwrap();
+    for statement in [
+        "INSERT INTO publications(id,content_type,title,sort_title) VALUES('p','comic','Fixture','fixture')",
+        "INSERT INTO editions(id,publication_id,language) VALUES('e','p','en')",
+        "INSERT INTO units(id,edition_id,label,kind) VALUES('u','e','1','issue')",
+        "INSERT INTO integrations(id,kind,label,base_url,enabled,options,secret_version,secret_nonce,secret_ciphertext) VALUES('i','prowlarr','Fixture','http://localhost',1,'{}',1,zeroblob(24),zeroblob(28))",
+        "INSERT INTO monitors(id,owner,unit_id,integration_id,content_type,query,interval_seconds,selection_policy,enabled,next_run,last_state,lease_token,lease_until) VALUES('m','owner','u','i','comic','q',900,'review_only',1,123,'scheduled','lease',456)",
+    ] {
+        sqlx::query(statement).execute(&mut db).await.unwrap();
+    }
+    migrations.run(&mut db).await.unwrap();
+    let row = sqlx::query("SELECT * FROM monitors WHERE id = 'm'")
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        MonitorSchedule::decode(&row).unwrap(),
+        MonitorSchedule::Interval
+    );
+    assert_eq!(row.get::<String, _>("timezone"), "UTC");
+    assert_eq!(row.get::<i64, _>("next_run"), 123);
+    assert_eq!(row.get::<i64, _>("revision"), 1);
+    assert_eq!(row.get::<String, _>("lease_token"), "lease");
+    assert_eq!(row.get::<i64, _>("lease_until"), 456);
+    for statement in [
+        "UPDATE monitors SET schedule_kind = 'cron' WHERE id = 'm'",
+        "UPDATE monitors SET timezone = '' WHERE id = 'm'",
+        "UPDATE monitors SET timezone = 'Europe/Berlin' WHERE id = 'm'",
+        "UPDATE monitors SET schedule_time = '09:00' WHERE id = 'm'",
+        "UPDATE monitors SET schedule_kind = 'daily' WHERE id = 'm'",
+        "UPDATE monitors SET schedule_kind = 'daily', schedule_time = '24:00' WHERE id = 'm'",
+        "UPDATE monitors SET schedule_kind = 'daily', schedule_time = '09:00', schedule_weekday = 1 WHERE id = 'm'",
+        "UPDATE monitors SET schedule_kind = 'weekly', schedule_time = '09:00' WHERE id = 'm'",
+        "UPDATE monitors SET schedule_kind = 'weekly', schedule_time = '09:00', schedule_weekday = 8 WHERE id = 'm'",
+        "UPDATE monitors SET schedule_kind = 'weekly', schedule_time = '09:00', schedule_weekday = 1.5 WHERE id = 'm'",
+    ] {
+        assert!(
+            sqlx::query(statement).execute(&mut db).await.is_err(),
+            "{statement}"
+        );
+    }
+    sqlx::query("UPDATE monitors SET schedule_kind = 'weekly', schedule_time = '09:00', schedule_weekday = 1, timezone = 'Europe/Berlin' WHERE id = 'm'")
+        .execute(&mut db).await.unwrap();
 }
 
 #[tokio::test]
@@ -300,7 +683,14 @@ async fn validates_scope_policy_pagination_and_optimistic_revision() {
         f.monitor.create("owner", request).await,
         Err(MonitorError::Invalid)
     ));
-    let item = f.monitor.create("owner", f.request()).await.unwrap();
+    let legacy = serde_json::from_value::<CreateMonitor>(serde_json::json!({
+        "unit_id": UNIT, "integration_id": f.source, "query": "Fixture 12.5",
+        "interval_seconds": 900, "enabled": true, "selection_policy": "review_only"
+    }))
+    .unwrap();
+    let item = f.monitor.create("owner", legacy).await.unwrap();
+    assert_eq!(item.schedule, MonitorSchedule::Interval);
+    assert_eq!(item.timezone, "UTC");
     assert!(matches!(
         f.monitor.create("owner", f.request()).await,
         Err(MonitorError::Conflict)
@@ -330,31 +720,263 @@ async fn validates_scope_policy_pagination_and_optimistic_revision() {
 }
 
 #[tokio::test]
-async fn cooldown_survives_restart_and_defers_without_contacting_source() {
+async fn calendar_timezones_are_canonical_on_create_and_update() {
+    for schedule in [
+        MonitorSchedule::Daily {
+            time: "09:00".into(),
+        },
+        MonitorSchedule::Weekly {
+            time: "09:00".into(),
+            weekday: 1,
+        },
+    ] {
+        let f = Fixture::new().await;
+        let mut request = f.request();
+        request.schedule = schedule;
+        request.timezone = "europe/berlin".into();
+        let item = f.monitor.create("owner", request).await.unwrap();
+        assert_eq!(item.timezone, "Europe/Berlin");
+        let updated = f
+            .monitor
+            .update(
+                "owner",
+                &item.id,
+                UpdateMonitor {
+                    revision: item.revision,
+                    timezone: Some("america/NEW_YORK".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.timezone, "America/New_York");
+        assert_eq!(
+            f.monitor.get("owner", &item.id).await.unwrap().timezone,
+            "America/New_York"
+        );
+        let mut request = f.request();
+        request.timezone = "utc".into();
+        assert!(matches!(
+            f.monitor.create("other", request).await,
+            Err(MonitorError::Invalid)
+        ));
+        assert!(matches!(
+            f.monitor
+                .update(
+                    "owner",
+                    &item.id,
+                    UpdateMonitor {
+                        revision: updated.revision,
+                        schedule: Some(MonitorSchedule::Interval),
+                        timezone: Some("utc".into()),
+                        ..Default::default()
+                    }
+                )
+                .await,
+            Err(MonitorError::Invalid)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn huge_retry_after_and_legacy_cooldowns_are_safe_after_restart() {
+    for schedule in [
+        MonitorSchedule::Interval,
+        MonitorSchedule::Daily {
+            time: "09:00".into(),
+        },
+        MonitorSchedule::Weekly {
+            time: "09:00".into(),
+            weekday: 1,
+        },
+    ] {
+        for mode in [4, 5] {
+            let f = Fixture::new().await;
+            f.mode.store(mode, Ordering::SeqCst);
+            let mut request = f.request();
+            request.schedule = schedule.clone();
+            let item = f.monitor.create("owner", request).await.unwrap();
+            f.due(&item).await;
+            assert!(f.monitor.tick().await.unwrap());
+            let current = f.monitor.get("owner", &item.id).await.unwrap();
+            assert_eq!(current.reason.as_deref(), Some("source_cooldown"));
+            assert!(!current.running);
+            assert!(current.next_run >= now() + 30 * 86400 - 60);
+            assert!(current.next_run <= now() + 37 * 86400);
+            assert_eq!(
+                schedule.next_run(current.next_run - 1, 900, "UTC").unwrap(),
+                current.next_run
+            );
+            let cooldown: i64 = sqlx::query_scalar("SELECT MAX(next_at) FROM search_cooldowns")
+                .fetch_one(f.store.reader())
+                .await
+                .unwrap();
+            assert!(cooldown <= now() + 30 * 86400);
+            let mut tx = f.store.begin_write().await.unwrap();
+            sqlx::query("UPDATE search_cooldowns SET next_at = 9223372036854775807")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            f.monitor
+                .run("owner", &item.id, current.revision)
+                .await
+                .unwrap();
+            let worker = Monitor::new(
+                SqliteStore::open(f.dir.path()).await.unwrap(),
+                f.settings.clone(),
+            );
+            assert!(worker.tick().await.unwrap());
+            assert!(!worker.tick().await.unwrap());
+            let current = worker.get("owner", &item.id).await.unwrap();
+            assert_eq!(current.reason.as_deref(), Some("source_cooldown"));
+            assert!(!current.running);
+            assert!(current.next_run >= now() + 30 * 86400 - 60);
+            assert!(current.next_run <= now() + 37 * 86400);
+            assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn schedule_failure_records_error_and_releases_the_lease() {
     let f = Fixture::new().await;
-    let item = f.monitor.create("owner", f.request()).await.unwrap();
+    f.mode.store(2, Ordering::SeqCst);
+    let mut request = f.request();
+    request.schedule = MonitorSchedule::Daily {
+        time: "09:00".into(),
+    };
+    let item = f.monitor.create("owner", request).await.unwrap();
     f.due(&item).await;
-    f.monitor.tick().await.unwrap();
-    let item = f.monitor.get("owner", &item.id).await.unwrap();
-    f.monitor
-        .run("owner", &item.id, item.revision)
-        .await
-        .unwrap();
     let mut tx = f.store.begin_write().await.unwrap();
-    sqlx::query("UPDATE search_cooldowns SET next_at = unixepoch() + 3601")
+    sqlx::query("UPDATE monitors SET timezone = 'Invalid/Zone' WHERE id = ?")
+        .bind(&item.id)
         .execute(&mut *tx)
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    let reopened = SqliteStore::open(f.dir.path()).await.unwrap();
-    let worker = Monitor::new(reopened, f.settings.clone());
+    assert!(f.monitor.tick().await.unwrap());
+    let current = f.monitor.get("owner", &item.id).await.unwrap();
+    assert_eq!(current.last_state, "source_error");
+    assert_eq!(current.reason.as_deref(), Some("schedule_error"));
+    assert!(!current.running);
+    assert!(current.candidates.is_empty());
+    assert!(!current.candidates_truncated);
+    assert!(current.next_run > now());
+    assert!(current.next_run <= now() + 900);
+    let released: bool = sqlx::query_scalar(
+        "SELECT lease_token IS NULL AND lease_until IS NULL FROM monitors WHERE id = ?",
+    )
+    .bind(&item.id)
+    .fetch_one(f.store.reader())
+    .await
+    .unwrap();
+    assert!(released);
+    f.due(&current).await;
+    let worker = Monitor::new(
+        SqliteStore::open(f.dir.path()).await.unwrap(),
+        f.settings.clone(),
+    );
     assert!(worker.tick().await.unwrap());
-    let item = worker.get("owner", &item.id).await.unwrap();
-    assert_eq!(item.last_state, "source_error");
-    assert_eq!(item.reason.as_deref(), Some("source_cooldown"));
-    assert!(item.next_run >= now() + 3599);
-    assert_eq!(item.next_run % 900, 0);
-    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert!(!worker.tick().await.unwrap());
+    assert_eq!(
+        worker
+            .get("owner", &item.id)
+            .await
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("schedule_error")
+    );
+}
+
+#[tokio::test]
+async fn backwards_clock_does_not_repeat_the_claimed_occurrence() {
+    for schedule in [
+        MonitorSchedule::Interval,
+        MonitorSchedule::Daily {
+            time: "09:00".into(),
+        },
+        MonitorSchedule::Weekly {
+            time: "09:00".into(),
+            weekday: 1,
+        },
+    ] {
+        let f = Fixture::new().await;
+        let mut request = f.request();
+        request.schedule = schedule.clone();
+        let item = f.monitor.create("owner", request).await.unwrap();
+        f.due(&item).await;
+        let mut claim = f.monitor.claim().await.unwrap().unwrap();
+        // The claim was made before the clock stepped back.
+        claim.item.next_run = schedule.next_run(now() + 7 * 86400, 900, "UTC").unwrap();
+        assert!(
+            f.monitor
+                .finish(
+                    &claim,
+                    Ok(Releases {
+                        releases: vec![],
+                        offset: 0,
+                        total: None,
+                        next_offset: None,
+                        target: None,
+                    })
+                )
+                .await
+                .unwrap()
+        );
+        let current = f.monitor.get("owner", &item.id).await.unwrap();
+        assert_eq!(
+            current.next_run,
+            schedule.next_run(claim.item.next_run, 900, "UTC").unwrap()
+        );
+        assert!(current.next_run > claim.item.next_run);
+        assert!(!current.running);
+    }
+}
+
+#[tokio::test]
+async fn cooldown_survives_restart_and_defers_without_contacting_source() {
+    for schedule in [
+        MonitorSchedule::Interval,
+        MonitorSchedule::Daily {
+            time: "09:00".into(),
+        },
+        MonitorSchedule::Weekly {
+            time: "09:00".into(),
+            weekday: 1,
+        },
+    ] {
+        let f = Fixture::new().await;
+        let mut request = f.request();
+        request.schedule = schedule.clone();
+        let item = f.monitor.create("owner", request).await.unwrap();
+        f.due(&item).await;
+        f.monitor.tick().await.unwrap();
+        let item = f.monitor.get("owner", &item.id).await.unwrap();
+        f.monitor
+            .run("owner", &item.id, item.revision)
+            .await
+            .unwrap();
+        let mut tx = f.store.begin_write().await.unwrap();
+        sqlx::query("UPDATE search_cooldowns SET next_at = unixepoch() + 3601")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let reopened = SqliteStore::open(f.dir.path()).await.unwrap();
+        let worker = Monitor::new(reopened, f.settings.clone());
+        assert!(worker.tick().await.unwrap());
+        let item = worker.get("owner", &item.id).await.unwrap();
+        assert_eq!(item.last_state, "source_error");
+        assert_eq!(item.reason.as_deref(), Some("source_cooldown"));
+        assert!(item.next_run >= now() + 3599);
+        assert_eq!(
+            schedule.next_run(item.next_run - 1, 900, "UTC").unwrap(),
+            item.next_run
+        );
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[tokio::test]
@@ -479,7 +1101,7 @@ async fn api_scopes_owner_pagination_revisions_and_schedule_only_run() {
             origin: Arc::from("http://localhost"),
         },
     });
-    let json = serde_json::json!({"unit_id":UNIT,"integration_id":f.source,"query":"Fixture","interval_seconds":900,"enabled":true,"selection_policy":"review_only"}).to_string();
+    let json = serde_json::json!({"unit_id":UNIT,"integration_id":f.source,"query":"Fixture","interval_seconds":900,"schedule":{"kind":"weekly","time":"02:30","weekday":7},"timezone":"Europe/Berlin","enabled":true,"selection_policy":"review_only"}).to_string();
     let req = |method: &str, uri: &str, key: Option<&str>, body: &str| {
         let mut r = Request::builder()
             .method(method)
@@ -516,6 +1138,11 @@ async fn api_scopes_owner_pagination_revisions_and_schedule_only_run() {
     let item: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let id = item["id"].as_str().unwrap();
     assert_eq!(item["integration_label"], "Monitor fixture");
+    assert_eq!(
+        item["schedule"],
+        serde_json::json!({"kind":"weekly","time":"02:30","weekday":7})
+    );
+    assert_eq!(item["timezone"], "Europe/Berlin");
     assert!(f.monitor.get(&login.principal.user_id, id).await.is_ok());
     assert!(matches!(
         f.monitor.get(&manage.id, id).await,

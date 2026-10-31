@@ -124,12 +124,20 @@ pub struct AcquisitionReview {
     pub acquisition: Acquisition,
     pub revision: i64,
     pub lifecycle: ReviewLifecycle,
+    pub polling_fingerprint: String,
 }
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewLifecycle {
     Returned,
     Unproven,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumePolling {
+    pub revision: i64,
+    pub polling_fingerprint: String,
 }
 
 #[derive(Clone)]
@@ -274,71 +282,103 @@ impl Pipeline {
 
     pub async fn review(&self, owner: &str, id: &str) -> Result<AcquisitionReview, PipelineError> {
         let mut tx = self.store.reader().begin().await?;
-        let row = sqlx::query("SELECT a.*, i.job_id, (SELECT COUNT(*) FROM acquisition_receipts r WHERE r.acquisition_id = a.id) AS receipt_count FROM acquisition_runs a JOIN acquisition_intents i ON i.id = a.id WHERE a.id = ? AND i.caller = ?")
-            .bind(id).bind(owner).fetch_optional(&mut *tx).await?.ok_or(PipelineError::NotFound)?;
-        if !matches!(
-            row.try_get::<&str, _>("state")?,
-            "needs_review" | "downloaded" | "completed" | "canceled"
-        ) {
-            return Err(PipelineError::Conflict);
-        }
-        let no_claim = row.try_get::<Option<String>, _>("work_token")?.is_none()
-            && row.try_get::<Option<i64>, _>("work_until")?.is_none();
-        let events =
-            sqlx::query("SELECT id, event, worker FROM job_events WHERE job_id = ? ORDER BY id")
-                .bind(row.try_get::<&str, _>("job_id")?)
-                .fetch_all(&mut *tx)
-                .await?;
-        let revision = events
-            .last()
-            .map(|e| e.try_get("id"))
-            .transpose()?
-            .unwrap_or(0);
-        let mut valid = no_claim && events.len() >= 2;
-        let mut started = std::collections::HashSet::new();
-        let mut returned = std::collections::HashSet::new();
-        for (index, event) in events.iter().enumerate() {
-            let name: &str = event.try_get("event")?;
-            let worker: Option<String> = event.try_get("worker")?;
-            if index == 0 {
-                valid &= name == "enqueue" && worker.is_none();
-            }
-            if index == 1 {
-                valid &= name == "acquisition_lifecycle_v1" && worker.is_none();
-            }
-            match name {
-                "acquisition_lifecycle_v1" => valid &= index == 1 && worker.is_none(),
-                "acquisition_claim_started" | "acquisition_claim_returned" => {
-                    let Some(worker) = worker else {
-                        valid = false;
-                        continue;
-                    };
-                    valid &= index > 1
-                        && worker.len() == 43
-                        && worker
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-                    if name == "acquisition_claim_started" {
-                        valid &= started.insert(worker);
-                    } else {
-                        valid &= started.contains(&worker) && returned.insert(worker);
-                    }
-                }
-                _ => {}
-            }
-        }
-        valid &= started == returned;
+        let (row, revision, lifecycle) = review_in(&mut tx, owner, id).await?;
+        let polling_fingerprint = polling_fingerprint_in(&mut tx, id).await?;
         let acquisition = view(row)?;
         tx.commit().await?;
         Ok(AcquisitionReview {
             acquisition,
             revision,
-            lifecycle: if valid {
-                ReviewLifecycle::Returned
-            } else {
-                ReviewLifecycle::Unproven
-            },
+            lifecycle,
+            polling_fingerprint,
         })
+    }
+
+    pub async fn resume_polling(
+        &self,
+        settings: &Settings,
+        owner: &str,
+        id: &str,
+        request: ResumePolling,
+    ) -> Result<Acquisition, PipelineError> {
+        let mut tx = self.store.begin_write().await?;
+        let (row, revision, lifecycle) = review_in(&mut tx, owner, id).await?;
+        if revision != request.revision
+            || polling_fingerprint_in(&mut tx, id).await? != request.polling_fingerprint
+            || lifecycle != ReviewLifecycle::Returned
+            || row.try_get::<&str, _>("state")? != "needs_review"
+            || !matches!(
+                row.try_get::<Option<&str>, _>("reason")?,
+                Some("client_unavailable" | "client_job_missing" | "unknown_client_state")
+            )
+            || row.try_get::<&str, _>("job_state")? != "needs_review"
+            || row.try_get::<Option<String>, _>("job_worker")?.is_some()
+            || row.try_get::<Option<i64>, _>("job_lease")?.is_some()
+            || row.try_get::<Option<i64>, _>("job_retry")?.is_some()
+            || row.try_get::<Option<String>, _>("job_reason")?
+                != row.try_get::<Option<String>, _>("reason")?
+            || !row.try_get::<bool, _>("attempted")?
+            || row
+                .try_get::<Option<String>, _>("payload_digest")?
+                .is_none()
+            || row.try_get::<i64, _>("receipt_count")? == 0
+            || row.try_get::<Option<String>, _>("import_id")?.is_some()
+            || row.try_get::<Option<String>, _>("source_root")?.is_some()
+        {
+            return Err(PipelineError::Conflict);
+        }
+        let client_id: &str = row.try_get("client_id")?;
+        let kind_name: &str = row.try_get("client_kind")?;
+        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM acquisition_intents i JOIN acquisition_runs a ON a.id = i.id JOIN search_releases r ON r.handle = a.release_handle JOIN integrations c ON c.id = a.client_id JOIN jobs j ON j.id = i.job_id WHERE a.id = ? AND r.owner = i.caller AND json_extract(i.request, '$.client_id') = a.client_id AND json_extract(i.request, '$.release_handle') = a.release_handle AND json_extract(i.request, '$.unit_id') = a.unit_id AND json_extract(c.options, '$.category') = a.category AND j.kind = 'acquisition.pipeline' AND EXISTS(SELECT 1 FROM job_events WHERE job_id = i.job_id AND event = 'client_accepted') AND NOT EXISTS(SELECT 1 FROM import_operations WHERE unit_id = a.unit_id OR destination_path = a.destination_path))")
+            .bind(id).fetch_one(&mut *tx).await?;
+        if !owned
+            || !client_configuration_current_in(
+                &mut tx,
+                settings,
+                client_id,
+                kind_name,
+                row.try_get("client_fingerprint")?,
+            )
+            .await?
+        {
+            return Err(PipelineError::Conflict);
+        }
+        let kind = match kind_name {
+            "sabnzbd" => ClientKind::Sabnzbd,
+            "qbittorrent" => ClientKind::QBittorrent,
+            _ => return Err(PipelineError::Conflict),
+        };
+        let receipts: Vec<(i64, String)> = sqlx::query_as("SELECT ordinal, external_id FROM acquisition_receipts WHERE acquisition_id = ? ORDER BY ordinal")
+            .bind(id).fetch_all(&mut *tx).await?;
+        for (index, (ordinal, external_id)) in receipts.into_iter().enumerate() {
+            if ordinal != index as i64 {
+                return Err(PipelineError::Conflict);
+            }
+            OwnedJob::from_persisted_receipt(
+                Uuid::parse_str(id).map_err(|_| PipelineError::Conflict)?,
+                Uuid::parse_str(client_id).map_err(|_| PipelineError::Conflict)?,
+                kind,
+                row.try_get("category")?,
+                external_id,
+            )
+            .map_err(|_| PipelineError::Conflict)?;
+        }
+        // Keep the submission fence and the original receipts; only polling becomes runnable.
+        let changed = sqlx::query("UPDATE acquisition_runs SET state = 'downloading', reason = NULL, next_poll_at = 0, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND attempted = 1")
+            .bind(id).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 {
+            return Err(PipelineError::Conflict);
+        }
+        let job_id: &str = row.try_get("job_id")?;
+        let changed = sqlx::query("UPDATE jobs SET state = 'running', reason = NULL, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND worker IS NULL AND lease_until IS NULL AND retry_at IS NULL")
+            .bind(job_id).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 {
+            return Err(PipelineError::Conflict);
+        }
+        sqlx::query("INSERT INTO job_events (job_id, event, from_state, to_state, created_at) VALUES (?, 'acquisition_polling_resumed', 'needs_review', 'running', unixepoch())")
+            .bind(job_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        self.get(owner, id).await
     }
 
     pub async fn list(
@@ -1117,6 +1157,86 @@ async fn client_adapter(
     };
     Ok((adapter, fingerprint))
 }
+async fn review_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    owner: &str,
+    id: &str,
+) -> Result<(sqlx::sqlite::SqliteRow, i64, ReviewLifecycle), PipelineError> {
+    let row = sqlx::query("SELECT a.*, i.job_id, j.state AS job_state, j.worker AS job_worker, j.lease_until AS job_lease, j.retry_at AS job_retry, j.reason AS job_reason, (SELECT COUNT(*) FROM acquisition_receipts r WHERE r.acquisition_id = a.id) AS receipt_count FROM acquisition_runs a JOIN acquisition_intents i ON i.id = a.id JOIN jobs j ON j.id = i.job_id WHERE a.id = ? AND i.caller = ?")
+            .bind(id).bind(owner).fetch_optional(&mut **tx).await?.ok_or(PipelineError::NotFound)?;
+    if !matches!(
+        row.try_get::<&str, _>("state")?,
+        "needs_review" | "downloaded" | "completed" | "canceled"
+    ) {
+        return Err(PipelineError::Conflict);
+    }
+    let no_claim = row.try_get::<Option<String>, _>("work_token")?.is_none()
+        && row.try_get::<Option<i64>, _>("work_until")?.is_none();
+    let events =
+        sqlx::query("SELECT id, event, worker FROM job_events WHERE job_id = ? ORDER BY id")
+            .bind(row.try_get::<&str, _>("job_id")?)
+            .fetch_all(&mut **tx)
+            .await?;
+    let revision = events
+        .last()
+        .map(|e| e.try_get("id"))
+        .transpose()?
+        .unwrap_or(0);
+    let mut valid = no_claim && events.len() >= 2;
+    let mut started = std::collections::HashSet::new();
+    let mut returned = std::collections::HashSet::new();
+    for (index, event) in events.iter().enumerate() {
+        let name: &str = event.try_get("event")?;
+        let worker: Option<String> = event.try_get("worker")?;
+        if index == 0 {
+            valid &= name == "enqueue" && worker.is_none();
+        }
+        if index == 1 {
+            valid &= name == "acquisition_lifecycle_v1" && worker.is_none();
+        }
+        match name {
+            "acquisition_lifecycle_v1" => valid &= index == 1 && worker.is_none(),
+            "acquisition_claim_started" | "acquisition_claim_returned" => {
+                let Some(worker) = worker else {
+                    valid = false;
+                    continue;
+                };
+                valid &= index > 1
+                    && worker.len() == 43
+                    && worker
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+                if name == "acquisition_claim_started" {
+                    valid &= started.insert(worker);
+                } else {
+                    valid &= started.contains(&worker) && returned.insert(worker);
+                }
+            }
+            _ => {}
+        }
+    }
+    valid &= started == returned;
+    Ok((
+        row,
+        revision,
+        if valid {
+            ReviewLifecycle::Returned
+        } else {
+            ReviewLifecycle::Unproven
+        },
+    ))
+}
+
+async fn polling_fingerprint_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: &str,
+) -> Result<String, PipelineError> {
+    // Configuration and receipt edits do not necessarily append job events.
+    let evidence: String = sqlx::query_scalar("SELECT json_array(a.release_handle, a.client_id, a.client_fingerprint, a.client_kind, a.category, a.unit_id, a.attempted, a.payload_digest, a.torrent_hash, a.state, a.reason, a.import_id, a.source_root, a.source_relative, a.destination_root, a.destination_relative, a.destination_path, a.selection_decision_id, i.caller, i.request, i.request_fingerprint, (SELECT json_group_array(json_array(ordinal, external_id, completed)) FROM (SELECT ordinal, external_id, completed FROM acquisition_receipts WHERE acquisition_id = a.id ORDER BY ordinal)), (SELECT json_array(kind, label, base_url, enabled, options, secret_version, hex(secret_nonce), hex(secret_ciphertext)) FROM integrations WHERE id = a.client_id)) FROM acquisition_runs a JOIN acquisition_intents i ON i.id = a.id WHERE a.id = ?")
+        .bind(id).fetch_one(&mut **tx).await?;
+    Ok(fingerprint(&evidence))
+}
+
 async fn lifecycle_event(
     tx: &mut Transaction<'_, Sqlite>,
     id: &str,

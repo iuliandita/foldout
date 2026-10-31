@@ -1,4 +1,4 @@
-use super::ProviderError;
+use super::{MAX_RETRY_AFTER_SECONDS, ProviderError};
 use reqwest::{Client, RequestBuilder, StatusCode, Url, header};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -323,7 +323,10 @@ impl Http {
 // Retry-After delta-seconds or IMF-fixdate. Malformed headers never reach DTOs.
 fn retry_after(value: &str) -> Option<u64> {
     if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
-        return value.parse().ok();
+        return value
+            .parse::<u64>()
+            .ok()
+            .map(|seconds| seconds.min(MAX_RETRY_AFTER_SECONDS));
     }
     let parts: Vec<_> = value.split_ascii_whitespace().collect();
     if parts.len() != 6
@@ -377,7 +380,11 @@ fn retry_after(value: &str) -> Option<u64> {
     let epoch_days =
         era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + (153 * m + 2) / 5 + day - 1 - 719468;
     let timestamp = epoch_days as u64 * 86400 + time[0] * 3600 + time[1] * 60 + time[2];
-    Some(timestamp.saturating_sub(SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs()))
+    Some(
+        timestamp
+            .saturating_sub(SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs())
+            .min(MAX_RETRY_AFTER_SECONDS),
+    )
 }
 
 #[cfg(test)]
@@ -388,6 +395,21 @@ mod budget_tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn retry_after_is_bounded_for_seconds_and_dates() {
+        for value in [
+            "300000000000",
+            "18446744073709551615",
+            "Fri, 31 Dec 9999 23:59:59 GMT",
+        ] {
+            assert_eq!(retry_after(value), Some(MAX_RETRY_AFTER_SECONDS));
+        }
+        assert_eq!(retry_after("120"), Some(120));
+        assert_eq!(retry_after("0"), Some(0));
+        assert_eq!(retry_after("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
+        assert_eq!(retry_after("invalid"), None);
+    }
 
     #[tokio::test]
     async fn reservation_wait_obeys_http_deadline_without_sending() {

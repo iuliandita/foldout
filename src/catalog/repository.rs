@@ -17,6 +17,8 @@ pub enum CatalogError {
     Invalid(String),
     #[error("catalog record conflicts with existing data")]
     Conflict,
+    #[error("catalog record has dependencies: {0}")]
+    Dependencies(String),
     #[error("catalog record was not found")]
     NotFound,
     #[error(transparent)]
@@ -433,6 +435,113 @@ impl CatalogRepository {
         if result.rows_affected() == 0 {
             return Err(CatalogError::NotFound);
         }
+        Ok(())
+    }
+
+    pub async fn delete_provider_link(&self, id: &str) -> Result<(), CatalogError> {
+        self.delete_record(
+            id,
+            "SELECT COUNT(*) FROM provider_links WHERE id = ?",
+            "DELETE FROM provider_links WHERE id = ?",
+            &[],
+        )
+        .await
+    }
+    pub async fn delete_edition(&self, id: &str) -> Result<(), CatalogError> {
+        self.delete_record(
+            id,
+            "SELECT COUNT(*) FROM editions WHERE id = ?",
+            "DELETE FROM editions WHERE id = ?",
+            &[
+                ("units", "SELECT COUNT(*) FROM units WHERE edition_id = ?"),
+                (
+                    "provider_links",
+                    "SELECT COUNT(*) FROM provider_links WHERE edition_id = ?",
+                ),
+            ],
+        )
+        .await
+    }
+    pub async fn delete_unit(&self, id: &str) -> Result<(), CatalogError> {
+        self.delete_record(
+            id,
+            "SELECT COUNT(*) FROM units WHERE id = ?",
+            "DELETE FROM units WHERE id = ?",
+            &[
+                (
+                    "provider_links",
+                    "SELECT COUNT(*) FROM provider_links WHERE unit_id = ?",
+                ),
+                (
+                    "file_coverage",
+                    "SELECT COUNT(*) FROM file_coverage WHERE unit_id = ?",
+                ),
+                (
+                    "import_previews",
+                    "SELECT COUNT(*) FROM import_previews WHERE unit_id = ?",
+                ),
+                (
+                    "import_operations",
+                    "SELECT COUNT(*) FROM import_operations WHERE unit_id = ?",
+                ),
+                (
+                    "acquisition_runs",
+                    "SELECT COUNT(*) FROM acquisition_runs WHERE unit_id = ?",
+                ),
+                (
+                    "monitors",
+                    "SELECT COUNT(*) FROM monitors WHERE unit_id = ?",
+                ),
+                (
+                    "direct_acquisitions",
+                    "SELECT COUNT(*) FROM direct_acquisitions WHERE unit_id = ?",
+                ),
+                (
+                    "release_selection_policies",
+                    "SELECT COUNT(*) FROM release_selection_policies WHERE unit_id = ?",
+                ),
+                (
+                    "release_assessments",
+                    "SELECT COUNT(*) FROM release_assessments WHERE unit_id = ?",
+                ),
+            ],
+        )
+        .await
+    }
+    async fn delete_record(
+        &self,
+        id: &str,
+        exists_sql: &'static str,
+        delete_sql: &'static str,
+        dependencies: &[(&str, &'static str)],
+    ) -> Result<(), CatalogError> {
+        let mut tx = self.store.begin_write().await?;
+        let exists: i64 = sqlx::query_scalar(exists_sql)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if exists == 0 {
+            return Err(CatalogError::NotFound);
+        }
+        let mut blocking = Vec::new();
+        for &(name, query) in dependencies {
+            let count: i64 = sqlx::query_scalar(query)
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+            if count > 0 {
+                blocking.push(format!("{name}: {count}"));
+            }
+        }
+        if !blocking.is_empty() {
+            return Err(CatalogError::Dependencies(blocking.join(", ")));
+        }
+        sqlx::query(delete_sql)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_database)?;
+        tx.commit().await?;
         Ok(())
     }
 
