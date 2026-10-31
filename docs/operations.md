@@ -67,6 +67,10 @@ is signed with cosign keyless signing and carries SBOM and provenance attestatio
 cosign verify ghcr.io/iuliandita/foldout:nightly \
   --certificate-identity-regexp '^https://github.com/iuliandita/foldout/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+cosign verify 'ghcr.io/iuliandita/foldout:<tag>' \
+  --certificate-identity 'https://github.com/iuliandita/foldout/.github/workflows/release.yml@refs/tags/<tag>' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
 Release tags must match the Cargo package version (`vMAJOR.MINOR.PATCH` with an
