@@ -40,6 +40,8 @@ Monitors support fixed UTC intervals and daily or weekly schedules at a local ti
 
 Release searches assess the selected catalog unit, with reasons for conflicts or uncertainty. Confirmation requires a saved selection decision; uncertain evidence requires explicit acknowledgement of that exact assessment, and conflicting releases cannot be selected. Rejections remain scoped to the unit, release identity, owner, and policy until explicitly revoked. Title evidence preserves issue/chapter distinctions and magazine date precision; RSS posting dates and download protocols do not establish cover dates or file formats. The worker rechecks the decision before submission. Changed or expired assessments require review. Acquisition remains manually confirmed.
 
+Interrupted direct transfers have owner-scoped review, resume and restart API actions. Resume accepts a background attempt after its reviewed fence commits; poll its status for the result. MangaDex re-resolves rotating nodes and fetches never-started pages from zero while verifying the unchanged manifest and started partials. Restart returns the same replacement on exact replay. Neither action runs automatically. See [direct recovery](docs/integrations.md#direct-transfer-recovery) and the [upgrade notes](docs/operations.md#direct-transfer-checkpoints).
+
 ## Build and check
 
 ```sh

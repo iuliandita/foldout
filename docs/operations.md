@@ -316,3 +316,52 @@ preservation, and forward migration only in the fresh restored state. Run
 to exercise the full asset and release build on the host architecture.
 
 The repository-wide acceptance check remains `./scripts/check`.
+
+## Direct transfer checkpoints
+
+Migration 024 adds URL-free response checkpoints, direct review revisions and an
+audit trail for reviewed resume/restart actions. It is additive and preserves
+existing attempted fences, manifest immutability and creation replay keys. Older
+interrupted transfers have no trustworthy checkpoints and cannot resume; review
+an explicit restart if no import journal or catalog coverage exists.
+
+Before upgrading, stop workers and take a verified database/key backup. Preserve
+private acquisition staging separately when retaining resumable transfers: it
+lives in the existing `.library-downloads/<intent-id>` area of the configured
+download root. The database backup does not include these files. Keep their
+private ownership/permissions, inode and contents unchanged; copying them to a
+new filesystem changes their identity and requires restart rather than resume.
+No new configured write root is introduced. Startup applies migration 024.
+
+Checkpoints batch writes and fsync on the blocking pool at 8 MiB or 5 seconds,
+on interruption when possible, and at completion. The database offset and SHA-256
+are saved only after fsync succeeds, so a committed offset never exceeds synced
+bytes. A crash or cancellation between fsync and the database save can leave an
+extra tail. Resume hashes the recorded prefix once on the blocking pool and
+truncates only that owned tail after the prefix matches; mismatched or shortened
+prefixes require restart. Review GET uses read-only opens and metadata checks,
+not a full content hash. A reviewed restart uses
+a fresh intent and discards only the old private partial files. A crash after the
+restart transaction but before discard can leave orphan partials in the retired
+staging directory. Cleanup failures after commit are logged and the API still
+returns the committed replacement; exact revision/fingerprint replay returns the
+same replacement. Preserve leftover partials for local inspection and never adopt
+them into the new intent. Published downloads and imported library files are outside discard.
+
+For compatibility, older pre-release checkpoints with token-derived MangaDex
+page identities require explicit restart. Partials with saved bytes and only
+unqualified Last-Modified evidence also require explicit restart.
+MangaDex page identity now uses chapter hash plus filename; temporary nodes and
+tokens are re-resolved rather than persisted. Malformed checkpoint records keep
+review/restart available and refuse resume. Never-started expected pages with no
+checkpoint can be absent or empty and fetch fresh under the unchanged manifest.
+An incomplete MangaDex checkpoint at offset zero also fetches fresh after a kill
+or deadline, since header capture does not prove any durable page bytes. Missing
+or empty files need no old HTTP validator; an extra tail can be truncated to zero
+only for the recorded private staging inode and matching empty-prefix hash.
+Existing complete pages stay verified and reusable. Archive recovery stays strict.
+For rollback, keep the previous executable and pre-upgrade backup. Older executables reject the newer schema. Stop the upgraded service and
+restore the pre-upgrade backup into a fresh state directory with the previous
+executable; there is no in-place downgrade. Do not clear attempted or manifest
+evidence with database edits. Validate upgrades and rollback only with disposable
+state and owned media; keep production clients disabled during recovery drills.

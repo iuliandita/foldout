@@ -1131,6 +1131,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/direct/acquisitions/{id}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Requires manage scope. Returns owner-scoped revision, transfer fingerprint and resume/restart eligibility using read-only opens and cheap metadata checks. Does not hash partial contents, make network requests or modify files. Full prefix verification is deferred to the accepted action, so eligible is provisional. Invalid checkpoint JSON/schema returns a 200 snapshot with transfer_checkpoint_invalid and restart remains available. Weak Last-Modified evidence returns transfer_validator_not_strong. A worker lock and fresh source validation are required at action time. */
+        get: operations["reviewDirectAcquisition"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/direct/acquisitions/{id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires manage scope and cookie Origin. Revision-fenced and audited. Re-resolves the selection without storing a URL and preserves the attempted fence and exact MangaDex manifest identity. Returns 202 with state downloading immediately after the fence commits, before the background transfer completes. The response is built from the fence update result without a post-commit read. Poll GET /api/v1/direct/acquisitions/{id}; transfer failures become needs_review with a reason, then fetch a fresh review. Caller disconnects do not cancel the owned task. Never automatically retries. Range uses If-Range with a strong ETag, else Last-Modified only when Date is at least one second later. Append requires a matching 206, exact Content-Range offset/total, content type and validators. Archive origin must match; MangaDex may use a newly resolved node/token only after the exact manifest and stable chapter-hash/filename page identities match. Started pages require verified size/hash checkpoints; NULL or incomplete offset-zero MangaDex checkpoints fetch from zero without Range or old validators when the expected file is absent or empty. Only a verified private staging inode and empty-prefix hash authorize truncating an uncommitted offset-zero tail. Missing pages with saved bytes or complete checkpoints, or extra pages, require restart. Archives keep strict offset-zero behavior. Complete pages are verified and reused. Prefix hashing runs once on the blocking pool; an overlong owned file is truncated to the saved offset only after the prefix hash matches. Checkpoints batch at 8 MiB or 5 seconds and at completion, syncing before each database save. Download validation and normal import steps still determine completion. */
+        post: operations["resumeDirectTransfer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/direct/acquisitions/{id}/restart": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires manage scope and cookie Origin. Revision-fenced, audited restart of an idle pre-import direct intent. Re-resolves the selection, checks unit/destination reservations, retires the old intent and creates a fresh queued intent in one write transaction. Preserves the old attempted fence, manifest evidence and original idempotency replay. Discards only private partial staging files; never library files or published archives. The new intent has a fresh UUID, import ID and replay key and enters normal creation/submission checks from zero. Changed chapter metadata requires a fresh explicit selection. Stale snapshots and replay cannot create duplicate intents. Exact owner/revision/fingerprint replay returns the committed replacement, even after it progresses. Cleanup failures after commit are logged for local inspection and still return that replacement; they never turn a committed restart into a failed response. */
+        post: operations["restartDirectTransfer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2147,7 +2198,7 @@ export interface components {
         /** @enum {string} */
         DirectAcquisitionState: "queued" | "downloading" | "downloaded" | "importing" | "completed" | "needs_review" | "canceled";
         /** @enum {string} */
-        DirectAcquisitionReason: "challenge_required" | "unsupported" | "rate_limited" | "manual_action" | "source_changed" | "configuration_changed" | "local_review" | "network_policy" | "size_limit" | "invalid_archive" | "interrupted_transfer" | "source_unavailable";
+        DirectAcquisitionReason: "challenge_required" | "unsupported" | "rate_limited" | "manual_action" | "source_changed" | "configuration_changed" | "local_review" | "network_policy" | "size_limit" | "invalid_archive" | "interrupted_transfer" | "source_unavailable" | "transfer_restart_required" | "transfer_resume_unavailable";
         /** @description Caller-owned status without source URLs, source tokens, or filesystem paths. downloaded is separate from completed: completed requires the Copy import journal to finish catalog association. Interrupted transfers require review and are never automatically resumed or appended. */
         DirectAcquisition: {
             /**
@@ -2429,6 +2480,25 @@ export interface components {
              * @enum {integer}
              */
             weekday: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+        };
+        DirectTransferEligibility: {
+            eligible: boolean;
+            /** @enum {string|null} */
+            reason: "import_review_required" | "transfer_not_idle" | "transfer_evidence_missing" | "transfer_restart_required" | "transfer_resume_unavailable" | "transfer_validator_not_strong" | "transfer_checkpoint_invalid" | "local_review" | null;
+        };
+        DirectTransferAction: {
+            /** Format: int64 */
+            revision: number;
+            transfer_fingerprint: string;
+        };
+        /** @description Owner-scoped direct recovery snapshot. Does not change the indexer AcquisitionReview contract. Eligibility reflects local persisted evidence; the action re-resolves and rechecks the source. No durable URLs or public filesystem paths. GET uses read-only opens and metadata only; full content hashing is deferred to the action. NULL checkpoints identify never-started MangaDex pages; malformed checkpoint records disable resume while retaining a restart snapshot. */
+        DirectAcquisitionReview: {
+            acquisition: components["schemas"]["DirectAcquisition"];
+            /** Format: int64 */
+            revision: number;
+            transfer_fingerprint: string;
+            resume: components["schemas"]["DirectTransferEligibility"];
+            restart: components["schemas"]["DirectTransferEligibility"];
         };
     };
     responses: never;
@@ -7649,6 +7719,326 @@ export interface operations {
             };
             /** @description Operation failed */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    reviewDirectAcquisition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful operation */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DirectAcquisitionReview"];
+                };
+            };
+            /** @description invalid_request: invalid input or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: acquisition was not found for this caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description local_review: the registered download root is unavailable. No action was performed. Invalid checkpoint shape is represented by a successful review snapshot, not a 409. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    resumeDirectTransfer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DirectTransferAction"];
+            };
+        };
+        responses: {
+            /** @description Reviewed downloading fence committed. The returned acquisition is a snapshot with state downloading. Transfer continues independently; poll the acquisition status for downloaded or needs_review. This response does not report transfer completion. */
+            202: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DirectAcquisition"];
+                };
+            };
+            /** @description invalid_request: invalid input or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: acquisition was not found for this caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description direct_review_conflict: stale snapshot or consumed resume action; an exact committed restart replay returns its replacement; fetch a fresh review. direct_busy: active worker; retry later. direct_review_required: import, coverage or non-idle state needs separate recovery. transfer_resume_unavailable: missing strong validators or byte-range support for a started partial; review restart. transfer_restart_required: restart-only state, changed archive origin, manifest/page set or local checkpoint detected before acceptance; review restart. local_review: unsafe registered root or staging identity; inspect locally. source_changed: selection or configuration changed; select again. direct_conflict: selection, unit or reservation conflict. manual_action or challenge_required: source needs user action. not_configured: source integration is disabled or lacks credentials; configure it before a fresh review. Once resume returns 202, HTTP range/validator failures are recorded as acquisition needs_review reasons instead of returned by this request. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unsupported: selected download violates the direct host policy */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description rate_limited: source cooldown is active */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description source_unavailable: attempted transfer stopped for review; fetch the new snapshot before another action */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    restartDirectTransfer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DirectTransferAction"];
+            };
+        };
+        responses: {
+            /** @description Restart committed or exact committed replay. Returns the replacement acquisition. Retired partial cleanup failures are logged and do not change this committed result. */
+            202: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DirectAcquisition"];
+                };
+            };
+            /** @description invalid_request: invalid input or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: acquisition was not found for this caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description direct_review_conflict: stale snapshot or consumed resume action; an exact committed restart replay returns its replacement; fetch a fresh review. direct_busy: active worker; retry later. direct_review_required: import, coverage or non-idle state needs separate recovery. transfer_resume_unavailable: missing strong validators or byte-range support for a started partial; review restart. transfer_restart_required: restart-only state, changed archive origin, manifest/page set or local checkpoint detected before acceptance; review restart. local_review: unsafe registered root or staging identity; inspect locally. source_changed: selection or configuration changed; select again. direct_conflict: selection, unit or reservation conflict. manual_action or challenge_required: source needs user action. not_configured: source integration is disabled or lacks credentials; configure it before a fresh review. Once resume returns 202, HTTP range/validator failures are recorded as acquisition needs_review reasons instead of returned by this request. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unsupported: selected download violates the direct host policy */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description rate_limited: source cooldown is active */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description source_unavailable: attempted transfer stopped for review; fetch the new snapshot before another action */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

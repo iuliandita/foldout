@@ -37,3 +37,64 @@ From an inspected Archive item, choose an existing magazine edition and request 
 `GET /api/v1/search/archive/proposal` and `POST /api/v1/search/archive/accept` require manage scope; cookie acceptance also requires the configured Origin. Acceptance fetches the item again and validates the reviewed fields using the manual unit rules. Only an existing Archive provider link or a duplicate normalized final label within the edition returns 409, with the existing unit ID, label, and publication link target. A renamed final label can resolve a label collision. Matching dates are non-blocking warnings, including month/day values in the same month; a regular issue and an Annual or Special may share that month. The API rejects editions belonging to comic or manga publications. Reuse the same idempotency key and body after an uncertain acceptance; changing the owner or body under that key returns a conflict. Concurrent accepts replay one committed unit. Catalog deletion removes only that unit's acceptance receipts after other dependency checks pass, so its old key performs a fresh server-recomputed acceptance after deletion. Acceptance creates only the reviewed unit, with no calendar, monitor, job, or file acquisition.
 
 An idle direct intent can be canceled to release its reservation while preserving files, the original failure reason, manifest evidence, and idempotency history. A new attempt requires a new explicit selection and key. Cancellation is rejected while work is active, after an import journal exists, or when the unit already has catalog coverage. Import recovery must resolve those cases first.
+
+## Direct transfer recovery
+
+Fetch `GET /api/v1/direct/acquisitions/{id}/review` with manage scope. It returns
+`revision`, `transfer_fingerprint`, and separate `resume`/`restart` eligibility
+with refusal reasons. GET opens files read-only and checks cheap metadata; it
+does not hash file contents. Eligibility is provisional until the action verifies
+the prefix. Malformed or unknown-field checkpoints return a normal snapshot with
+`transfer_checkpoint_invalid`; restart remains available. The indexer acquisition
+review contract stays unchanged.
+
+Send the unchanged revision and fingerprint to `/resume` or `/restart`. Cookie
+writes require Origin. Each action is audited and serialized with the direct
+worker. Stale snapshots and consumed resume actions return `direct_review_conflict`;
+fetch a fresh review. `direct_busy` means retry later. An exact committed restart
+replay returns the same replacement instead of creating another intent.
+
+Resume re-resolves the persisted selection handle; no resolved URL is stored.
+Appending to a partial needs `Accept-Ranges: bytes`, a known total length and a strong
+ETag or strong Last-Modified. Last-Modified qualifies only when the response Date
+is at least one second later; otherwise review reports
+`transfer_validator_not_strong`. Range uses If-Range, preferring the strong ETag.
+Only a 206 with the exact starting offset, unchanged validators, total length and
+content type may append. Archive origin must also remain unchanged. Missing
+validators or byte-range support require an explicit reviewed restart.
+
+Resume returns 202 with `state: downloading` immediately after its fence commits.
+The response uses the row returned by that update, without a post-commit read.
+The task continues if the caller disconnects. Poll
+`GET /api/v1/direct/acquisitions/{id}` until it leaves downloading. A transfer
+failure becomes `needs_review` with `transfer_restart_required`,
+`transfer_resume_unavailable` or another failure reason; fetch a fresh review.
+A successful transfer reaches downloaded before the normal import steps run.
+There is no automatic retry. Prefix hashing runs once on the blocking pool. A
+longer owned file is truncated to the saved offset only after that prefix matches
+its saved SHA-256; a mismatched or shortened prefix requires restart.
+
+MangaDex requires the exact manifest identity and ordered chapter-hash/filename
+page identities, independent of the temporary node URL or token. A fresh at-home
+resolution may rotate nodes while retaining the same manifest. Started pages
+must match their recorded size/hash; incomplete pages with saved bytes need stable HTTP
+validators. Complete verified pages are reused without another GET. A NULL
+checkpoint or an incomplete checkpoint at offset zero means no reusable bytes;
+an absent or empty expected page fetches fresh without Range or old validators.
+An uncommitted tail at offset zero is discarded only after verifying its staging
+ownership, recorded inode and empty-prefix hash. GET remains read-only. Archives
+keep their strict offset-zero refusal. Missing pages with saved bytes or complete
+checkpoints, missing manifest rows, changed manifests and extra pages require
+restart. Packaging and archive validation still
+precede import. Fixtures exercise these cases on owned loopback servers.
+
+Restart rechecks the selected source, unit and destination, then retires the old
+intent and creates a fresh queued intent in one write transaction. It preserves
+the old attempted fence, manifest and creation replay key. Only private partial
+staging files are discarded; library files and published archives are untouched.
+A cleanup failure after commit is logged for local inspection and still returns
+the committed replacement, including on exact replay. The new intent uses fresh
+staging and normal submission checks. Changed chapter metadata requires selecting
+again. An existing import journal, coverage or published transfer requires
+separate import/local review. `local_review` requires inspecting the configured
+root or staging identity.

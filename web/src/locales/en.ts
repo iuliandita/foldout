@@ -613,6 +613,10 @@ export const en = {
   invalid_archive: 'The downloaded archive failed validation.',
   interrupted_transfer:
     'The download was interrupted. Review it before starting another download.',
+  transfer_restart_required:
+    'The source or partial file changed. Review an explicit restart from zero.',
+  transfer_resume_unavailable:
+    'Safe resume evidence is missing. Review an explicit restart from zero.',
   directComicsOnly:
     'Direct downloads are not available for magazines. Use release search with a configured indexer.',
   viewMirrors: 'View download options',
