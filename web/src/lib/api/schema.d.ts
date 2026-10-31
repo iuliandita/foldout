@@ -789,6 +789,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/library/files/{id}/identity-hints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Read persisted embedded identity hints for a library file. Requires manage scope. Hints are never catalog associations. */
+        get: operations["fileIdentityHints"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/library/files/{id}/metadata": {
         parameters: {
             query?: never;
@@ -1112,6 +1129,17 @@ export interface components {
             label: string;
             edition_id: string;
             publication_id: string;
+        };
+        IdentityHint: {
+            kind: string;
+            raw_value: string;
+            value: string | null;
+            /** @enum {string} */
+            status: "usable" | "needs_review";
+            source_field: string;
+            container_path: string;
+            /** Format: int64 */
+            extracted_at: number;
         };
         Error: {
             error: {
@@ -5665,6 +5693,37 @@ export interface operations {
             };
             /** @description unavailable: authentication temporarily unavailable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    fileIdentityHints: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Identity hints */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityHint"][];
+                };
+            };
+            /** @description Operation failed */
+            default: {
                 headers: {
                     [name: string]: unknown;
                 };

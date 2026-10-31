@@ -4333,6 +4333,47 @@
         ]
       }
     },
+    "/api/v1/library/files/{id}/identity-hints": {
+      "get": {
+        "operationId": "fileIdentityHints",
+        "description": "Read persisted embedded identity hints for a library file. Requires manage scope. Hints are never catalog associations.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Identity hints",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/IdentityHint"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Operation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/library/files/{id}/metadata": {
       "get": {
         "operationId": "fileMetadata",
@@ -6516,6 +6557,49 @@
           "publication_id"
         ],
         "additionalProperties": false
+      },
+      "IdentityHint": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "raw_value": {
+            "type": "string"
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "usable",
+              "needs_review"
+            ]
+          },
+          "source_field": {
+            "type": "string"
+          },
+          "container_path": {
+            "type": "string"
+          },
+          "extracted_at": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "kind",
+          "raw_value",
+          "value",
+          "status",
+          "source_field",
+          "container_path",
+          "extracted_at"
+        ]
       },
       "Error": {
         "type": "object",
