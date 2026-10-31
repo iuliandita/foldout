@@ -2,7 +2,10 @@
 use crate::{
     importer::{
         finalize,
-        journal::{ImportError, ImportPhase, ImportPolicy, ImportService, InternalImportRequest},
+        journal::{
+            ImportError, ImportMode, ImportPhase, ImportPolicy, ImportService,
+            InternalImportRequest,
+        },
     },
     providers::{
         HttpLimits, ProviderConfig, ProviderError, SearchPage,
@@ -829,6 +832,7 @@ impl Direct {
                     unit_id: row.try_get("unit_id")?,
                     policy: ImportPolicy::Copy,
                 },
+                ImportMode::Standalone,
             )
             .await
             .map_err(import_error)?;

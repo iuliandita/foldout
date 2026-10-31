@@ -51,6 +51,15 @@ async fn move_upgrade_preserves_journals_reservations_and_foreign_keys() {
         .await
         .unwrap();
     assert_eq!(before, after);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM import_operations WHERE source_cleanup_state='pending'"
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        7
+    );
     sqlx::query("UPDATE import_operations SET effective_policy='move' WHERE id='0'")
         .execute(&mut connection)
         .await
@@ -58,6 +67,7 @@ async fn move_upgrade_preserves_journals_reservations_and_foreign_keys() {
     for invalid in [
         "UPDATE import_operations SET effective_policy='unknown' WHERE id='0'",
         "UPDATE import_operations SET phase='unknown' WHERE id='0'",
+        "UPDATE import_operations SET source_cleanup_state='unknown' WHERE id='0'",
         "UPDATE import_operations SET destination_path='/owned-fixture/1.pdf' WHERE id='0'",
         "UPDATE import_operations SET destination_relative='1.pdf' WHERE id='0'",
         "DELETE FROM library_roots WHERE id='r'",

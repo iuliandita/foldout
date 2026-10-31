@@ -4,7 +4,9 @@ use libraryd::clients::{
     QBittorrent, SubmissionAttempt,
 };
 use libraryd::{
-    importer::journal::{ImportPhase, ImportPolicy, ImportService, InternalImportRequest},
+    importer::journal::{
+        ImportMode, ImportPhase, ImportPolicy, ImportService, InternalImportRequest,
+    },
     library::roots::Library,
     store::sqlite::SqliteStore,
 };
@@ -384,6 +386,7 @@ async fn import_seeding_payload(root: &Path) {
                     unit_id: "unit".into(),
                     policy,
                 },
+                ImportMode::TorrentPreserving,
             )
             .await
             .unwrap();

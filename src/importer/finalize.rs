@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 use super::journal::{
     ImportError, ImportMode, ImportOperation, ImportPhase, ImportPolicy, InternalImportRequest,
+    SourceCleanup,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -30,7 +31,7 @@ impl Identity {
             ino: m.ino(),
         })
     }
-    fn check(&self, file: &File) -> Result<(), ImportError> {
+    pub(crate) fn check(&self, file: &File) -> Result<(), ImportError> {
         if *self == Self::of(file)? {
             Ok(())
         } else {
@@ -66,9 +67,13 @@ impl IntentIdentity {
 pub(crate) fn relative(value: &str) -> Result<(), ImportError> {
     if value.is_empty()
         || value.contains('\0')
-        || value
-            .split('/')
-            .any(|c| c.is_empty() || c == "." || c == ".." || c == ".library-imports")
+        || value.split('/').any(|c| {
+            c.is_empty()
+                || c == "."
+                || c == ".."
+                || c == ".library-imports"
+                || c.starts_with(".library-move-")
+        })
         || Path::new(value)
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
@@ -207,6 +212,9 @@ pub(crate) fn inspect_intent(
     request: &InternalImportRequest,
     mode: ImportMode,
 ) -> Result<IntentIdentity, ImportError> {
+    if request.policy == ImportPolicy::Move {
+        check_move_roots(&source, &destination)?;
+    }
     let source_root = root(&source)?;
     let destination_root = root(&destination)?;
     let (source_parent, source_name) = parent(&source_root, &request.source_relative)?;
@@ -354,7 +362,7 @@ pub(crate) fn destination(operation: &ImportOperation) -> Result<Destination, Im
     )?;
     let metadata = staging.metadata()?;
     if metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o777 != 0o700
+        || (metadata.mode() & 0o077 != 0 || metadata.mode() & 0o500 != 0o500)
         || metadata.dev() != parent.metadata()?.dev()
     {
         return Err(ImportError::UnsafePath);
@@ -616,65 +624,269 @@ pub(crate) fn verify_stage(operation: &ImportOperation) -> Result<File, ImportEr
     Ok(file)
 }
 
-pub(crate) fn cleanup_source(operation: &ImportOperation) -> Result<(), ImportError> {
-    if operation.phase != ImportPhase::CleanupPending
-        || operation.request.policy != ImportPolicy::Move
-        || operation.effective_policy.as_deref() != Some("move")
-        || operation.library_file_id.is_none()
-    {
-        return Err(ImportError::InvalidJournal);
+pub(crate) fn check_move_roots(source: &Path, destination: &Path) -> Result<(), ImportError> {
+    root(source)?;
+    root(destination)?;
+    if source.starts_with(destination) || destination.starts_with(source) {
+        return Err(ImportError::ProtectedSource);
     }
-    operation
-        .request
-        .policy
-        .resolve(operation.identity.mode, true)?;
-    destination(operation)?.verify_final(operation)?;
-    let source_root = root(&operation.identity.source_root)?;
-    operation
-        .identity
-        .source_root_identity
-        .check(&source_root)?;
-    let (source_parent, source_name) = parent(&source_root, &operation.request.source_relative)?;
-    operation
-        .identity
-        .source_parent_identity
-        .as_ref()
-        .ok_or(ImportError::InvalidJournal)?
-        .check(&source_parent)?;
-    let source_path = operation
-        .identity
-        .source_root
-        .join(&operation.request.source_relative);
-    let expected_parent = source_path.parent().ok_or(ImportError::UnsafePath)?;
-    check_location(&source_parent, expected_parent)?;
-    let mut source = match regular(&source_parent, &source_name) {
-        Ok(file) => file,
-        Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            // Replay must also persist an unlink whose directory fsync was interrupted.
-            source_parent.sync_all()?;
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-    operation.identity.source.check(&source)?;
-    let before = source.metadata()?;
-    let mtime = check_content(&mut source, &operation.identity)?;
-    if operation.identity.source_mtime_ns != Some(mtime) {
-        return Err(ImportError::Changed);
-    }
-    let current = regular(&source_parent, &source_name)?;
-    operation.identity.source.check(&current)?;
-    let after = current.metadata()?;
-    if before.len() != after.len()
-        || before.mtime() != after.mtime()
-        || before.mtime_nsec() != after.mtime_nsec()
-        || before.ctime() != after.ctime()
-        || before.ctime_nsec() != after.ctime_nsec()
-    {
-        return Err(ImportError::Changed);
-    }
-    check_location(&source_parent, expected_parent)?;
-    unlink(&source_parent, &source_name)?;
-    source_parent.sync_all()?;
     Ok(())
+}
+
+fn rename_error(error: std::io::Error) -> ImportError {
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
+    ) {
+        ImportError::UnsupportedMove
+    } else {
+        error.into()
+    }
+}
+
+fn rename_noreplace(from: &File, source: &str, to: &File, target: &str) -> Result<(), ImportError> {
+    let source = cstring(source)?;
+    let target = cstring(target)?;
+    #[cfg(target_os = "linux")]
+    {
+        if unsafe {
+            libc::renameat2(
+                from.as_raw_fd(),
+                source.as_ptr(),
+                to.as_raw_fd(),
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        } != 0
+        {
+            return Err(rename_error(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (from, source, to, target);
+        Err(ImportError::UnsupportedMove)
+    }
+}
+
+pub(crate) enum QuarantineResult {
+    Missing,
+    Restored,
+    Verified,
+}
+
+pub(crate) struct SourceTombstone {
+    parent: File,
+    name: String,
+    directory_name: String,
+    expected_parent: PathBuf,
+}
+
+impl SourceTombstone {
+    pub(crate) fn open(operation: &ImportOperation) -> Result<Self, ImportError> {
+        let id = uuid::Uuid::parse_str(&operation.id).map_err(|_| ImportError::InvalidJournal)?;
+        if id.to_string() != operation.id {
+            return Err(ImportError::InvalidJournal);
+        }
+        if operation.phase != ImportPhase::CleanupPending
+            || operation.request.policy != ImportPolicy::Move
+            || operation.effective_policy.as_deref() != Some("move")
+            || operation.library_file_id.is_none()
+        {
+            return Err(ImportError::InvalidJournal);
+        }
+        operation
+            .request
+            .policy
+            .resolve(operation.identity.mode, true)?;
+        check_move_roots(
+            &operation.identity.source_root,
+            &operation.identity.destination_root,
+        )?;
+        let source_root = root(&operation.identity.source_root)?;
+        operation
+            .identity
+            .source_root_identity
+            .check(&source_root)?;
+        let dest_root = root(&operation.identity.destination_root)?;
+        operation
+            .identity
+            .destination_root_identity
+            .check(&dest_root)?;
+        let (parent, name) = parent(&source_root, &operation.request.source_relative)?;
+        operation
+            .identity
+            .source_parent_identity
+            .as_ref()
+            .ok_or(ImportError::InvalidJournal)?
+            .check(&parent)?;
+        let source_path = operation
+            .identity
+            .source_root
+            .join(&operation.request.source_relative);
+        let expected_parent = source_path
+            .parent()
+            .ok_or(ImportError::UnsafePath)?
+            .to_path_buf();
+        check_location(&parent, &expected_parent)?;
+        // Empty names probe support without moving or deleting a filesystem entry.
+        match rename_noreplace(&parent, "", &parent, "") {
+            Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+            Ok(()) => return Err(ImportError::UnsupportedMove),
+        }
+        Ok(Self {
+            parent,
+            name,
+            directory_name: format!(".library-move-{}", operation.id),
+            expected_parent,
+        })
+    }
+
+    fn directory(&self, create: bool) -> Result<Option<File>, ImportError> {
+        if create {
+            let name = cstring(&self.directory_name)?;
+            if unsafe { libc::mkdirat(self.parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error.into());
+                }
+            }
+        }
+        let directory = match open_at(
+            &self.parent,
+            &self.directory_name,
+            libc::O_RDONLY | libc::O_DIRECTORY,
+            0,
+        ) {
+            Ok(file) => file,
+            Err(ImportError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound && !create =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let metadata = directory.metadata()?;
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || (metadata.mode() & 0o077 != 0 || metadata.mode() & 0o500 != 0o500)
+        {
+            return Err(ImportError::UnsafePath);
+        }
+        check_location(&directory, &self.expected_parent.join(&self.directory_name))?;
+        Ok(Some(directory))
+    }
+
+    fn verify(file: &mut File, operation: &ImportOperation) -> Result<(), ImportError> {
+        operation.identity.source.check(file)?;
+        let mtime = check_content(file, &operation.identity)?;
+        if operation.identity.source_mtime_ns != Some(mtime) {
+            return Err(ImportError::Changed);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore(&self) -> Result<bool, ImportError> {
+        check_location(&self.parent, &self.expected_parent)?;
+        let Some(directory) = self.directory(false)? else {
+            return Ok(false);
+        };
+        match rename_noreplace(&directory, "source", &self.parent, &self.name) {
+            Ok(()) => {
+                directory.sync_all()?;
+                self.parent.sync_all()?;
+                Ok(true)
+            }
+            Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(false)
+            }
+            Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(ImportError::Changed)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn quarantine(
+        &self,
+        operation: &ImportOperation,
+    ) -> Result<QuarantineResult, ImportError> {
+        self.quarantine_with(operation, || {})
+    }
+
+    pub(crate) fn quarantine_with(
+        &self,
+        operation: &ImportOperation,
+        before_rename: impl FnOnce(),
+    ) -> Result<QuarantineResult, ImportError> {
+        if operation.source_cleanup != SourceCleanup::Pending {
+            return Err(ImportError::InvalidJournal);
+        }
+        if self.restore()? {
+            return Ok(QuarantineResult::Restored);
+        }
+        let mut source = match regular(&self.parent, &self.name) {
+            Ok(file) => file,
+            Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.parent.sync_all()?;
+                return Ok(QuarantineResult::Missing);
+            }
+            Err(error) => return Err(error),
+        };
+        Self::verify(&mut source, operation)?;
+        let directory = self.directory(true)?.ok_or(ImportError::InvalidJournal)?;
+        self.parent.sync_all()?;
+        before_rename();
+        check_location(&self.parent, &self.expected_parent)?;
+        rename_noreplace(&self.parent, &self.name, &directory, "source")?;
+        let verified =
+            regular(&directory, "source").and_then(|mut file| Self::verify(&mut file, operation));
+        if verified.is_err() {
+            self.restore()?;
+            return Err(ImportError::Changed);
+        }
+        directory.sync_all()?;
+        self.parent.sync_all()?;
+        Ok(QuarantineResult::Verified)
+    }
+
+    pub(crate) fn finish(&self, operation: &ImportOperation) -> Result<(), ImportError> {
+        if operation.source_cleanup != SourceCleanup::Verified {
+            return Err(ImportError::InvalidJournal);
+        }
+        check_location(&self.parent, &self.expected_parent)?;
+        if let Some(directory) = self.directory(false)? {
+            match regular(&directory, "source") {
+                Ok(mut file) => {
+                    Self::verify(&mut file, operation)?;
+                    unlink(&directory, "source")?;
+                }
+                Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(ImportError::UnsafePath) => return Err(ImportError::Changed),
+                Err(ImportError::Io(error)) if error.raw_os_error() == Some(libc::ELOOP) => {
+                    return Err(ImportError::Changed);
+                }
+                Err(error) => return Err(error),
+            }
+            directory.sync_all()?;
+        }
+        self.parent.sync_all()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod move_support_test {
+    use super::*;
+
+    #[test]
+    fn missing_renameat2_support_is_explicit() {
+        for code in [libc::ENOSYS, libc::EINVAL, libc::EOPNOTSUPP] {
+            assert!(matches!(
+                rename_error(std::io::Error::from_raw_os_error(code)),
+                ImportError::UnsupportedMove
+            ));
+        }
+    }
 }

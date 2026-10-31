@@ -71,6 +71,14 @@ pub enum ImportPhase {
     Done,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceCleanup {
+    Pending,
+    Verified,
+    Abandoned,
+}
+
 impl ImportPhase {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -89,6 +97,7 @@ impl ImportPhase {
 pub struct ImportOperation {
     pub id: String,
     pub phase: ImportPhase,
+    pub source_cleanup: SourceCleanup,
     pub effective_policy: Option<String>,
     pub validation: Option<String>,
     pub library_file_id: Option<String>,
@@ -115,6 +124,10 @@ pub enum ImportError {
     CrossFilesystem,
     #[error("move is forbidden for a torrent-preserving import")]
     TorrentPreserving,
+    #[error("move source is cataloged or its roots overlap")]
+    ProtectedSource,
+    #[error("move requires renameat2 with RENAME_NOREPLACE support")]
+    UnsupportedMove,
     #[error("another importer owns the destination root; retry later")]
     Busy,
     #[error("file format validation failed")]
@@ -153,16 +166,6 @@ impl ImportService {
         &self,
         operation_id: &str,
         request: InternalImportRequest,
-    ) -> Result<ImportOperation, ImportError> {
-        self.plan_with_mode(operation_id, request, ImportMode::Standalone)
-            .await
-    }
-
-    /// Torrent callers must select TorrentPreserving even while requesting Copy.
-    pub async fn plan_with_mode(
-        &self,
-        operation_id: &str,
-        request: InternalImportRequest,
         mode: ImportMode,
     ) -> Result<ImportOperation, ImportError> {
         request.policy.resolve(mode, true)?;
@@ -175,6 +178,32 @@ impl ImportService {
         finalize::relative(&request.source_relative)?;
         finalize::relative(&request.destination_relative)?;
         if let Some(existing) = self.optional(&id).await? {
+            if existing.request == request && request.policy == ImportPolicy::Move {
+                let op = existing.clone();
+                self.blocking(move || {
+                    finalize::check_move_roots(
+                        &op.identity.source_root,
+                        &op.identity.destination_root,
+                    )?;
+                    op.identity
+                        .source_root_identity
+                        .check(&finalize::root(&op.identity.source_root)?)?;
+                    op.identity
+                        .destination_root_identity
+                        .check(&finalize::root(&op.identity.destination_root)?)
+                })
+                .await?;
+                let mut tx = self.store.begin_write().await?;
+                if self.root_path(&request.source_root).await? != existing.identity.source_root
+                    || self.root_path(&request.destination_root).await?
+                        != existing.identity.destination_root
+                {
+                    return Err(ImportError::Changed);
+                }
+                self.check_move_catalog(&request, &existing.identity, &mut tx)
+                    .await?;
+                tx.commit().await?;
+            }
             return if existing.request == request {
                 Ok(existing)
             } else {
@@ -193,6 +222,14 @@ impl ImportService {
         let identity_json =
             serde_json::to_string(&identity).map_err(|_| ImportError::InvalidJournal)?;
         let mut tx = self.store.begin_write().await?;
+        if request.policy == ImportPolicy::Move
+            && (self.root_path(&request.source_root).await? != identity.source_root
+                || self.root_path(&request.destination_root).await? != identity.destination_root)
+        {
+            return Err(ImportError::Changed);
+        }
+        self.check_move_catalog(&request, &identity, &mut tx)
+            .await?;
         let result = sqlx::query("INSERT INTO import_operations (id, source_root, destination_root, destination_relative, destination_path, unit_id, request_json, identity_json, phase) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned')")
             .bind(&id).bind(&request.source_root).bind(&request.destination_root)
             .bind(&request.destination_relative).bind(destination_path.to_string_lossy().as_ref())
@@ -214,6 +251,26 @@ impl ImportService {
             Err(error) => return Err(error.into()),
         }
         self.get(&id).await
+    }
+
+    pub(crate) async fn check_move_catalog(
+        &self,
+        request: &InternalImportRequest,
+        identity: &IntentIdentity,
+        connection: &mut sqlx::SqliteConnection,
+    ) -> Result<(), ImportError> {
+        if request.policy != ImportPolicy::Move {
+            return Ok(());
+        }
+        let source = identity.source_root.join(&request.source_relative);
+        let protected: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM library_files WHERE path = ? OR (root_id = ? AND relative_path = ?))")
+            .bind(source.to_str().ok_or(ImportError::UnsafePath)?)
+            .bind(&request.source_root).bind(&request.source_relative)
+            .fetch_one(connection).await?;
+        if protected {
+            return Err(ImportError::ProtectedSource);
+        }
+        Ok(())
     }
 
     pub async fn get(&self, id: &str) -> Result<ImportOperation, ImportError> {
@@ -310,6 +367,12 @@ fn decode(row: sqlx::sqlite::SqliteRow) -> Result<ImportOperation, ImportError> 
     Ok(ImportOperation {
         id: row.get("id"),
         phase,
+        source_cleanup: match row.get::<&str, _>("source_cleanup_state") {
+            "pending" => SourceCleanup::Pending,
+            "verified" => SourceCleanup::Verified,
+            "abandoned" => SourceCleanup::Abandoned,
+            _ => return Err(ImportError::InvalidJournal),
+        },
         effective_policy: row.get("effective_policy"),
         validation: row.get("validation"),
         library_file_id: row.get("library_file_id"),

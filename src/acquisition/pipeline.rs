@@ -867,7 +867,7 @@ impl Pipeline {
             "sabnzbd" => ImportMode::Standalone,
             _ => return Err(PipelineError::Database),
         };
-        match service.plan_with_mode(&import_id, request, mode).await {
+        match service.plan(&import_id, request, mode).await {
             Ok(_) => {}
             Err(crate::importer::journal::ImportError::Busy) => return self.defer(claim, 5).await,
             Err(_) => {

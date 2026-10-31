@@ -11,6 +11,7 @@ use super::{
     finalize,
     journal::{
         ImportError, ImportMode, ImportPhase, ImportPolicy, ImportService, InternalImportRequest,
+        SourceCleanup,
     },
 };
 use crate::{library::roots::Library, store::sqlite::SqliteStore};
@@ -88,7 +89,7 @@ impl Fixture {
     async fn plan(&self) {
         assert_eq!(
             self.service()
-                .plan(&self.id, self.request.clone())
+                .plan(&self.id, self.request.clone(), ImportMode::Standalone)
                 .await
                 .unwrap()
                 .phase,
@@ -330,13 +331,20 @@ async fn duplicate_plan_is_idempotent_and_conflicting_id_or_destination_is_rejec
         fallback_to_copy: true,
     };
     assert!(matches!(
-        fixture.service().plan(&fixture.id, changed).await,
+        fixture
+            .service()
+            .plan(&fixture.id, changed, ImportMode::Standalone)
+            .await,
         Err(ImportError::Conflict)
     ));
     assert!(matches!(
         fixture
             .service()
-            .plan(&Uuid::new_v4().to_string(), fixture.request.clone())
+            .plan(
+                &Uuid::new_v4().to_string(),
+                fixture.request.clone(),
+                ImportMode::Standalone
+            )
             .await,
         Err(ImportError::Conflict)
     ));
@@ -352,7 +360,7 @@ async fn collision_before_plan_or_after_intent_never_overwrites_even_identical_b
         assert!(matches!(
             fixture
                 .service()
-                .plan(&fixture.id, fixture.request.clone())
+                .plan(&fixture.id, fixture.request.clone(), ImportMode::Standalone)
                 .await,
             Err(ImportError::Conflict)
         ));
@@ -433,7 +441,9 @@ async fn recovers_effects_before_their_database_phase_commits() {
             .cleanup(&cleanup)
             .unwrap();
         if policy == ImportPolicy::Move {
-            finalize::cleanup_source(&cleanup).unwrap();
+            assert!(!fixture.service().cleanup_source(&cleanup).await.unwrap());
+            let cleanup = fixture.service().get(&fixture.id).await.unwrap();
+            assert!(fixture.service().cleanup_source(&cleanup).await.unwrap());
             assert!(!fixture.source.path().join("owned.pdf").exists());
         }
         fixture.assert_done().await;
@@ -600,29 +610,37 @@ async fn move_refuses_source_changes_after_catalog_commit() {
 
 #[tokio::test]
 async fn move_unlink_permission_failure_retains_source_and_retries() {
-    let fixture = Fixture::new(ImportPolicy::Move).await;
-    fixture.plan().await;
-    for _ in 0..5 {
-        fixture.service().step(&fixture.id).await.unwrap();
+    for captured in [false, true] {
+        let fixture = pending_move().await;
+        let (directory, source) = if captured {
+            fixture.service().step(&fixture.id).await.unwrap();
+            let directory = fixture
+                .source
+                .path()
+                .join(format!(".library-move-{}", fixture.id));
+            (directory.clone(), directory.join("source"))
+        } else {
+            (
+                fixture.source.path().to_path_buf(),
+                fixture.source.path().join("owned.pdf"),
+            )
+        };
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = fixture.service().recover(&fixture.id).await;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(result, Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(fs::read(&source).unwrap(), PDF);
+        assert_eq!(
+            fs::read(fixture.destination.path().join("imported.pdf")).unwrap(),
+            PDF
+        );
+        let operation = fixture.service().get(&fixture.id).await.unwrap();
+        assert_eq!(operation.phase, ImportPhase::CleanupPending);
+        assert!(operation.last_error.is_some());
+        fixture.assert_done().await;
     }
-    fs::set_permissions(fixture.source.path(), fs::Permissions::from_mode(0o500)).unwrap();
-    let result = fixture.service().recover(&fixture.id).await;
-    fs::set_permissions(fixture.source.path(), fs::Permissions::from_mode(0o700)).unwrap();
-    assert!(
-        matches!(result, Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
-    );
-    assert_eq!(
-        fs::read(fixture.source.path().join("owned.pdf")).unwrap(),
-        PDF
-    );
-    assert_eq!(
-        fs::read(fixture.destination.path().join("imported.pdf")).unwrap(),
-        PDF
-    );
-    let operation = fixture.service().get(&fixture.id).await.unwrap();
-    assert_eq!(operation.phase, ImportPhase::CleanupPending);
-    assert!(operation.last_error.is_some());
-    fixture.assert_done().await;
 }
 
 #[tokio::test]
@@ -674,7 +692,7 @@ async fn torrent_preserving_policy_rejects_move_before_any_journal_or_staging_wr
         let fixture = Fixture::new(policy.clone()).await;
         let result = fixture
             .service()
-            .plan_with_mode(
+            .plan(
                 &fixture.id,
                 fixture.request.clone(),
                 ImportMode::TorrentPreserving,
@@ -730,7 +748,10 @@ async fn rejects_traversal_symlinks_and_replaced_destination_parent() {
         let mut request = fixture.request.clone();
         request.destination_relative = path.into();
         assert!(matches!(
-            fixture.service().plan(&fixture.id, request).await,
+            fixture
+                .service()
+                .plan(&fixture.id, request, ImportMode::Standalone)
+                .await,
             Err(ImportError::UnsafePath)
         ));
     }
@@ -740,7 +761,7 @@ async fn rejects_traversal_symlinks_and_replaced_destination_parent() {
     assert!(
         fixture
             .service()
-            .plan(&fixture.id, fixture.request.clone())
+            .plan(&fixture.id, fixture.request.clone(), ImportMode::Standalone)
             .await
             .is_err()
     );
@@ -1013,7 +1034,7 @@ async fn source_symlink_before_or_after_plan_is_never_followed() {
         } else {
             fixture
                 .service()
-                .plan(&fixture.id, fixture.request.clone())
+                .plan(&fixture.id, fixture.request.clone(), ImportMode::Standalone)
                 .await
         };
         assert!(result.is_err());
@@ -1096,6 +1117,368 @@ async fn authorized_cbr_copy_import_preserves_external_source() {
         "CBR copy import completed; source and destination SHA-256 match ({} bytes)",
         before.1
     );
+}
+
+async fn pending_move() -> Fixture {
+    let fixture = Fixture::new(ImportPolicy::Move).await;
+    fixture.plan().await;
+    for _ in 0..5 {
+        fixture.service().step(&fixture.id).await.unwrap();
+    }
+    fixture
+}
+
+#[tokio::test]
+async fn move_safety_catalog_guard_covers_both_keys_at_plan_replay_and_cleanup() {
+    for boundary in ["plan", "replay", "cleanup"] {
+        for by_path in [false, true] {
+            let fixture = if boundary == "cleanup" {
+                pending_move().await
+            } else {
+                Fixture::new(ImportPolicy::Move).await
+            };
+            if boundary == "replay" {
+                fixture.plan().await;
+            }
+            let source = fixture.source.path().join("owned.pdf");
+            let mut tx = fixture.store.begin_write().await.unwrap();
+            sqlx::query("INSERT INTO library_files(id,path,format,signature,size_bytes,root_id,relative_path) VALUES('protected',?,'pdf','cataloged',1,?,?)")
+                .bind(if by_path { source.to_str().unwrap().to_string() } else { fixture.source.path().join("other.pdf").to_str().unwrap().to_string() })
+                .bind(if by_path { None } else { Some(&fixture.request.source_root) })
+                .bind(if by_path { None } else { Some("owned.pdf") })
+                .execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+            let result = if boundary == "cleanup" {
+                fixture.service().recover(&fixture.id).await
+            } else {
+                fixture
+                    .service()
+                    .plan(&fixture.id, fixture.request.clone(), ImportMode::Standalone)
+                    .await
+            };
+            assert!(
+                matches!(result, Err(ImportError::ProtectedSource)),
+                "{boundary}, path={by_path}: {result:?}"
+            );
+            assert_eq!(fs::read(&source).unwrap(), PDF);
+            assert!(
+                !fixture
+                    .source
+                    .path()
+                    .join(format!(".library-move-{}", fixture.id))
+                    .exists()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn move_safety_disallows_equal_and_nested_canonical_roots_at_both_boundaries() {
+    for relationship in ["equal", "destination_inside", "source_inside"] {
+        for cleanup in [false, true] {
+            let mut fixture = if cleanup {
+                pending_move().await
+            } else {
+                Fixture::new(ImportPolicy::Move).await
+            };
+            let (source, destination) = match relationship {
+                "equal" => (
+                    fixture.source.path().to_path_buf(),
+                    fixture.source.path().to_path_buf(),
+                ),
+                "destination_inside" => {
+                    let child = fixture.source.path().join("child");
+                    fs::create_dir(&child).unwrap();
+                    (fixture.source.path().to_path_buf(), child)
+                }
+                "source_inside" => {
+                    let child = fixture.destination.path().join("child");
+                    fs::create_dir(&child).unwrap();
+                    fs::write(child.join("owned.pdf"), PDF).unwrap();
+                    (child, fixture.destination.path().to_path_buf())
+                }
+                _ => unreachable!(),
+            };
+            let mut tx = fixture.store.begin_write().await.unwrap();
+            sqlx::query("UPDATE library_roots SET path=? WHERE id=?")
+                .bind(fixture.destination.path().join("unused").to_str().unwrap())
+                .bind(&fixture.request.destination_root)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE library_roots SET path=? WHERE id=?")
+                .bind(source.to_str().unwrap())
+                .bind(&fixture.request.source_root)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            if relationship == "equal" {
+                fixture.request.destination_root = fixture.request.source_root.clone();
+            } else {
+                sqlx::query("UPDATE library_roots SET path=? WHERE id=?")
+                    .bind(destination.to_str().unwrap())
+                    .bind(&fixture.request.destination_root)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+            }
+            tx.commit().await.unwrap();
+            if cleanup {
+                let mut operation = fixture.service().get(&fixture.id).await.unwrap();
+                operation.request = fixture.request.clone();
+                operation.identity.source_root = source;
+                operation.identity.destination_root = destination;
+                let result = fixture.service().cleanup_source(&operation).await;
+                assert!(
+                    matches!(result, Err(ImportError::ProtectedSource)),
+                    "{relationship}: {result:?}"
+                );
+            } else {
+                let result = fixture
+                    .service()
+                    .plan(&fixture.id, fixture.request.clone(), ImportMode::Standalone)
+                    .await;
+                assert!(
+                    matches!(result, Err(ImportError::ProtectedSource)),
+                    "{relationship}: {result:?}"
+                );
+            }
+            assert_eq!(
+                fs::read(fixture.source.path().join("owned.pdf")).unwrap(),
+                PDF
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn move_refuses_swapped_source_roots_and_canonical_aliases() {
+    let fixture = pending_move().await;
+    let holding = tempdir().unwrap();
+    let original = holding.path().join("original");
+    fs::rename(fixture.source.path(), &original).unwrap();
+    fs::create_dir(fixture.source.path()).unwrap();
+    fs::write(fixture.source.path().join("owned.pdf"), PDF).unwrap();
+    assert!(matches!(
+        fixture
+            .service()
+            .plan(&fixture.id, fixture.request.clone(), ImportMode::Standalone)
+            .await,
+        Err(ImportError::Changed)
+    ));
+    let result = fixture.service().recover(&fixture.id).await;
+    assert!(matches!(result, Err(ImportError::Changed)));
+    assert_eq!(
+        fs::read(fixture.source.path().join("owned.pdf")).unwrap(),
+        PDF
+    );
+    fs::remove_dir_all(fixture.source.path()).unwrap();
+    symlink(&original, fixture.source.path()).unwrap();
+    let result = fixture
+        .service()
+        .plan(
+            &Uuid::new_v4().to_string(),
+            fixture.request.clone(),
+            ImportMode::Standalone,
+        )
+        .await;
+    assert!(matches!(result, Err(ImportError::UnsafePath)));
+    fs::remove_file(fixture.source.path()).unwrap();
+    fs::rename(original, fixture.source.path()).unwrap();
+    fixture.assert_done().await;
+}
+
+#[tokio::test]
+async fn move_safety_rename_race_restores_replacement_without_unlinking_either_file() {
+    let fixture = pending_move().await;
+    let operation = fixture.service().get(&fixture.id).await.unwrap();
+    let tombstone = finalize::SourceTombstone::open(&operation).unwrap();
+    let source = fixture.source.path().join("owned.pdf");
+    let saved = fixture.source.path().join("saved.pdf");
+    let modified = fs::metadata(&source).unwrap().modified().unwrap();
+    let result = tombstone.quarantine_with(&operation, || {
+        fs::rename(&source, &saved).unwrap();
+        fs::write(&source, PDF).unwrap();
+        fs::File::open(&source)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    });
+    assert!(matches!(result, Err(ImportError::Changed)));
+    assert_eq!(fs::read(&source).unwrap(), PDF);
+    assert_eq!(fs::read(&saved).unwrap(), PDF);
+    assert!(
+        !fixture
+            .source
+            .path()
+            .join(format!(".library-move-{}/source", fixture.id))
+            .exists()
+    );
+    assert_eq!(
+        fixture
+            .service()
+            .get(&fixture.id)
+            .await
+            .unwrap()
+            .source_cleanup,
+        SourceCleanup::Pending
+    );
+}
+
+#[tokio::test]
+async fn move_tombstone_recovery_undoes_uncommitted_and_finishes_verified_captures() {
+    for verified in [false, true] {
+        let mut fixture = pending_move().await;
+        let operation = fixture.service().get(&fixture.id).await.unwrap();
+        let tombstone = finalize::SourceTombstone::open(&operation).unwrap();
+        if verified {
+            fixture.service().step(&fixture.id).await.unwrap();
+        } else {
+            assert!(matches!(
+                tombstone.quarantine(&operation).unwrap(),
+                finalize::QuarantineResult::Verified
+            ));
+            assert!(matches!(
+                tombstone.finish(&operation),
+                Err(ImportError::InvalidJournal)
+            ));
+        }
+        let captured = fixture
+            .source
+            .path()
+            .join(format!(".library-move-{}/source", fixture.id));
+        assert_eq!(fs::read(&captured).unwrap(), PDF);
+        assert!(!fixture.source.path().join("owned.pdf").exists());
+        fixture.store.close().await;
+        fixture.store = SqliteStore::open(fixture.state.path()).await.unwrap();
+        if !verified {
+            let restored = fixture.service().step(&fixture.id).await.unwrap();
+            assert_eq!(restored.source_cleanup, SourceCleanup::Pending);
+            assert_eq!(restored.phase, ImportPhase::CleanupPending);
+            assert_eq!(
+                fs::read(fixture.source.path().join("owned.pdf")).unwrap(),
+                PDF
+            );
+            assert!(!captured.exists());
+        }
+        fixture.assert_done().await;
+        assert!(!captured.exists());
+    }
+}
+
+#[tokio::test]
+async fn move_verified_tombstone_change_is_restored_and_new_original_names_are_preserved() {
+    for changed_tombstone in [false, true] {
+        let fixture = pending_move().await;
+        fixture.service().step(&fixture.id).await.unwrap();
+        let source = fixture.source.path().join("owned.pdf");
+        if changed_tombstone {
+            fs::write(
+                fixture
+                    .source
+                    .path()
+                    .join(format!(".library-move-{}/source", fixture.id)),
+                b"changed",
+            )
+            .unwrap();
+            assert!(matches!(
+                fixture.service().recover(&fixture.id).await,
+                Err(ImportError::Changed)
+            ));
+            assert_eq!(fs::read(&source).unwrap(), b"changed");
+            assert_eq!(
+                fixture
+                    .service()
+                    .get(&fixture.id)
+                    .await
+                    .unwrap()
+                    .source_cleanup,
+                SourceCleanup::Pending
+            );
+        } else {
+            fs::write(&source, b"new original name").unwrap();
+            assert_eq!(
+                fixture.service().recover(&fixture.id).await.unwrap().phase,
+                ImportPhase::Done
+            );
+            assert_eq!(fs::read(&source).unwrap(), b"new original name");
+        }
+        assert_eq!(
+            fs::read(fixture.destination.path().join("imported.pdf")).unwrap(),
+            PDF
+        );
+    }
+}
+
+#[tokio::test]
+async fn operator_can_abandon_changed_move_cleanup_only_with_valid_destination_evidence() {
+    let mut fixture = pending_move().await;
+    fs::write(
+        fixture.source.path().join("owned.pdf"),
+        b"keep changed source",
+    )
+    .unwrap();
+    assert!(matches!(
+        fixture.service().recover(&fixture.id).await,
+        Err(ImportError::Changed)
+    ));
+    let mut tx = fixture.store.begin_write().await.unwrap();
+    sqlx::query("DELETE FROM file_coverage")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        fixture.service().abandon_move_cleanup(&fixture.id).await,
+        Err(ImportError::InvalidJournal)
+    ));
+    let mut tx = fixture.store.begin_write().await.unwrap();
+    sqlx::query("INSERT INTO file_coverage(library_file_id,unit_id,evidence) VALUES(?,'unit','user_confirmed')").bind(&fixture.id).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let resolved = fixture
+        .service()
+        .abandon_move_cleanup(&fixture.id)
+        .await
+        .unwrap();
+    assert_eq!(resolved.phase, ImportPhase::Done);
+    assert_eq!(resolved.source_cleanup, SourceCleanup::Abandoned);
+    fixture.store.close().await;
+    fixture.store = SqliteStore::open(fixture.state.path()).await.unwrap();
+    assert_eq!(
+        fixture
+            .service()
+            .recover(&fixture.id)
+            .await
+            .unwrap()
+            .source_cleanup,
+        SourceCleanup::Abandoned
+    );
+    assert_eq!(
+        fixture
+            .service()
+            .abandon_move_cleanup(&fixture.id)
+            .await
+            .unwrap()
+            .source_cleanup,
+        SourceCleanup::Abandoned
+    );
+    assert_eq!(
+        fs::read(fixture.source.path().join("owned.pdf")).unwrap(),
+        b"keep changed source"
+    );
+    assert_eq!(
+        fs::read(fixture.destination.path().join("imported.pdf")).unwrap(),
+        PDF
+    );
+    let copy = Fixture::new(ImportPolicy::Copy).await;
+    copy.plan().await;
+    for _ in 0..5 {
+        copy.service().step(&copy.id).await.unwrap();
+    }
+    assert!(matches!(
+        copy.service().abandon_move_cleanup(&copy.id).await,
+        Err(ImportError::Conflict)
+    ));
 }
 
 fn private_directory() -> tempfile::TempDir {

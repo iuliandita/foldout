@@ -204,27 +204,44 @@ compatibility or automated downgrade.
 
 The internal importer supports Copy, Hardlink with explicit copy fallback, and
 Move. Move copies into private staging and keeps the source through destination
-verification, publication, and the catalog/coverage transaction. Only
-`CleanupPending` can unlink it, after revalidating the destination and durable
-catalog evidence. Cleanup rechecks the registered source root, parent and file
-identities, size, nanosecond mtime, and SHA-256. A changed source or unlink failure
-retains that phase and a visible error for review. Recovery accepts an already
-missing source only after the same destination/catalog checks; directory sync
-precedes the Done commit.
+verification, publication, and the catalog/coverage transaction. Planning and
+cleanup reject cataloged sources, whether matched by absolute path or registered
+root and relative path. They also reject equal, overlapping, noncanonical, or
+replaced roots. Cleanup holds the catalog writer transaction during these checks
+and filesystem work.
 
-Use Move only with sources under exclusive importer control: another process
-must not write or replace them during cleanup. Filesystem identity checks and
-unlink are separate system calls. Existing Copy/Hardlink journals remain
-recoverable; Move refuses source cleanup without its journaled identity evidence.
+Only `CleanupPending` can remove a Move source, after revalidating the destination
+and durable catalog evidence. Cleanup rechecks root, parent and file identities,
+size, nanosecond mtime, and SHA-256. It captures the source with
+`renameat2(RENAME_NOREPLACE)` in a private 0700 `.library-move-<operation-id>`
+directory beside the source, verifies the captured file, syncs both directories,
+and commits `source_cleanup=verified`. A later step revalidates and unlinks only
+that private tombstone. It never unlinks the original source name. Unsupported
+platforms/filesystems return an explicit error without a plain-unlink fallback.
+Recovery restores an unverified capture with `RENAME_NOREPLACE`; it finishes a
+verified capture idempotently. A conflicting new original name is never replaced.
+A mismatch restores the capture and reports Changed. Missing sources are accepted
+only behind the same destination/catalog fence. Directory sync precedes Done.
 
-Torrent callers use `ImportService::plan_with_mode` with
-`ImportMode::TorrentPreserving`. Policy resolution rejects Move before planning
-and again when staging or cleaning up. The acquisition pipeline selects that
+Stop other writers before Move: an already open descriptor can still change a
+captured file. Changed content or a filesystem error retains the operation for
+review. After reviewing a permanent Changed error, an internal operator can call
+`ImportService::abandon_move_cleanup(operation_id).await` to keep the source and
+finish the operation. This revalidates destination/catalog evidence, restores any
+tombstone without replacing an existing name, and durably records
+`source_cleanup=abandoned` with Done. Repeating the call is safe. If restoration
+conflicts, preserve both files and resolve that filename conflict before retrying;
+no database edits are needed. Existing Copy/Hardlink journals remain recoverable.
+
+`ImportService::plan` requires an explicit `ImportMode` argument. Torrent callers
+pass `ImportMode::TorrentPreserving`; standalone callers pass
+`ImportMode::Standalone`. Policy resolution rejects Move before planning and
+again when staging or cleaning up. The acquisition pipeline selects the torrent
 mode for qBittorrent regardless of whether the client currently reports seeding.
-Both production acquisition paths continue to request Copy. Move is available
-only through the internal importer API; HTTP and UI exposure are deferred by
-owner decision. Downloader job/payload cleanup remains separate from import
-source cleanup.
+Both production acquisition paths continue to request Copy. Move and cleanup
+abandonment are available only through the internal importer API; HTTP and UI
+exposure are deferred by owner decision. Downloader job/payload cleanup remains
+separate from import source cleanup.
 
 ## Verification
 
