@@ -329,3 +329,7 @@
     margin-bottom: var(--space-3);
   }
 }
+
+.archive-unit-review .archive-raw {
+  white-space: pre-wrap;
+}

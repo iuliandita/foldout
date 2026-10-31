@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, Sqlite, Transaction};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{Search, SearchError};
@@ -24,10 +26,20 @@ pub struct ArchiveUnitProposal {
     pub date: Option<String>,
     pub date_precision: Option<DatePrecision>,
     pub raw_labels: Vec<String>,
+    pub raw_volumes: Vec<String>,
+    pub date_warnings: Vec<ArchiveUnitMatch>,
     pub raw_dates: Vec<String>,
     pub combined: bool,
     pub identifier: String,
     pub source_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ArchiveUnitMatch {
+    pub id: String,
+    pub label: String,
+    pub edition_id: String,
+    pub publication_id: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -56,7 +68,7 @@ pub enum ArchiveProposalError {
     Catalog(#[from] CatalogError),
     #[error("archive unit already exists")]
     Duplicate {
-        existing_unit_id: String,
+        existing_unit: ArchiveUnitMatch,
         proposal: Box<ArchiveUnitProposal>,
     },
     #[error("idempotency key was already used with a different request")]
@@ -74,9 +86,9 @@ impl Search {
         let item = self
             .archive_item(&request.integration_id, &request.identifier)
             .await?;
-        let proposal = proposal(&request.edition_id, item.magazine);
+        let mut proposal = proposal(&request.edition_id, item.magazine);
         let mut connection = self.store.reader().acquire().await?;
-        check_duplicate(&mut connection, &proposal).await?;
+        check_catalog(&mut connection, &mut proposal).await?;
         Ok(proposal)
     }
 
@@ -89,6 +101,21 @@ impl Search {
         if request.idempotency_key.len() > 128 {
             return Err(CatalogError::Invalid("idempotency_key is too long".into()).into());
         }
+        let lock = {
+            let mut locks = self.archive_accepts.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks
+                .get(&request.idempotency_key)
+                .and_then(std::sync::Weak::upgrade)
+            {
+                lock
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(request.idempotency_key.clone(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        let _guard = lock.lock().await;
         let fingerprint = super::service::digest(
             &serde_json::to_vec(&request).map_err(|_| SearchError::Invalid)?,
         );
@@ -106,10 +133,11 @@ impl Search {
         let item = self
             .archive_item(&request.integration_id, &request.identifier)
             .await?;
-        let source_proposal = proposal(&request.edition_id, item.magazine);
-        if source_proposal.combined && request.kind != UnitKind::Issue {
+        let mut source_proposal = proposal(&request.edition_id, item.magazine);
+        if source_proposal.combined && !matches!(request.kind, UnitKind::Issue | UnitKind::Combined)
+        {
             return Err(CatalogError::Invalid(
-                "Combined Archive issues must remain one issue".into(),
+                "Combined Archive issues require kind issue or combined".into(),
             )
             .into());
         }
@@ -124,8 +152,8 @@ impl Search {
         {
             return Ok(accepted);
         }
-        check_duplicate(&mut tx, &source_proposal).await?;
-        check_duplicate(&mut tx, &reviewed).await?;
+        check_catalog(&mut tx, &mut reviewed).await?;
+        source_proposal.date_warnings = reviewed.date_warnings.clone();
         let unit = Unit {
             id: Uuid::new_v4().to_string(),
             edition_id: reviewed.edition_id.clone(),
@@ -150,8 +178,8 @@ impl Search {
             unit,
             proposal: source_proposal,
         };
-        sqlx::query("INSERT INTO archive_unit_acceptances (owner, idempotency_key, request_fingerprint, response_json) VALUES (?, ?, ?, ?)")
-            .bind(owner).bind(&request.idempotency_key).bind(fingerprint)
+        sqlx::query("INSERT INTO archive_unit_acceptances (owner, unit_id, idempotency_key, request_fingerprint, response_json) VALUES (?, ?, ?, ?, ?)")
+            .bind(owner).bind(&accepted.unit.id).bind(&request.idempotency_key).bind(fingerprint)
             .bind(serde_json::to_string(&accepted).map_err(|_| SearchError::Database)?)
             .execute(&mut *tx).await?;
         tx.commit().await?;
@@ -159,14 +187,8 @@ impl Search {
     }
 
     async fn archive_edition(&self, edition_id: &str) -> Result<(), ArchiveProposalError> {
-        if sqlx::query_scalar::<_, i64>("SELECT count(*) FROM editions WHERE id = ?")
-            .bind(edition_id)
-            .fetch_one(self.store.reader())
-            .await?
-            == 0
-        {
-            return Err(CatalogError::NotFound.into());
-        }
+        let mut connection = self.store.reader().acquire().await?;
+        magazine_edition(&mut connection, edition_id).await?;
         Ok(())
     }
 }
@@ -181,20 +203,41 @@ fn proposal(edition_id: &str, magazine: ArchiveMagazine) -> ArchiveUnitProposal 
     let label = if magazine.issues.is_empty() {
         date.clone().unwrap_or_else(|| magazine.title.clone())
     } else {
-        magazine.issues.join(" / ")
-    };
-    let combined = magazine.issues.len() > 1
-        || magazine
+        magazine
             .issues
             .iter()
-            .any(|value| value.contains(['-', '/', '+', '&', ',']));
+            .map(|value| value.trim())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
+    let volume = magazine
+        .volumes
+        .iter()
+        .map(|value| value.trim())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    let label = if volume.is_empty() {
+        label
+    } else if magazine.issues.is_empty() {
+        format!("Vol {volume}")
+    } else {
+        format!("Vol {volume} No {label}")
+    };
+    let combined = magazine.issues.iter().any(|value| combined_label(value))
+        || (magazine.issues.len() == 2 && combined_label(&magazine.issues.join(" / ")));
     ArchiveUnitProposal {
         edition_id: edition_id.into(),
         label,
-        kind: UnitKind::Issue,
+        kind: if combined {
+            UnitKind::Combined
+        } else {
+            UnitKind::Issue
+        },
         date_precision: date.as_deref().and_then(|value| validate_date(value).ok()),
         date,
         raw_labels: magazine.issues,
+        raw_volumes: magazine.volumes,
+        date_warnings: Vec::new(),
         raw_dates: magazine.dates,
         combined,
         source_url: format!("https://archive.org/details/{}", magazine.identifier),
@@ -208,10 +251,12 @@ async fn replay(
     key: &str,
     fingerprint: &str,
 ) -> Result<Option<ArchiveUnitAcceptance>, ArchiveProposalError> {
-    let row = sqlx::query("SELECT request_fingerprint, response_json FROM archive_unit_acceptances WHERE owner = ? AND idempotency_key = ?")
-        .bind(owner).bind(key).fetch_optional(&mut **tx).await?;
+    let row = sqlx::query("SELECT owner, request_fingerprint, response_json FROM archive_unit_acceptances WHERE idempotency_key = ?")
+        .bind(key).fetch_optional(&mut **tx).await?;
     if let Some(row) = row {
-        if row.get::<String, _>("request_fingerprint") != fingerprint {
+        if row.get::<String, _>("owner") != owner
+            || row.get::<String, _>("request_fingerprint") != fingerprint
+        {
             return Err(ArchiveProposalError::IdempotencyConflict);
         }
         return serde_json::from_str(&row.get::<String, _>("response_json"))
@@ -239,40 +284,154 @@ fn normalized_label(label: &str) -> String {
     }
 }
 
-async fn check_duplicate(
-    tx: &mut sqlx::SqliteConnection,
-    proposal: &ArchiveUnitProposal,
+async fn magazine_edition(
+    connection: &mut sqlx::SqliteConnection,
+    edition_id: &str,
 ) -> Result<(), ArchiveProposalError> {
-    if sqlx::query_scalar::<_, i64>("SELECT count(*) FROM editions WHERE id = ?")
-        .bind(&proposal.edition_id)
-        .fetch_one(&mut *tx)
-        .await?
-        == 0
-    {
-        return Err(CatalogError::NotFound.into());
+    let kind: Option<String> = sqlx::query_scalar("SELECT p.content_type FROM editions e JOIN publications p ON p.id = e.publication_id WHERE e.id = ?")
+        .bind(edition_id).fetch_optional(&mut *connection).await?;
+    match kind.as_deref() {
+        Some("magazine") => Ok(()),
+        Some(_) => {
+            Err(CatalogError::Invalid("Archive proposals require a magazine edition".into()).into())
+        }
+        None => Err(CatalogError::NotFound.into()),
     }
-    let linked: Option<String> = sqlx::query_scalar("SELECT unit_id FROM provider_links WHERE provider = 'internet_archive' AND external_id = ? AND unit_id IS NOT NULL")
-        .bind(&proposal.identifier).fetch_optional(&mut *tx).await?;
-    let rows = sqlx::query("SELECT u.id, u.label, u.date, u.date_precision, p.content_type FROM units u JOIN editions e ON e.id = u.edition_id JOIN publications p ON p.id = e.publication_id WHERE u.edition_id = ? ORDER BY u.id")
-        .bind(&proposal.edition_id).fetch_all(&mut *tx).await?;
-    let duplicate = linked.or_else(|| {
+}
+
+async fn check_catalog(
+    connection: &mut sqlx::SqliteConnection,
+    proposal: &mut ArchiveUnitProposal,
+) -> Result<(), ArchiveProposalError> {
+    magazine_edition(connection, &proposal.edition_id).await?;
+    let linked = sqlx::query("SELECT u.id, u.label, u.edition_id, e.publication_id FROM provider_links l JOIN units u ON u.id = l.unit_id JOIN editions e ON e.id = u.edition_id WHERE l.provider = 'internet_archive' AND l.external_id = ?")
+        .bind(&proposal.identifier).fetch_optional(&mut *connection).await?;
+    let rows = sqlx::query("SELECT u.id, u.label, u.edition_id, e.publication_id, u.date FROM units u JOIN editions e ON e.id = u.edition_id WHERE u.edition_id = ? ORDER BY u.id")
+        .bind(&proposal.edition_id).fetch_all(&mut *connection).await?;
+    let normalized = normalized_label(&proposal.label);
+    let duplicate = linked.as_ref().or_else(|| {
         rows.iter()
-            .find(|row| {
-                normalized_label(&row.get::<String, _>("label"))
-                    == normalized_label(&proposal.label)
-                    || (row.get::<String, _>("content_type") == "magazine"
-                        && proposal.date.is_some()
-                        && row.get::<Option<String>, _>("date") == proposal.date
-                        && row.get::<Option<String>, _>("date_precision").as_deref()
-                            == proposal.date_precision.as_ref().map(DatePrecision::as_str))
-            })
-            .map(|row| row.get("id"))
+            .find(|row| normalized_label(&row.get::<String, _>("label")) == normalized)
     });
-    if let Some(existing_unit_id) = duplicate {
+    proposal.date_warnings = rows
+        .iter()
+        .filter(|row| {
+            proposal
+                .date
+                .as_deref()
+                .zip(row.get::<Option<String>, _>("date").as_deref())
+                .is_some_and(|(date, existing)| dates_overlap(date, existing))
+        })
+        .map(unit_match)
+        .collect();
+    if let Some(row) = duplicate {
         return Err(ArchiveProposalError::Duplicate {
-            existing_unit_id,
+            existing_unit: unit_match(row),
             proposal: Box::new(proposal.clone()),
         });
     }
     Ok(())
+}
+
+fn unit_match(row: &sqlx::sqlite::SqliteRow) -> ArchiveUnitMatch {
+    ArchiveUnitMatch {
+        id: row.get("id"),
+        label: row.get("label"),
+        edition_id: row.get("edition_id"),
+        publication_id: row.get("publication_id"),
+    }
+}
+
+fn dates_overlap(left: &str, right: &str) -> bool {
+    let length = if left.len() >= 7 && right.len() >= 7 {
+        7
+    } else {
+        4
+    };
+    left.get(..length)
+        .is_some_and(|prefix| right.get(..length) == Some(prefix))
+}
+
+fn combined_label(raw: &str) -> bool {
+    let value = raw
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if validate_date(&value).is_ok() {
+        return false;
+    }
+    for separator in ["-", "–", "—", "/", " and ", "&"] {
+        if let Some((left, right)) = value.split_once(separator) {
+            let (left, right) = (left.trim(), right.trim());
+            let number =
+                |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+            if number(left) && number(right) {
+                return !(left.len() == 4
+                    && right.len() == 2
+                    && validate_date(&format!("{left}-{right}")).is_ok());
+            }
+            let month = |part: &str| {
+                matches!(
+                    part,
+                    "jan"
+                        | "january"
+                        | "feb"
+                        | "february"
+                        | "mar"
+                        | "march"
+                        | "apr"
+                        | "april"
+                        | "may"
+                        | "jun"
+                        | "june"
+                        | "jul"
+                        | "july"
+                        | "aug"
+                        | "august"
+                        | "sep"
+                        | "sept"
+                        | "september"
+                        | "oct"
+                        | "october"
+                        | "nov"
+                        | "november"
+                        | "dec"
+                        | "december"
+                )
+            };
+            if month(left) && month(right) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combined_labels_require_real_numeric_or_month_pairs() {
+        for (label, expected) in [
+            ("3-4", true),
+            ("3–4", true),
+            ("3—4", true),
+            ("3/4", true),
+            ("3 and 4", true),
+            ("3 & 4", true),
+            ("Jan/Feb", true),
+            ("Jan-Feb", true),
+            ("January–February", true),
+            ("Vol. 3, No. 4", false),
+            ("12-A", false),
+            ("2024-03", false),
+            ("3,4", false),
+            (",", false),
+            ("3", false),
+        ] {
+            assert_eq!(combined_label(label), expected, "{label}");
+        }
+    }
 }

@@ -11,7 +11,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description Requires manage scope. Read-only dry run for an existing edition; no catalog changes, file transfer, or calendar generation. Returns 409 with existing_unit_id and the proposal for the same normalized label in this edition, the same provider link, or the same date and precision in a magazine edition. */
+        /** @description Requires manage scope and an existing magazine edition. Read-only dry run; no catalog mutation, transfer or calendar generation. Returns 409 with existing_unit_id, existing_unit and proposal only for an existing internet_archive provider link or the same normalized proposed label in this edition. Date and month matches are non-blocking date_warnings. Acceptance checks the reviewed final label, so a distinct renamed label may be accepted. */
         get: operations["proposeArchiveUnit"];
         put?: never;
         post?: never;
@@ -30,7 +30,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Requires manage scope and matching Origin for cookie writes. Recomputes source metadata server-side, validates reviewed label/kind/date using manual unit rules, and atomically creates exactly one unit, its internet_archive provider link (external_id = identifier), and a durable acceptance receipt. Combined source labels must keep kind issue. The same owner, idempotency key, and body replay the original response without contacting the provider; a different body conflicts. No file acquisition or calendar generation. */
+        /** @description Requires manage scope and matching Origin for cookie writes. Requires a magazine edition. Recomputes Archive metadata server-side, validates reviewed fields with manual unit rules, and atomically creates one unit, its internet_archive provider link and a durable receipt referencing that unit. Hard duplicate checks use only provider identifier or normalized final label in the chosen edition; dates produce warnings. Combined source issues allow kind issue or combined. Same key, owner and body replay the original response; changing owner or body under that key conflicts. No file acquisition or calendar generation. */
         post: operations["acceptArchiveUnit"];
         delete?: never;
         options?: never;
@@ -1067,7 +1067,7 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** @description Read-only proposal. Raw source labels and dates are preserved, including ambiguous dates; only an exact single YYYY, YYYY-MM, or YYYY-MM-DD is parsed. Combined labels represent one issue. Source URL is canonical Archive item provenance. */
+        /** @description Read-only proposal. Raw source issue labels, volumes and dates are preserved; label construction trims source values and includes volume and issue when both exist. Only a single exact calendar date is parsed. Real numeric or month pairs default to kind combined and stay one unit. Date matches are advisory, never duplicate conflicts. */
         ArchiveUnitProposal: {
             edition_id: string;
             label: string;
@@ -1083,6 +1083,9 @@ export interface components {
             identifier: string;
             /** Format: uri */
             source_url: string;
+            raw_volumes: string[];
+            /** @description Non-blocking matches with existing unit ids and labels. Month and day precision values in the same month match; a year-only date overlaps dates in that year. */
+            date_warnings: components["schemas"]["ArchiveUnitMatch"][];
         };
         ArchiveAcceptRequest: {
             integration_id: string;
@@ -1102,6 +1105,13 @@ export interface components {
         ArchiveUnitConflict: components["schemas"]["Error"] & {
             existing_unit_id: string;
             proposal: components["schemas"]["ArchiveUnitProposal"];
+            existing_unit: components["schemas"]["ArchiveUnitMatch"];
+        };
+        ArchiveUnitMatch: {
+            id: string;
+            label: string;
+            edition_id: string;
+            publication_id: string;
         };
         Error: {
             error: {
@@ -2339,7 +2349,7 @@ export interface operations {
                     "application/json": components["schemas"]["ArchiveUnitProposal"];
                 };
             };
-            /** @description invalid_request: invalid input or mixed authentication methods */
+            /** @description invalid_request: invalid input, non-magazine edition, or mixed authentication methods */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2454,7 +2464,7 @@ export interface operations {
                     "application/json": components["schemas"]["ArchiveUnitAcceptance"];
                 };
             };
-            /** @description invalid_request: invalid input or mixed authentication methods */
+            /** @description invalid_request: invalid input, non-magazine edition, or mixed authentication methods */
             400: {
                 headers: {
                     [name: string]: unknown;

@@ -294,7 +294,7 @@ impl InternetArchive {
     fn texts(&self, value: &Value, field: &str) -> Result<Vec<String>, ProviderError> {
         let text = |raw: &str| {
             let validated = self.http.text(raw)?;
-            if matches!(field, "date" | "issue") {
+            if matches!(field, "date" | "issue" | "volume") {
                 if raw.len() > 4096 || raw.chars().any(char::is_control) {
                     return Err(ProviderError::InvalidResponse);
                 }

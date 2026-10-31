@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -126,10 +129,13 @@ pub struct IntegrationChoice {
     pub protocol: Option<Protocol>,
 }
 
+type ArchiveAcceptLocks = Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>;
+
 type MetadataCache = Arc<Mutex<HashMap<String, (i64, MetadataPage)>>>;
 #[derive(Clone)]
 pub struct Search {
     pub(super) store: SqliteStore,
+    pub(super) archive_accepts: ArchiveAcceptLocks,
     settings: Settings,
     metadata: MetadataCache,
 }
@@ -140,6 +146,7 @@ impl Search {
             store,
             settings,
             metadata: Arc::default(),
+            archive_accepts: Arc::default(),
         }
     }
 

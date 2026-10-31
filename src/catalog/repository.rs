@@ -469,6 +469,10 @@ impl CatalogRepository {
             "DELETE FROM units WHERE id = ?",
             &[
                 (
+                    "archive_unit_acceptances",
+                    "SELECT COUNT(*) FROM archive_unit_acceptances WHERE unit_id = ?",
+                ),
+                (
                     "provider_links",
                     "SELECT COUNT(*) FROM provider_links WHERE unit_id = ?",
                 ),

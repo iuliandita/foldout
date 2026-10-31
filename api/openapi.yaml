@@ -22,7 +22,7 @@
     "/api/v1/search/archive/proposal": {
       "get": {
         "operationId": "proposeArchiveUnit",
-        "description": "Requires manage scope. Read-only dry run for an existing edition; no catalog changes, file transfer, or calendar generation. Returns 409 with existing_unit_id and the proposal for the same normalized label in this edition, the same provider link, or the same date and precision in a magazine edition.",
+        "description": "Requires manage scope and an existing magazine edition. Read-only dry run; no catalog mutation, transfer or calendar generation. Returns 409 with existing_unit_id, existing_unit and proposal only for an existing internet_archive provider link or the same normalized proposed label in this edition. Date and month matches are non-blocking date_warnings. Acceptance checks the reviewed final label, so a distinct renamed label may be accepted.",
         "responses": {
           "200": {
             "description": "Successful operation",
@@ -43,7 +43,7 @@
             }
           },
           "400": {
-            "description": "invalid_request: invalid input or mixed authentication methods",
+            "description": "invalid_request: invalid input, non-magazine edition, or mixed authentication methods",
             "content": {
               "application/json": {
                 "schema": {
@@ -181,10 +181,10 @@
     "/api/v1/search/archive/accept": {
       "post": {
         "operationId": "acceptArchiveUnit",
-        "description": "Requires manage scope and matching Origin for cookie writes. Recomputes source metadata server-side, validates reviewed label/kind/date using manual unit rules, and atomically creates exactly one unit, its internet_archive provider link (external_id = identifier), and a durable acceptance receipt. Combined source labels must keep kind issue. The same owner, idempotency key, and body replay the original response without contacting the provider; a different body conflicts. No file acquisition or calendar generation.",
+        "description": "Requires manage scope and matching Origin for cookie writes. Requires a magazine edition. Recomputes Archive metadata server-side, validates reviewed fields with manual unit rules, and atomically creates one unit, its internet_archive provider link and a durable receipt referencing that unit. Hard duplicate checks use only provider identifier or normalized final label in the chosen edition; dates produce warnings. Combined source issues allow kind issue or combined. Same key, owner and body replay the original response; changing owner or body under that key conflicts. No file acquisition or calendar generation.",
         "responses": {
           "400": {
-            "description": "invalid_request: invalid input or mixed authentication methods",
+            "description": "invalid_request: invalid input, non-magazine edition, or mixed authentication methods",
             "content": {
               "application/json": {
                 "schema": {
@@ -6370,6 +6370,19 @@
           "source_url": {
             "type": "string",
             "format": "uri"
+          },
+          "raw_volumes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "date_warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArchiveUnitMatch"
+            },
+            "description": "Non-blocking matches with existing unit ids and labels. Month and day precision values in the same month match; a year-only date overlaps dates in that year."
           }
         },
         "required": [
@@ -6382,10 +6395,12 @@
           "raw_dates",
           "combined",
           "identifier",
-          "source_url"
+          "source_url",
+          "raw_volumes",
+          "date_warnings"
         ],
         "additionalProperties": false,
-        "description": "Read-only proposal. Raw source labels and dates are preserved, including ambiguous dates; only an exact single YYYY, YYYY-MM, or YYYY-MM-DD is parsed. Combined labels represent one issue. Source URL is canonical Archive item provenance."
+        "description": "Read-only proposal. Raw source issue labels, volumes and dates are preserved; label construction trims source values and includes volume and issue when both exist. Only a single exact calendar date is parsed. Real numeric or month pairs default to kind combined and stay one unit. Date matches are advisory, never duplicate conflicts."
       },
       "ArchiveAcceptRequest": {
         "type": "object",
@@ -6465,14 +6480,42 @@
               },
               "proposal": {
                 "$ref": "#/components/schemas/ArchiveUnitProposal"
+              },
+              "existing_unit": {
+                "$ref": "#/components/schemas/ArchiveUnitMatch"
               }
             },
             "required": [
               "existing_unit_id",
-              "proposal"
+              "proposal",
+              "existing_unit"
             ]
           }
         ]
+      },
+      "ArchiveUnitMatch": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "edition_id": {
+            "type": "string"
+          },
+          "publication_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "edition_id",
+          "publication_id"
+        ],
+        "additionalProperties": false
       },
       "Error": {
         "type": "object",

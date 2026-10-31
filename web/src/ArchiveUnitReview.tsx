@@ -12,6 +12,7 @@ export function ArchiveUnitReview({ integrationId, magazine, onClose }: {
   onClose: () => void;
 }) {
   const { t, locale } = useI18n();
+  const acceptedLink = useRef<HTMLAnchorElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const [publications, setPublications] = useState<Schema['PublicationSummary'][]>([]);
   const [publicationCursor, setPublicationCursor] = useState<string | null>(null);
@@ -22,7 +23,7 @@ export function ArchiveUnitReview({ integrationId, magazine, onClose }: {
   const [label, setLabel] = useState('');
   const [kind, setKind] = useState<Schema['Unit']['kind']>('issue');
   const [date, setDate] = useState('');
-  const [duplicate, setDuplicate] = useState<string>();
+  const [duplicate, setDuplicate] = useState<Schema['ArchiveUnitMatch']>();
   const [accepted, setAccepted] = useState<Schema['Unit']>();
   const [pending, setPending] = useState<Schema['ArchiveAcceptRequest']>();
   const [busy, setBusy] = useState(true);
@@ -37,6 +38,23 @@ export function ArchiveUnitReview({ integrationId, magazine, onClose }: {
     return () => controller.abort();
   }, []);
   useEffect(() => () => active.current?.abort(), []);
+  useEffect(() => { if (accepted) acceptedLink.current?.focus(); }, [accepted]);
+
+  function review(result: Schema['ArchiveUnitProposal']) {
+    setProposal(result);
+    setLabel(result.label);
+    setKind(result.kind);
+    setDate(result.date ?? '');
+  }
+
+  function chooseEdition(id: string) {
+    active.current?.abort();
+    setBusy(false);
+    setEdition(id);
+    setProposal(undefined);
+    setDuplicate(undefined);
+    setError(undefined);
+  }
 
   async function loadPublications(cursor: string | null, controller = new AbortController()) {
     active.current = controller;
@@ -87,44 +105,51 @@ export function ArchiveUnitReview({ integrationId, magazine, onClose }: {
   }
 
   async function propose() {
+    active.current?.abort();
+    const controller = new AbortController();
+    active.current = controller;
     setBusy(true);
     setError(undefined);
     setDuplicate(undefined);
     try {
       const params = new URLSearchParams({ integration_id: integrationId, identifier: magazine.identifier, edition_id: edition });
-      const result = await request<Schema['ArchiveUnitProposal']>(`/search/archive/proposal?${params}`);
-      setProposal(result);
-      setLabel(result.label);
-      setKind(result.kind);
-      setDate(result.date ?? '');
+      const result = await request<Schema['ArchiveUnitProposal']>(`/search/archive/proposal?${params}`, { signal: controller.signal });
+      if (!controller.signal.aborted) review(result);
     } catch (failure) {
-      if (failure instanceof ApiError && failure.code === 'duplicate_unit') setDuplicate(failure.existingUnitId);
-      else setError(failure);
+      if (controller.signal.aborted) return;
+      if (failure instanceof ApiError && failure.code === 'duplicate_unit' && failure.archiveConflict) {
+        review(failure.archiveConflict.proposal);
+        setDuplicate(failure.archiveConflict.existingUnit);
+      } else setError(failure);
     } finally {
-      setBusy(false);
+      if (!controller.signal.aborted) setBusy(false);
     }
   }
 
   async function accept() {
+    const controller = new AbortController();
+    active.current = controller;
     const body = pending ?? { integration_id: integrationId, identifier: magazine.identifier, edition_id: edition, label, kind, date: date || null, idempotency_key: crypto.randomUUID() };
     setPending(body);
     setBusy(true);
     setError(undefined);
     try {
-      const result = await request<Schema['ArchiveUnitAcceptance']>('/search/archive/accept', { method: 'POST', body: JSON.stringify(body) });
+      const result = await request<Schema['ArchiveUnitAcceptance']>('/search/archive/accept', { method: 'POST', body: JSON.stringify(body), signal: controller.signal });
+      if (controller.signal.aborted) return;
       if (!result?.unit?.id) throw new ApiError(200, 'invalid_response', '');
       setAccepted(result.unit);
       setPending(undefined);
     } catch (failure) {
-      if (failure instanceof ApiError && failure.code === 'duplicate_unit') {
-        setDuplicate(failure.existingUnitId);
+      if (controller.signal.aborted) return;
+      if (failure instanceof ApiError && failure.code === 'duplicate_unit' && failure.archiveConflict) {
+        setDuplicate(failure.archiveConflict.existingUnit);
         setPending(undefined);
       } else {
         setError(failure);
         if (failure instanceof ApiError && [400, 404, 409, 422].includes(failure.status)) setPending(undefined);
       }
     } finally {
-      setBusy(false);
+      if (!controller.signal.aborted) setBusy(false);
     }
   }
 
@@ -133,17 +158,18 @@ export function ArchiveUnitReview({ integrationId, magazine, onClose }: {
     <p className="muted">{t('archiveProposalHint')}</p>
     <dl className="job-details">
       <dt>{t('archiveIdentifier')}</dt><dd>{magazine.identifier}</dd>
-      <dt>{t('archiveRawLabel')}</dt><dd>{(proposal?.raw_labels ?? magazine.issues).join(' / ') || t('unknown')}</dd>
-      <dt>{t('archiveRawDates')}</dt><dd>{(proposal?.raw_dates ?? magazine.dates).join(' / ') || t('unknown')}</dd>
+      <dt>{t('volume')}</dt><dd className="archive-raw">{(proposal?.raw_volumes ?? magazine.volumes).join(' / ') || t('unknown')}</dd>
+      <dt>{t('archiveRawLabel')}</dt><dd className="archive-raw">{(proposal?.raw_labels ?? magazine.issues).join(' / ') || t('unknown')}</dd>
+      <dt>{t('archiveRawDates')}</dt><dd className="archive-raw">{(proposal?.raw_dates ?? magazine.dates).join(' / ') || t('unknown')}</dd>
     </dl>
-    {accepted ? <p role="status">{t('archiveUnitCreated')} <a href={`#/publication/${encodeURIComponent(publication)}`}>{accepted.label}</a></p> : <>
+    {accepted ? <p role="status">{t('archiveUnitCreated')} <a ref={acceptedLink} href={`#/publication/${encodeURIComponent(publication)}`}>{accepted.label}</a></p> : <>
       <fieldset disabled={Boolean(pending)}>
         <div className="archive-proposal-fields">
           <label className="field"><span>{t('magazine')}</span><select value={publication} onChange={(event) => void choosePublication(event.target.value)}>
             <option value="" disabled>{t('archiveChoosePublication')}</option>
             {publications.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
           </select></label>
-          <label className="field"><span>{t('edition')}</span><select value={edition} disabled={!publication || editions.length === 0} onChange={(event) => { setEdition(event.target.value); setProposal(undefined); setDuplicate(undefined); setError(undefined); }}>
+          <label className="field"><span>{t('edition')}</span><select value={edition} disabled={busy || !publication || editions.length === 0} onChange={(event) => chooseEdition(event.target.value)}>
             <option value="" disabled>{t('archiveChooseEdition')}</option>
             {editions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
           </select></label>
@@ -153,15 +179,19 @@ export function ArchiveUnitReview({ integrationId, magazine, onClose }: {
         {publication && !busy && editions.length === 0 && <p>{t('archiveNoEditions')}</p>}
         {edition && !proposal && !duplicate && <Button disabled={busy} onClick={() => void propose()}>{t('archiveReviewProposal')}</Button>}
       </fieldset>
-      {proposal && !duplicate && <form onSubmit={(event) => { event.preventDefault(); void accept(); }}>
+      {proposal && <form onSubmit={(event) => { event.preventDefault(); void accept(); }}>
+        {proposal.date_warnings.length > 0 && <div role="status">
+          <p>{t('archiveDateWarning')}</p>
+          <ul>{proposal.date_warnings.map((unit) => <li key={unit.id}><a href={`#/publication/${encodeURIComponent(unit.publication_id)}`}>{unit.label}</a></li>)}</ul>
+        </div>}
         {proposal.combined && <p><StatusBadge kind="warning" label={t('archiveCombinedWarning')} /></p>}
         <fieldset disabled={busy || Boolean(pending)}>
           <div className="archive-proposal-fields">
-            <label className="field"><span>{t('label')}</span><input required value={label} onChange={(event) => setLabel(event.target.value)} /></label>
-            <label className="field"><span>{t('unitKind')}</span><select value={kind} disabled={proposal.combined} onChange={(event) => {
+            <label className="field"><span>{t('label')}</span><input required value={label} onChange={(event) => { setLabel(event.target.value); setDuplicate(undefined); }} /></label>
+            <label className="field"><span>{t('unitKind')}</span><select value={kind} onChange={(event) => {
               const value = event.target.value;
               if (value === 'issue' || value === 'chapter' || value === 'volume' || value === 'special' || value === 'combined') setKind(value);
-            }}>{(['issue', 'chapter', 'volume', 'special', 'combined'] as const).map((value) => <option key={value} value={value}>{t(value)}</option>)}</select></label>
+            }}>{(['issue', 'chapter', 'volume', 'special', 'combined'] as const).filter((value) => !proposal.combined || value === 'issue' || value === 'combined').map((value) => <option key={value} value={value}>{t(value)}</option>)}</select></label>
             <label className="field"><span>{t('date')} ({t('archiveProposalDateFormat')})</span><input value={date} pattern="[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?" onChange={(event) => setDate(event.target.value)} /></label>
           </div>
           <p className="muted">{t('archiveDatePrecision')}: {t(date.length === 4 ? 'archiveYearPrecision' : date.length === 7 ? 'archiveMonthPrecision' : date.length === 10 ? 'archiveDayPrecision' : 'unknown')}</p>
@@ -169,7 +199,7 @@ export function ArchiveUnitReview({ integrationId, magazine, onClose }: {
         {pending && !busy && <p role="status">{t('archiveAcceptRetryHint')}</p>}
         <Button type="submit" variant="primary" disabled={busy}>{t(pending ? 'archiveRetryAccept' : 'archiveAcceptUnit')}</Button>
       </form>}
-      {duplicate && <p role="alert">{t('archiveDuplicateWarning')} <span className="path">{duplicate}</span></p>}
+      {duplicate && <p role="alert">{t('archiveDuplicateWarning')} <a href={`#/publication/${encodeURIComponent(duplicate.publication_id)}`}>{duplicate.label}</a></p>}
     </>}
     <ErrorNotice error={error} retry={!publication ? () => void loadPublications(null) : editions.length === 0 ? () => void choosePublication(publication) : undefined} />
     {busy && <Loading />}

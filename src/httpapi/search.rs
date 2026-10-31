@@ -242,12 +242,13 @@ async fn archive_accept(
 
 fn archive_proposal_error(error: ArchiveProposalError) -> Response {
     match error {
-        ArchiveProposalError::Duplicate { existing_unit_id, proposal } => (
+        ArchiveProposalError::Duplicate { existing_unit, proposal } => (
             StatusCode::CONFLICT,
             [(header::CACHE_CONTROL, "no-store")],
             Json(serde_json::json!({
                 "error": { "code": "duplicate_unit", "message": "This Archive proposal matches an existing catalog unit", "trace_id": uuid::Uuid::new_v4().to_string() },
-                "existing_unit_id": existing_unit_id,
+                "existing_unit_id": existing_unit.id,
+                "existing_unit": existing_unit,
                 "proposal": proposal,
             })),
         ).into_response(),

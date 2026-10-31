@@ -214,7 +214,7 @@ Restore to a fresh directory for rollback; do not point an older executable at a
 database migrated by a newer version. There is no promise of backward schema
 compatibility or automated downgrade.
 
-Migration 023 adds durable Archive unit acceptance receipts. It does not rewrite catalog units or provider links. Back up the database and encryption key before starting the upgraded service; startup applies the additive table migration. Receipts retain the original reviewed response and raw source metadata so retries remain stable after restarts or source changes. Existing Archive provenance stays in `provider_links`. For rollback, stop the upgraded service and restore the pre-upgrade backup into a fresh state directory with the previous executable. Older versions reject the newer schema; there is no in-place downgrade.
+Migration 023 adds durable Archive unit acceptance receipts. Each receipt references its created unit with a restrictive foreign key; remove neither as a retry workaround. It does not rewrite catalog units or provider links. Back up the database and encryption key before starting the upgraded service; startup applies the additive table migration. Receipts retain the original reviewed response and raw source metadata so retries remain stable after restarts or source changes. Existing Archive provenance stays in `provider_links`. For rollback, stop the upgraded service and restore the pre-upgrade backup into a fresh state directory with the previous executable. Older versions reject the newer schema; there is no in-place downgrade.
 
 ## Verification
 
