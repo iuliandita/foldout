@@ -9,11 +9,14 @@ const paths = ["README.md", "CONTRIBUTING.md", "SECURITY.md", "LICENSE", "docs",
 test.each([
   { name: "valid map and links", file: "", before: "", after: "", expected: "" },
   { name: "missing mapped path", file: "docs/MAINTENANCE.md", before: "`src/config.rs`", after: "`src/missing.rs`", expected: "Missing map path" },
+  { name: "missing review doc", file: "docs/MAINTENANCE.md", before: "`docs/formats.md`", after: "`docs/missing.md`", expected: "Missing map path" },
+  { name: "path escape", file: "docs/MAINTENANCE.md", before: "`src/config.rs`", after: "`../../etc/passwd`", expected: "outside repository" },
+  { name: "missing required area", file: "docs/MAINTENANCE.md", before: "| Reader |", after: "| Other |", expected: "missing area Reader" },
   { name: "missing link target", file: "README.md", before: "docs/operations.md#container", after: "docs/missing.md", expected: "broken link" },
-  { name: "broken link", file: "README.md", before: "docs/operations.md#container", after: "docs/operations.md#missing", expected: "broken anchor" },
+  { name: "broken anchor", file: "README.md", before: "docs/operations.md#container", after: "docs/operations.md#missing", expected: "broken anchor" },
   { name: "malformed map", file: "docs/MAINTENANCE.md", before: "| CLI |", after: "| CLI | extra |", expected: "Malformed map" },
   { name: "stale claim", file: "src/config.rs", before: '"LIBRARY_WORKERS"', after: '"REMOVED_WORKERS"', expected: "Missing environment claim" },
-])("$name", ({ file, before, after, expected }) => {
+])("$name", ({ name, file, before, after, expected }) => {
   const root = mkdtempSync(resolve(tmpdir(), "foldout-doc-map-"));
   try {
     for (const path of paths) {
@@ -21,6 +24,8 @@ test.each([
       mkdirSync(dirname(destination), { recursive: true });
       cpSync(resolve(import.meta.dir, "..", path), destination, { recursive: true, filter: source => !source.includes("/docs/local") });
     }
+    const readme = resolve(root, "README.md");
+    writeFileSync(readme, readFileSync(readme, "utf8") + "\n## [Linked heading](https://example.com)\n\n`[ignored](nope.md)` [heading](#linked-heading) [root](/docs/operations.md?view=1#container) [source](api/openapi.yaml?view=1#L10)\n");
     if (file) {
       const path = resolve(root, file);
       const original = readFileSync(path, "utf8");
@@ -30,6 +35,10 @@ test.each([
     const errors = checkDocsMap(root);
     if (expected) expect(errors.some(error => error.includes(expected))).toBe(true);
     else expect(errors).toEqual([]);
+    if (name === "path escape") {
+      writeFileSync(readme, readFileSync(readme, "utf8") + "\n[escape](../../etc/passwd)\n");
+      expect(checkDocsMap(root).some(error => error.includes("link outside repository"))).toBe(true);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

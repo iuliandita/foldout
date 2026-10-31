@@ -17,7 +17,7 @@ For migration or backup-format changes, add actionable upgrade, backup, rollback
 
 The API contract is `api/openapi.yaml`; `scripts/generate-api` generates the web types and `scripts/check` verifies them. The checks below validate paths, local links, and these narrowly scoped documented source claims, not prose accuracy or live recovery.
 
-## Checked source claims
+## Listed strings checked in source and docs
 
 - Environment in `src/config.rs`, documented in `README.md`: `LIBRARY_STATE_DIR`, `LIBRARY_LISTEN`, `LIBRARY_ORIGIN`, `LIBRARY_WORKERS`.
 - Commands in `src/cli.rs`, documented in `README.md`: `backup`, `restore`.
