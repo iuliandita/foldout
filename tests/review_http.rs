@@ -461,7 +461,7 @@ async fn acquisition_review_states_and_resume_http_guards() {
             StatusCode::BAD_REQUEST,
         ),
     ] {
-        for action in ["resume-polling", "resume-import"] {
+        for action in ["resume-polling", "resume-import", "reassess-selection"] {
             let mut request = Request::builder()
                 .method("POST")
                 .uri(format!("/api/v1/acquisition/{id}/{action}"))

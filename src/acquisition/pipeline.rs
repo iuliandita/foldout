@@ -18,7 +18,9 @@ use crate::{
         },
     },
     jobs::store::{canonical_json, enqueue_in_transaction, fingerprint, validate_label},
-    search::selection::{SelectionError, SelectionRepository},
+    search::selection::{
+        Decision, DecisionAction, NewDecision, SelectionError, SelectionRepository,
+    },
     search::{self, SearchError, digest, now, source_fingerprint},
     settings::{
         ClientOptions, Integration, IntegrationAdapter, IntegrationKind, IntegrationOptions,
@@ -37,6 +39,10 @@ pub enum PipelineError {
     Conflict,
     #[error("Move cleanup requires review or abandonment before recovery")]
     ImportCleanupReview,
+    #[error("selection is still current; reassessment is unnecessary")]
+    SelectionCurrent,
+    #[error("refresh the same release in search before reassessing")]
+    SelectionRefreshRequired,
     #[error(transparent)]
     Search(#[from] SearchError),
     #[error(transparent)]
@@ -164,6 +170,31 @@ pub struct CorrectMapping {
     pub polling_fingerprint: String,
     pub source_root_id: String,
     pub source_relative_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReassessSelection {
+    pub revision: i64,
+    pub polling_fingerprint: String,
+    pub acknowledged_assessment_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReassessedSelection {
+    pub acquisition: Acquisition,
+    pub release_handle: String,
+    pub decision: Decision,
+}
+
+struct SelectionValidation {
+    revision: i64,
+    polling_fingerprint: String,
+    unit_id: String,
+    release_handle: String,
+    key: String,
+    decision_request: NewDecision,
+    decision_fingerprint: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -388,6 +419,138 @@ impl Pipeline {
             .bind(job_id).execute(&mut *tx).await?;
         tx.commit().await?;
         self.get(owner, id).await
+    }
+
+    pub async fn reassess_selection(
+        &self,
+        settings: &Settings,
+        owner: &str,
+        id: &str,
+        request: ReassessSelection,
+    ) -> Result<ReassessedSelection, PipelineError> {
+        let validated = self
+            .prepare_reassessment(settings, owner, id, &request)
+            .await?;
+        self.apply_reassessment(settings, owner, id, &request, validated)
+            .await
+    }
+
+    async fn prepare_reassessment(
+        &self,
+        settings: &Settings,
+        owner: &str,
+        id: &str,
+        request: &ReassessSelection,
+    ) -> Result<SelectionValidation, PipelineError> {
+        let mut tx = self.store.reader().begin().await?;
+        let row = reassessment_review_in(&mut tx, owner, id, request).await?;
+        let release_handle: String = row.try_get("release_handle")?;
+        let unit_id: String = row.try_get("unit_id")?;
+        tx.commit().await?;
+        // Cached evidence only. Expired handles must be refreshed by an explicit search.
+        let assessment = search::Search::new(self.store.clone(), settings.clone())
+            .assess_release(
+                owner,
+                search::ReleaseAssessmentRequest {
+                    release_handle: release_handle.clone(),
+                    unit_id: unit_id.clone(),
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                SearchError::NotFound => PipelineError::SelectionRefreshRequired,
+                other => other.into(),
+            })?;
+        let key = Uuid::new_v4().to_string();
+        let decision_request = NewDecision {
+            assessment_id: assessment.assessment_id,
+            action: DecisionAction::Selected,
+            acknowledged_assessment_id: request.acknowledged_assessment_id.clone(),
+            reason: None,
+        };
+        let decision_fingerprint =
+            SelectionRepository::prepare_decision(owner, &key, &decision_request)?;
+        Ok(SelectionValidation {
+            revision: request.revision,
+            polling_fingerprint: request.polling_fingerprint.clone(),
+            unit_id,
+            release_handle,
+            key,
+            decision_request,
+            decision_fingerprint,
+        })
+    }
+
+    async fn apply_reassessment(
+        &self,
+        settings: &Settings,
+        owner: &str,
+        id: &str,
+        request: &ReassessSelection,
+        validated: SelectionValidation,
+    ) -> Result<ReassessedSelection, PipelineError> {
+        let SelectionValidation {
+            revision,
+            polling_fingerprint,
+            unit_id,
+            release_handle,
+            key,
+            decision_request,
+            decision_fingerprint,
+        } = validated;
+        let mut tx = self.store.begin_write().await?;
+        let row = reassessment_review_in(&mut tx, owner, id, request).await?;
+        if revision != request.revision || polling_fingerprint != request.polling_fingerprint {
+            return Err(PipelineError::Conflict);
+        }
+        if !client_configuration_current_in(
+            &mut tx,
+            settings,
+            row.try_get("client_id")?,
+            row.try_get("client_kind")?,
+            row.try_get("client_fingerprint")?,
+        )
+        .await?
+        {
+            return Err(PipelineError::Conflict);
+        }
+        let decision = SelectionRepository::decide_in(
+            &mut tx,
+            owner,
+            &key,
+            decision_request,
+            &decision_fingerprint,
+        )
+        .await?;
+        SelectionRepository::validate_selected_decision_in(
+            &mut tx,
+            owner,
+            &decision.id,
+            &unit_id,
+            &release_handle,
+        )
+        .await?;
+        // Retire only this unsubmitted intent. Its immutable request remains replayable.
+        // A new intent must pass normal creation and submission authorization again.
+        let changed = sqlx::query("UPDATE acquisition_runs SET state = 'canceled', reason = NULL, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND reason = 'selection_review_required' AND attempted = 0")
+            .bind(id).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 {
+            return Err(PipelineError::Conflict);
+        }
+        let job_id: &str = row.try_get("job_id")?;
+        let changed = sqlx::query("UPDATE jobs SET state = 'canceled', reason = NULL, updated_at = unixepoch() WHERE id = ? AND state = 'needs_review' AND worker IS NULL AND lease_until IS NULL AND retry_at IS NULL")
+            .bind(job_id).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 {
+            return Err(PipelineError::Conflict);
+        }
+        sqlx::query("INSERT INTO job_events (job_id, event, from_state, to_state, reason, created_at) VALUES (?, 'acquisition_selection_reassessed', 'needs_review', 'canceled', ?, unixepoch())")
+            .bind(job_id).bind(&decision.id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(ReassessedSelection {
+            acquisition: self.get(owner, id).await?,
+            release_handle,
+            decision,
+        })
     }
 
     pub async fn resume_import(
@@ -1230,6 +1393,60 @@ fn mapping_error(error: ImportError) -> PipelineError {
     }
 }
 
+async fn reassessment_review_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    owner: &str,
+    id: &str,
+    request: &ReassessSelection,
+) -> Result<sqlx::sqlite::SqliteRow, PipelineError> {
+    let (row, revision, lifecycle) = review_in(tx, owner, id).await?;
+    if revision != request.revision
+        || polling_fingerprint_in(tx, id).await? != request.polling_fingerprint
+        || lifecycle != ReviewLifecycle::Returned
+        || row.try_get::<&str, _>("state")? != "needs_review"
+        || row.try_get::<Option<&str>, _>("reason")? != Some("selection_review_required")
+        || row.try_get::<&str, _>("job_state")? != "needs_review"
+        || row.try_get::<Option<&str>, _>("job_reason")? != Some("selection_review_required")
+        || row.try_get::<Option<String>, _>("job_worker")?.is_some()
+        || row.try_get::<Option<i64>, _>("job_lease")?.is_some()
+        || row.try_get::<Option<i64>, _>("job_retry")?.is_some()
+        || row.try_get::<bool, _>("attempted")?
+        || row
+            .try_get::<Option<String>, _>("payload_digest")?
+            .is_some()
+        || row.try_get::<Option<String>, _>("torrent_hash")?.is_some()
+        || row.try_get::<i64, _>("receipt_count")? != 0
+        || row.try_get::<Option<String>, _>("import_id")?.is_some()
+        || row.try_get::<Option<String>, _>("source_root")?.is_some()
+    {
+        return Err(PipelineError::Conflict);
+    }
+    let bound: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM acquisition_runs a JOIN acquisition_intents i ON i.id = a.id JOIN release_decisions d ON d.id = a.selection_decision_id JOIN release_assessments s ON s.id = d.assessment_id JOIN search_releases r ON r.handle = a.release_handle JOIN integrations c ON c.id = a.client_id WHERE a.id = ? AND json_extract(i.request, '$.selection_decision_id') = d.id AND json_extract(i.request, '$.client_id') = a.client_id AND json_extract(i.request, '$.unit_id') = a.unit_id AND json_extract(i.request, '$.release_handle') = a.release_handle AND a.client_kind = c.kind AND a.category = json_extract(c.options, '$.category') AND d.owner = i.caller AND d.action = 'selected' AND s.owner = i.caller AND r.owner = i.caller AND s.unit_id = a.unit_id AND s.release_handle = a.release_handle AND s.integration_id = r.integration_id AND s.source_fingerprint = r.source_fingerprint AND s.indexer_id = r.indexer_id AND s.guid_digest = r.guid_digest AND s.protocol = r.protocol AND s.content_type = r.content_type AND NOT EXISTS(SELECT 1 FROM import_operations WHERE unit_id = a.unit_id OR destination_path = a.destination_path))")
+        .bind(id).fetch_one(&mut **tx).await?;
+    if !bound {
+        return Err(PipelineError::Conflict);
+    }
+    match SelectionRepository::validate_selected_decision_in(
+        tx,
+        owner,
+        row.try_get::<&str, _>("selection_decision_id")?,
+        row.try_get("unit_id")?,
+        row.try_get("release_handle")?,
+    )
+    .await
+    {
+        Ok(_) => return Err(PipelineError::SelectionCurrent),
+        Err(
+            SelectionError::Expired
+            | SelectionError::Changed
+            | SelectionError::Superseded
+            | SelectionError::Rejected,
+        ) => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(row)
+}
+
 async fn mapping_review_in(
     tx: &mut Transaction<'_, Sqlite>,
     owner: &str,
@@ -1654,7 +1871,7 @@ async fn polling_fingerprint_in(
     id: &str,
 ) -> Result<String, PipelineError> {
     // Configuration and receipt edits do not necessarily append job events.
-    let evidence: String = sqlx::query_scalar("SELECT json_array(a.release_handle, a.client_id, a.client_fingerprint, a.client_kind, a.category, a.unit_id, a.attempted, a.payload_digest, a.torrent_hash, a.state, a.reason, a.import_id, a.source_root, a.source_relative, a.destination_root, a.destination_relative, a.destination_path, a.selection_decision_id, (SELECT path FROM library_roots WHERE id = a.source_root), (SELECT path FROM library_roots WHERE id = a.destination_root), i.caller, i.request, i.request_fingerprint, (SELECT json_group_array(json_array(ordinal, external_id, completed)) FROM (SELECT ordinal, external_id, completed FROM acquisition_receipts WHERE acquisition_id = a.id ORDER BY ordinal)), (SELECT json_array(kind, label, base_url, enabled, options, secret_version, hex(secret_nonce), hex(secret_ciphertext)) FROM integrations WHERE id = a.client_id), (SELECT json_array(id, source_root, destination_root, destination_relative, destination_path, unit_id, request_json, identity_json, phase, effective_policy, staged_identity_json, validation, library_file_id, last_error, source_cleanup_state) FROM import_operations WHERE id = a.import_id)) FROM acquisition_runs a JOIN acquisition_intents i ON i.id = a.id WHERE a.id = ?")
+    let evidence: String = sqlx::query_scalar("SELECT json_array(a.release_handle, a.client_id, a.client_fingerprint, a.client_kind, a.category, a.unit_id, a.attempted, a.payload_digest, a.torrent_hash, a.state, a.reason, a.import_id, a.source_root, a.source_relative, a.destination_root, a.destination_relative, a.destination_path, a.selection_decision_id, (SELECT json_array(s.integration_id, s.source_fingerprint, s.indexer_id, s.guid_digest, s.content_type, s.protocol, s.evidence_json, s.expires_at, (SELECT json_array(kind, label, base_url, enabled, options, secret_version, hex(secret_nonce), hex(secret_ciphertext)) FROM integrations WHERE id = s.integration_id)) FROM search_releases s WHERE s.handle = a.release_handle), (SELECT json_array(d.owner, d.assessment_id, d.action, d.superseded_by) FROM release_decisions d WHERE d.id = a.selection_decision_id), (SELECT path FROM library_roots WHERE id = a.source_root), (SELECT path FROM library_roots WHERE id = a.destination_root), i.caller, i.request, i.request_fingerprint, (SELECT json_group_array(json_array(ordinal, external_id, completed)) FROM (SELECT ordinal, external_id, completed FROM acquisition_receipts WHERE acquisition_id = a.id ORDER BY ordinal)), (SELECT json_array(kind, label, base_url, enabled, options, secret_version, hex(secret_nonce), hex(secret_ciphertext)) FROM integrations WHERE id = a.client_id), (SELECT json_array(id, source_root, destination_root, destination_relative, destination_path, unit_id, request_json, identity_json, phase, effective_policy, staged_identity_json, validation, library_file_id, last_error, source_cleanup_state) FROM import_operations WHERE id = a.import_id)) FROM acquisition_runs a JOIN acquisition_intents i ON i.id = a.id WHERE a.id = ?")
         .bind(id).fetch_one(&mut **tx).await?;
     Ok(fingerprint(&evidence))
 }

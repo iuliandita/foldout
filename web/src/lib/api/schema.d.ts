@@ -668,6 +668,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/acquisition/{id}/reassess-selection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires manage scope. Only an unattempted needs_review intent stopped with selection_review_required and a stale selected decision is eligible. Requires the exact owner-scoped terminal review revision and polling_fingerprint, complete actual-return claim history, no receipts, no payload fence and no import or source association. Refresh an expired handle with an explicit search first, then obtain a terminal review. Uses the existing cached assessment service before the write transaction; performs no provider requests or download-client writes. Unknown evidence requires acknowledged_assessment_id from a fresh release-assessments response for the same owner, unit and release. The transaction revalidates the snapshot, original binding, current client/indexer configuration, current assessment and scoped rejection history, records a NEW selected decision and an audit event containing its ID, and retires the old intent as canceled. Returns the new decision and original release handle for normal acquisition creation with a NEW idempotency key. The original request remains immutable and replays return that canceled intent. Creation and submission still recheck selection; no acquisition is automatically queued. Replays of this action return 409. Never clears attempted-submission uncertainty or revives a superseded decision. Cookie authentication requires a matching Origin. */
+        post: operations["reassessAcquisitionSelection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/acquisition/{id}/resume-import": {
         parameters: {
             query?: never;
@@ -1771,6 +1788,22 @@ export interface components {
             /** Format: int64 */
             revision: number;
             polling_fingerprint: string;
+        };
+        ReassessSelection: {
+            /** Format: int64 */
+            revision: number;
+            polling_fingerprint: string;
+            /**
+             * Format: uuid
+             * @description For unknown evidence only: exact fresh assessment ID obtained through release-assessments. Never reuse an expired acknowledgement.
+             */
+            acknowledged_assessment_id?: string | null;
+        };
+        ReassessedSelection: {
+            acquisition: components["schemas"]["Acquisition"];
+            /** Format: uuid */
+            release_handle: string;
+            decision: components["schemas"]["ReleaseDecision"];
         };
         ResumeImport: {
             /** Format: int64 */
@@ -5027,6 +5060,96 @@ export interface operations {
                 };
             };
             /** @description acquisition_conflict: stale or replayed snapshot, changed configuration or receipts, or polling recovery is unsafe */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    reassessAcquisitionSelection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReassessSelection"];
+            };
+        };
+        responses: {
+            /** @description Fresh selected decision; original unsubmitted intent retired without queuing work */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReassessedSelection"];
+                };
+            };
+            /** @description invalid_request: invalid input or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: acquisition or integration not found for caller. selection_not_found: prepared selection record disappeared; assess again. unit_not_found: catalog target disappeared. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description acquisition_conflict: stale revision/fingerprint, replay, changed client configuration, active/unproven work, receipts, submission fence or ineligible terminal state; obtain a new review and resolve unsafe work. selection_current: original selection remains valid; no reassessment needed. selection_refresh_required: cached handle expired or lacks evidence; explicitly search for the same release again. integration_changed: indexer configuration changed; restore it or select through a new search. not_configured: indexer is disabled or lacks credentials; configure it before reassessment. target_changed or assessment_changed: target or policy changed during reassessment; assess and review again. assessment_expired: the prepared assessment expired; refresh search and assess again. assessment_acknowledgement_required: acknowledge the exact fresh assessment through acknowledged_assessment_id. release_ineligible: current evidence conflicts with the unit; choose another release. release_rejected: current scoped rejection blocks selection; review rejection history. selection_superseded: a later rejection invalidated the new decision; explicitly select after revocation. selection_conflict: selection idempotency conflict. */
             409: {
                 headers: {
                     [name: string]: unknown;
