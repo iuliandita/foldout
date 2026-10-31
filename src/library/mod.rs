@@ -1,4 +1,5 @@
 pub mod coverage;
+pub mod hints;
 pub mod metadata;
 pub mod roots;
 pub mod scan;
@@ -63,3 +64,6 @@ pub struct LibraryFile {
 
 #[cfg(test)]
 mod coverage_test;
+
+#[cfg(test)]
+mod hints_test;
