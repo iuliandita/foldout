@@ -14,6 +14,11 @@ After installing the pinned dependencies described in the README, run:
 
 This is the same offline gate used by CI. It first tests and checks documented version facts, then checks Rust formatting, Clippy and tests with and without the embedded interface, generated API types, TypeScript, the interface build, and the release executable. Change `api/openapi.yaml` and regenerate with `./scripts/generate-api`; do not hand-edit generated types. Run UI changes in both themes and interface languages, at desktop and mobile widths, with keyboard focus visible. Report what was exercised and any unverified behavior.
 
+The opt-in [soak protocol](docs/soak.md) exercises owned loopback fixtures against
+a disposable debug service. Its classification test runs in `scripts/check`; the
+180-second smoke and multi-day profile are explicit operator commands, not
+long-running CI jobs. A fixture pass does not establish household acceptance.
+
 ## Documentation impact
 
 Use the [documentation routing map](docs/MAINTENANCE.md) to review affected guidance. For each change, update the affected guidance or explain specifically why documented behavior stays the same. Review the whole pull request, including earlier changes to migrations or persistent formats. SQLite migrations and backup or encryption format changes need compatibility, upgrade, backup, and rollback instructions plus appropriate isolated validation. Never edit a published migration.

@@ -98,3 +98,15 @@ staging and normal submission checks. Changed chapter metadata requires selectin
 again. An existing import journal, coverage or published transfer requires
 separate import/local review. `local_review` requires inspecting the configured
 root or staging identity.
+
+## Disposable soak qualification
+
+The opt-in [soak protocol](soak.md) combines review-only monitoring, direct archive
+resume/restart, explicit indexer selection, mapping correction, and same-journal
+import recovery against owned loopback fixtures. The debug-only `soak-fixtures`
+build rewrites archive transport to its literal loopback fixture socket before
+DNS or connect; normal integration network policies stay unchanged. The runner
+refuses binaries without that build marker. Release builds reject this feature.
+The short smoke does not establish multi-day behavior or production integration
+acceptance. Real-household acceptance stays unmeasured until the owner separately
+authorizes and records an observation.

@@ -117,6 +117,15 @@ loopback cannot establish reference-host or LAN acceptance, which remains
 `--host-metadata` and `--network-metadata`. Do not interpret a fixture pass as
 acceptance evidence. The owner must measure the reference environment and LAN.
 
+## Disposable soak evidence
+
+Use the opt-in [disposable soak protocol](soak.md) for a bounded worker, transfer,
+import and reviewed recovery workload. Its default 180-second debug smoke uses
+owned loopback fixtures and retained private evidence; it never uses household
+state or production clients. The documented 72-hour fixture profile has not been
+observed by adding this harness. Real-household acceptance remains unmeasured
+until the owner separately authorizes and records that observation.
+
 ## Initial administrator
 
 Fresh instances require a setup token before an administrator

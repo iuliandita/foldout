@@ -477,7 +477,7 @@ impl Direct {
                     .ok_or(DirectError::RestartRequired)?
                     .url()
                     .clone();
-                #[cfg(test)]
+                #[cfg(any(test, feature = "soak-fixtures"))]
                 let url = if let Some(address) = self.fixture {
                     let mut target = reqwest::Url::parse(&format!("http://{address}/"))
                         .map_err(|_| DirectError::Invalid)?;

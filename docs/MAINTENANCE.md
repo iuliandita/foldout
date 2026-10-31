@@ -11,6 +11,7 @@ Review the listed documents when changing a source. Update affected guidance or 
 | Backup and encryption | `src/backup`, `src/settings/encryption.rs` | `README.md`, `docs/operations.md` |
 | Reader | `src/reader` | `README.md`, `docs/formats.md` |
 | Integrations | `src/clients`, `src/providers`, `src/acquisition` | `README.md`, `docs/integrations.md` |
+| Soak evidence | `scripts/soak`, `tests/soak_report_test.py`, `docs/soak-report-template.json` | `docs/soak.md`, `docs/operations.md` |
 | Build and web assets | `Cargo.toml`, `Dockerfile`, `web/src`, `src/webassets.rs` | `README.md`, `docs/operations.md` |
 
 For migration or backup-format changes, add actionable upgrade, backup, rollback, and compatibility notes, and validate them with isolated state. Never edit a published migration.

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { checkDocsMap } from "./check-docs-map";
 
-const paths = ["README.md", "CONTRIBUTING.md", "SECURITY.md", "LICENSE", "docs", "src", "migrations", "api", "web/src", "scripts", "Cargo.toml", "Dockerfile", "build.rs", "tests/fixtures/LICENSE.txt", "tests/fixtures/rar/LICENSE", "tests/fixtures/manifest.json"];
+const paths = ["README.md", "CONTRIBUTING.md", "SECURITY.md", "LICENSE", "docs", "src", "migrations", "api", "web/src", "scripts", "Cargo.toml", "Dockerfile", "build.rs", "tests/soak_report_test.py", "tests/fixtures/LICENSE.txt", "tests/fixtures/rar/LICENSE", "tests/fixtures/manifest.json"];
 
 test.each([
   { name: "valid map and links", file: "", before: "", after: "", expected: "" },

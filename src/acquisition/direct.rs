@@ -98,7 +98,7 @@ impl From<sqlx::Error> for DirectError {
 #[derive(Clone)]
 pub struct Direct {
     store: SqliteStore,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "soak-fixtures"))]
     fixture: Option<SocketAddr>,
 }
 #[derive(Deserialize)]
@@ -209,8 +209,10 @@ impl Direct {
     pub fn new(store: SqliteStore) -> Self {
         Self {
             store,
-            #[cfg(test)]
+            #[cfg(all(test, not(feature = "soak-fixtures")))]
             fixture: None,
+            #[cfg(feature = "soak-fixtures")]
+            fixture: soak_address(),
         }
     }
 
@@ -988,7 +990,7 @@ impl Direct {
         url: &reqwest::Url,
     ) -> Result<(reqwest::Client, reqwest::Url), DirectError> {
         archive_format(url)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "soak-fixtures"))]
         if let Some(address) = self.fixture {
             let mut target = reqwest::Url::parse(&format!("http://{address}/"))
                 .map_err(|_| DirectError::Invalid)?;
@@ -1616,3 +1618,17 @@ impl Stage {
 #[cfg(test)]
 #[path = "direct_test.rs"]
 mod tests;
+
+#[cfg(feature = "soak-fixtures")]
+fn soak_address() -> Option<SocketAddr> {
+    std::env::var("LIBRARY_SOAK_ADDRESS").ok().map(|value| {
+        let address: SocketAddr = value
+            .parse()
+            .expect("soak address must be a literal socket");
+        assert!(
+            address.ip().is_loopback() && address.port() != 0,
+            "soak address must be loopback"
+        );
+        address
+    })
+}
