@@ -750,11 +750,12 @@ async fn bounded_http_session(
     origin: &str,
     token: &str,
     clock: Instant,
+    iterations: usize,
 ) -> Result<(Timings, HttpWindows)> {
     let mut times = Timings::new();
     let mut windows = Vec::with_capacity(40);
     let mut cursor = None::<String>;
-    for index in 0..20 {
+    for index in 0..iterations {
         let mut url = reqwest::Url::parse(&format!("{origin}/api/v1/publications"))?;
         url.query_pairs_mut().append_pair("limit", "100");
         if let Some(cursor) = &cursor {
@@ -959,11 +960,11 @@ async fn journal_http_run(directory: &Path, monitor: &Monitor) -> Result<Value> 
         // join! drains all bounded operations even when one fails; no detached copy on ordinary errors.
         let results = tokio::join!(
             copying,
-            bounded_http_session(&clients[0], &origin, &tokens[0], clock),
-            bounded_http_session(&clients[1], &origin, &tokens[1], clock),
-            bounded_http_session(&clients[2], &origin, &tokens[2], clock),
-            bounded_http_session(&clients[3], &origin, &tokens[3], clock),
-            bounded_http_session(&clients[4], &origin, &tokens[4], clock),
+            bounded_http_session(&clients[0], &origin, &tokens[0], clock, 20),
+            bounded_http_session(&clients[1], &origin, &tokens[1], clock, 20),
+            bounded_http_session(&clients[2], &origin, &tokens[2], clock, 20),
+            bounded_http_session(&clients[3], &origin, &tokens[3], clock, 20),
+            bounded_http_session(&clients[4], &origin, &tokens[4], clock, 20),
         );
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
             observed_run,
@@ -1149,6 +1150,357 @@ fn owned_50000_journal_copy_loopback_http() -> Result<()> {
     );
     if !passed {
         return Err("targeted journal/HTTP check failed; see bounded JSON report".into());
+    }
+    Ok(())
+}
+
+struct BinarySampler {
+    stop: Arc<AtomicBool>,
+    peak: Arc<AtomicU64>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for BinarySampler {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("RSS sampler panicked");
+        }
+    }
+}
+
+struct OwnedServer(std::process::Child);
+
+fn owns_listener(pid: u32, port: u16) -> Result<bool> {
+    let table = fs::read_to_string(format!("/proc/{pid}/net/tcp"))?;
+    let address = format!("0100007F:{port:04X}");
+    let inodes: HashSet<String> = table
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            (fields.len() > 9 && fields[1] == address && fields[3] == "0A")
+                .then(|| format!("socket:[{}]", fields[9]))
+        })
+        .collect();
+    for entry in fs::read_dir(format!("/proc/{pid}/fd"))? {
+        let entry = entry?;
+        if let Ok(target) = fs::read_link(entry.path())
+            && inodes.contains(&target.to_string_lossy().into_owned())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+impl Drop for OwnedServer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+async fn binary_session(
+    client: &reqwest::Client,
+    origin: &str,
+    token: &str,
+    clock: Instant,
+    iterations: usize,
+    mut ready: tokio::sync::watch::Receiver<bool>,
+) -> Result<(Timings, HttpWindows)> {
+    tokio::time::timeout(Duration::from_secs(30), ready.wait_for(|value| *value)).await??;
+    bounded_http_session(client, origin, token, clock, iterations).await
+}
+
+async fn binary_run(directory: &Path, count: usize) -> Result<Value> {
+    let root_path = directory.join("library");
+    fs::create_dir(&root_path)?;
+    let corpus = owned_corpus(&root_path, count)?;
+    let state = directory.join("state");
+    let store = SqliteStore::open(&state).await?;
+    EncryptionKey::load_or_create(&state).await?;
+    let auth = AuthService::new(store.clone());
+    auth.setup("benchmark-owner", "owned benchmark password only")
+        .await?;
+    let admin = auth.create_key("binary-admin", Scope::Admin).await?.secret;
+    let mut tokens = Vec::new();
+    for index in 0..5 {
+        tokens.push(
+            auth.create_key(&format!("binary-reader-{index}"), Scope::Read)
+                .await?
+                .secret,
+        );
+    }
+    let library = Library::new(store.clone());
+    let root = library
+        .register_root("Synthetic benchmark", &root_path)
+        .await?;
+    scan(&library, &store, &root.id, count).await?;
+    seed(&store, &root_path, &root.id, count).await?;
+    drop(library);
+    drop(auth);
+    store.close().await;
+    drop(store);
+
+    let reserved = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let address = reserved.local_addr()?;
+    drop(reserved);
+    let origin = format!("http://{address}");
+    let mut server = OwnedServer(
+        std::process::Command::new(env!("CARGO_BIN_EXE_libraryd"))
+            .arg("serve")
+            .env("LIBRARY_STATE_DIR", &state)
+            .env("LIBRARY_LISTEN", address.to_string())
+            .env("LIBRARY_ORIGIN", &origin)
+            .env("LIBRARY_WORKERS", "true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?,
+    );
+    let clients: Vec<_> = (0..5)
+        .map(|_| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(15))
+                .build()
+        })
+        .collect::<std::result::Result<_, _>>()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if server.0.try_wait()?.is_some() {
+            return Err("libraryd exited before readiness".into());
+        }
+        if clients[0]
+            .get(format!("{origin}/health/ready"))
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
+        {
+            if !owns_listener(server.0.id(), address.port())? {
+                return Err("readiness listener does not belong to spawned libraryd".into());
+            }
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("libraryd readiness timed out".into());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for (client, token) in clients.iter().zip(&tokens) {
+        for path in [
+            "/api/v1/publications?limit=100",
+            "/api/v1/library/files/bench-00000/pages/0",
+            "/api/v1/library/files/bench-00008/pages/0",
+        ] {
+            loopback_get(client, &format!("{origin}{path}"), token).await?;
+        }
+    }
+    let settle = Instant::now();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let idle_settle_seconds = settle.elapsed().as_secs_f64();
+    let idle = rss_tree(server.0.id(), &mut HashSet::new());
+    if idle == 0 {
+        return Err("unable to read libraryd RSS".into());
+    }
+    let children_supported = fs::read_to_string(format!(
+        "/proc/{}/task/{}/children",
+        server.0.id(),
+        server.0.id()
+    ))
+    .is_ok();
+    let stop = Arc::new(AtomicBool::new(false));
+    let peak = Arc::new(AtomicU64::new(0));
+    let (sample_stop, sample_peak, pid) = (stop.clone(), peak.clone(), server.0.id());
+    let sampler = std::thread::spawn(move || {
+        while !sample_stop.load(Ordering::Relaxed) {
+            sample_peak.fetch_max(rss_tree(pid, &mut HashSet::new()), Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    let sampler = BinarySampler {
+        stop,
+        peak,
+        thread: Some(sampler),
+    };
+    let clock = Instant::now();
+    let response = clients[0]
+        .post(format!("{origin}/api/v1/library/roots/{}/scan", root.id))
+        .bearer_auth(&admin)
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?;
+    let job: Value = response.json().await?;
+    let job_id = job["id"].as_str().ok_or("scan response missing job ID")?;
+    let (ready, waiting) = tokio::sync::watch::channel(false);
+    let scan = async {
+        let mut observations = Vec::new();
+        loop {
+            let response = clients[0]
+                .get(format!("{origin}/api/v1/jobs/{job_id}"))
+                .bearer_auth(&admin)
+                .send()
+                .await?
+                .error_for_status()?;
+            let job: Value = response.json().await?;
+            let at = clock.elapsed().as_secs_f64();
+            match job["state"].as_str() {
+                Some("running") => {
+                    observations.push(at);
+                    ready.send_replace(true);
+                }
+                Some("completed") => {
+                    ready.send_replace(true);
+                    return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(observations);
+                }
+                Some("failed") => {
+                    ready.send_replace(true);
+                    return Err("scan job failed".into());
+                }
+                Some("queued") => (),
+                _ => {
+                    ready.send_replace(true);
+                    return Err("unexpected scan job state".into());
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let iterations = 20.min((count - 1) / 100);
+    let (scan_observations, a, b, c, d, e) = tokio::join!(
+        scan,
+        binary_session(
+            &clients[0],
+            &origin,
+            &tokens[0],
+            clock,
+            iterations,
+            waiting.clone()
+        ),
+        binary_session(
+            &clients[1],
+            &origin,
+            &tokens[1],
+            clock,
+            iterations,
+            waiting.clone()
+        ),
+        binary_session(
+            &clients[2],
+            &origin,
+            &tokens[2],
+            clock,
+            iterations,
+            waiting.clone()
+        ),
+        binary_session(
+            &clients[3],
+            &origin,
+            &tokens[3],
+            clock,
+            iterations,
+            waiting.clone()
+        ),
+        binary_session(
+            &clients[4],
+            &origin,
+            &tokens[4],
+            clock,
+            iterations,
+            waiting.clone()
+        ),
+    );
+    let mixed_rss = sampler.peak.load(Ordering::Relaxed);
+    drop(sampler);
+    let mut times = Timings::new();
+    let mut windows = Vec::new();
+    for session in [a, b, c, d, e] {
+        let (session_times, session_windows) = session?;
+        for (name, values) in session_times {
+            times.entry(name).or_default().extend(values);
+        }
+        windows.push(session_windows);
+    }
+    let common_start = windows
+        .iter()
+        .map(|w| w.first().unwrap().1)
+        .fold(0.0_f64, f64::max);
+    let common_end = windows
+        .iter()
+        .map(|w| w.last().unwrap().2)
+        .fold(f64::INFINITY, f64::min);
+    let scan_observations = scan_observations?;
+    let overlap = scan_observations
+        .iter()
+        .filter(|at| **at >= common_start && **at <= common_end)
+        .count();
+    let mut http = summary(times);
+    for value in http.as_object_mut().unwrap().values_mut() {
+        let values = value.as_object_mut().unwrap();
+        values.remove("aspirational_300ms_p95_met");
+        values.remove("aspirational_1000ms_p95_met");
+    }
+    Ok(json!({"corpus":corpus, "http":http, "idle_rss_bytes":idle,
+        "idle_settle_seconds":idle_settle_seconds, "binary_path":env!("CARGO_BIN_EXE_libraryd"),
+        "mixed_rss_bytes":mixed_rss, "session_windows_seconds":windows,
+        "five_session_common_window_seconds":[common_start,common_end],
+        "overlap_verified":common_end > common_start && overlap > 0,
+        "scan_running_observed_seconds":scan_observations, "scan_observations_in_five_session_window":overlap,
+        "mixed_workload":"five catalog and warm page sessions with a queued scan; no import",
+        "children_accounting":if children_supported {"available; child processes not exercised"} else {"unavailable; 0 children counted"},
+        "rss_sampling":"50 ms /proc process tree; summed VmRSS overcounts shared pages; short-lived child peaks may be missed"}))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[ignore = "creates owned fixtures and runs a disposable libraryd"]
+async fn owned_binary_loopback_performance() -> Result<()> {
+    let count = std::env::var("BENCHMARK_FILES").map_or(Ok(TARGET), |v| v.parse::<usize>())?;
+    if !(1000..=TARGET).contains(&count) {
+        return Err("BENCHMARK_FILES must be 1000..=50000".into());
+    }
+    let limited = std::process::Command::new("prlimit")
+        .args([
+            "--pid",
+            &std::process::id().to_string(),
+            "--fsize=536870912:536870912",
+        ])
+        .status()?;
+    if !limited.success() {
+        return Err("cannot install benchmark file-size limit".into());
+    }
+    let directory = tempfile::Builder::new()
+        .prefix(".benchmark-binary-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+    let monitor = Monitor::start(directory.path().to_owned());
+    let watchdog = async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            monitor.check()?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<Value, Box<dyn std::error::Error + Send + Sync>>(Value::Null)
+    };
+    let result = tokio::time::timeout(Duration::from_secs(3600), async {
+        tokio::select! {
+            result = binary_run(directory.path(), count) => result,
+            failure = watchdog => failure,
+        }
+    })
+    .await;
+    drop(monitor);
+    let (measurement, failures) = match result {
+        Ok(Ok(value)) => (Some(value), Vec::new()),
+        Ok(Err(error)) => (None, vec![error.to_string()]),
+        Err(error) => (None, vec![error.to_string()]),
+    };
+    let cleanup = directory.close();
+    println!(
+        "BENCHMARK_BINARY_RESULT {}",
+        json!({"measurements":measurement,"failures":failures,"cleanup_completed":cleanup.is_ok()})
+    );
+    cleanup?;
+    if !failures.is_empty() {
+        return Err("binary benchmark failed; see report".into());
     }
     Ok(())
 }
