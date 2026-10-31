@@ -9,6 +9,8 @@ publish = false
 [features]
 default = []
 embedded-ui = []
+# Owned loopback transport for scripts/soak; deliberately unavailable in release builds.
+soak-fixtures = []
 
 [dependencies]
 axum = "=0.8.9"

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "fixture_class": "owned loopback",
+  "artifact": {
+    "git_commit": null,
+    "checkout_git_commit": null,
+    "binary_version": null,
+    "dirty_tree": null,
+    "binary_sha256": null,
+    "build_profile": null
+  },
+  "window": {
+    "started_at": null,
+    "ended_at": null,
+    "requested_seconds": null,
+    "elapsed_seconds": null,
+    "interval_seconds": null
+  },
+  "checks": {
+    "monitor_review": false,
+    "direct_resume": false,
+    "direct_restart": false,
+    "mapping_correction": false,
+    "import_recovery": false,
+    "reassessment": false,
+    "service_restart": false
+  },
+  "cycles_completed": 0,
+  "transitions": [],
+  "failures": [],
+  "interrupted": null,
+  "originals_before": {},
+  "originals_after": {},
+  "cleanup_completed": false,
+  "invariants": {
+    "original_hashes_unchanged": false,
+    "loopback_configuration": false
+  },
+  "configured_urls": [],
+  "fixture_bound_addresses": [],
+  "fixture_requests": [],
+  "client_submissions": 0,
+  "real_household": {
+    "authorization": null,
+    "observation": null,
+    "result": "unmeasured"
+  }
+}

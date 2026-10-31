@@ -1,0 +1,697 @@
+#!/usr/bin/env python3
+"""Bounded owned-fixture soak over loopback; never use household state or clients."""
+import argparse
+from contextlib import closing
+import datetime
+from email.parser import BytesParser
+from email.policy import default as email_policy
+import hashlib
+import http.cookiejar
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
+import json
+import math
+import os
+from pathlib import Path
+import re
+import signal
+import socket
+import sqlite3
+import subprocess
+import sys
+import threading
+import traceback
+import time
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlsplit
+from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from xml.sax.saxutils import escape
+
+ROOT = Path(__file__).resolve().parent.parent
+REQUIRED = ("monitor_review", "direct_resume", "direct_restart", "mapping_correction",
+            "import_recovery", "reassessment", "service_restart")
+MAX_DISK = 256 * 1024**2
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+def utc():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def loopback(url):
+    """Only literal loopback HTTP endpoints, with no redirects, DNS or credentials."""
+    parsed = urlsplit(url)
+    if (parsed.scheme != "http" or parsed.username or parsed.password or parsed.query
+            or parsed.fragment or parsed.path not in ("", "/")
+            or not ipaddress.ip_address(parsed.hostname).is_loopback or not parsed.port):
+        raise ValueError("configured URLs must be literal loopback HTTP origins")
+    return url.rstrip("/")
+
+
+def binary_revision(version, checkout_commit):
+    match = re.fullmatch(r"libraryd [0-9][0-9A-Za-z.+-]* \(([0-9a-f]{7})\) \[soak-fixtures debug\]", version)
+    if not match:
+        raise ValueError("binary requires a known source commit and exact soak-fixtures debug version")
+    revision = match.group(1)
+    if not re.fullmatch(r"[0-9a-f]{40}", checkout_commit) or revision != checkout_commit[:7]:
+        raise ValueError("binary source commit does not match checkout HEAD")
+    return revision
+
+
+def loopback_configuration(urls, addresses):
+    try:
+        return (len(urls) == 2 and all(loopback(url) == url for url in urls)
+                and len(addresses) == 1 and all(
+                    len(address) == 2 and ipaddress.ip_address(address[0]).is_loopback
+                    and type(address[1]) is int and 0 < address[1] <= 65535 for address in addresses))
+    except (TypeError, ValueError):
+        return False
+
+
+def classifications(report):
+    invalid = {"fixture result": "invalid", "multi-day observation": "unmeasured",
+               "real-household acceptance": "unmeasured"}
+    try:
+        if type(report["schema_version"]) is not int or report["schema_version"] != 1 or report["fixture_class"] != "owned loopback":
+            return invalid
+        artifact = report["artifact"]
+        for key, size in (("git_commit", 7), ("checkout_git_commit", 40), ("binary_sha256", 64)):
+            value = artifact[key]
+            if not isinstance(value, str) or len(value) != size or any(c not in "0123456789abcdef" for c in value):
+                return invalid
+        if type(artifact["dirty_tree"]) is not bool or artifact["build_profile"] != "debug; soak-fixtures":
+            return invalid
+        if binary_revision(artifact["binary_version"], artifact["checkout_git_commit"]) != artifact["git_commit"]:
+            return invalid
+        urls = report["configured_urls"]
+        if (not isinstance(urls, list) or len(urls) != 2
+                or any(not isinstance(url, str) or loopback(url) != url for url in urls)):
+            return invalid
+        addresses = report["fixture_bound_addresses"]
+        if (not isinstance(addresses, list) or len(addresses) != 1
+                or any(not isinstance(a, list) or len(a) != 2 or not isinstance(a[0], str)
+                       or type(a[1]) is not int or not 0 < a[1] <= 65535 for a in addresses)):
+            return invalid
+        interrupted = report["interrupted"]
+        if interrupted is not None and (not isinstance(interrupted, str) or not interrupted):
+            return invalid
+        window = report["window"]
+        duration, elapsed = window["requested_seconds"], window["elapsed_seconds"]
+        if (not all(type(n) in (int, float) and math.isfinite(n) and n >= 0
+                    for n in (duration, elapsed)) or duration < 1
+                or not all(isinstance(window[k], str) and window[k] for k in ("started_at", "ended_at"))):
+            return invalid
+        checks, transitions = report["checks"], report["transitions"]
+        before, after = report["originals_before"], report["originals_after"]
+        if (not isinstance(checks, dict) or set(checks) != set(REQUIRED)
+                or any(type(x) is not bool for x in checks.values())
+                or not isinstance(transitions, list) or not transitions
+                or any(not isinstance(t, dict) or not all(isinstance(t.get(k), str) and t[k]
+                                                         for k in ("kind", "id", "state"))
+                       or type(t.get("at_seconds")) not in (int, float)
+                       or not math.isfinite(t["at_seconds"]) or not 0 <= t["at_seconds"] <= elapsed
+                       for t in transitions)
+                or not isinstance(before, dict) or not before or not isinstance(after, dict)
+                or any(not isinstance(v, str) or len(v) != 64 or any(c not in "0123456789abcdef" for c in v)
+                       for v in list(before.values()) + list(after.values()))
+                or not isinstance(report["failures"], list)
+                or any(not isinstance(failure, str) for failure in report["failures"])
+                or not isinstance(report["invariants"], dict)
+                or set(report["invariants"]) != {"original_hashes_unchanged", "loopback_configuration"}
+                or any(type(v) is not bool for v in report["invariants"].values())
+                or not isinstance(report["fixture_requests"], list) or not report["fixture_requests"]
+                or any(not isinstance(r, dict) or not all(k in r for k in ("method", "path", "mode", "range", "if_range"))
+                       for r in report["fixture_requests"])
+                or type(report["client_submissions"]) is not int or report["client_submissions"] < 0
+                or type(report["cleanup_completed"]) is not bool
+                or type(report["cycles_completed"]) is not int or report["cycles_completed"] < 0):
+            return invalid
+        for key in ("started_at", "ended_at"):
+            if datetime.datetime.fromisoformat(window[key]).tzinfo is None:
+                return invalid
+        failed = (bool(report["failures"]) or not all(report["invariants"].values())
+                  or not loopback_configuration(urls, addresses)
+                  or before != after or not report["cleanup_completed"]
+                  or not report["cycles_completed"] <= report["client_submissions"] <=
+                  report["cycles_completed"] + (1 if interrupted else 0))
+        complete = (not interrupted and all(checks.values()) and report["cycles_completed"] >= 1 and elapsed >= duration)
+        verdict = "fail" if failed else "pass" if complete else "unmeasured"
+        return {"fixture result": verdict,
+                "multi-day observation": verdict if complete and duration >= 172800 else "unmeasured",
+                "real-household acceptance": "unmeasured"}
+    except (KeyError, TypeError, ValueError):
+        return invalid
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("redirect refused")
+
+
+class Fixtures:
+    def __init__(self, archive):
+        self.archive = archive
+        self.requests = []
+        self.lock = threading.Lock()
+        self.cuts = set()
+        self.changed = False
+        self.payload_started = threading.Event()
+        self.payload_release = threading.Event()
+        self.payload_release.set()
+        self.submissions = 0
+        fixture = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.handle_request()
+
+            def do_POST(self):
+                self.handle_request()
+
+            def reply(self, body, mime="application/json", status=200, headers=None, cut=False):
+                if isinstance(body, str):
+                    body = body.encode()
+                self.send_response(status)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                for key, value in (headers or {}).items():
+                    self.send_header(key, value)
+                self.end_headers()
+                self.wfile.write(body[:len(body)//2] if cut else body)
+                self.wfile.flush()
+                self.close_connection = True
+
+            def handle_request(self):
+                parsed = urlsplit(self.path)
+                length = int(self.headers.get("Content-Length", 0))
+                if length > 1024**2:
+                    self.reply("oversized fixture request", status=413)
+                    return
+                body = self.rfile.read(length)
+                params = parse_qs(parsed.query)
+                content_type = self.headers.get("Content-Type", "")
+                if content_type.startswith("multipart/form-data"):
+                    message = BytesParser(policy=email_policy).parsebytes(
+                        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body)
+                    form = {part.get_param("name", header="content-disposition"):
+                            [part.get_payload(decode=True).decode(errors="replace")]
+                            for part in message.iter_parts()}
+                else:
+                    form = parse_qs(body.decode(errors="replace"))
+                mode = form.get("mode", [None])[0]
+                with fixture.lock:
+                    fixture.requests.append({"method": self.command, "path": parsed.path,
+                                             "mode": mode, "range": self.headers.get("Range"),
+                                             "if_range": self.headers.get("If-Range")})
+                base = fixture.url
+                if parsed.path == "/7/api":
+                    if params.get("t") == ["caps"]:
+                        self.reply('<caps><limits max="100"/><searching><search available="yes" supportedParams="q"/></searching><categories><category id="7030"/></categories></caps>', "application/xml")
+                    else:
+                        title = escape(params.get("q", ["Owned Fixture"])[0])
+                        self.reply(f'<rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/"><channel><newznab:response offset="0" total="1"/><item><title>{title}</title><guid>owned-soak-release</guid><enclosure url="{base}/payload/owned" length="512" type="application/x-nzb"/><newznab:attr name="category" value="7030"/></item></channel></rss>', "application/xml")
+                elif parsed.path == "/payload/owned":
+                    fixture.payload_started.set()
+                    if not fixture.payload_release.wait(20):
+                        self.reply("payload gate timeout", status=503)
+                        return
+                    self.reply('<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"><file poster="fixture" date="1" subject="owned.cbz"><groups><group>alt.test</group></groups><segments><segment bytes="1" number="1">owned-fixture</segment></segments></file></nzb>', "application/x-nzb")
+                elif parsed.path == "/api" and mode == "addfile":
+                    with fixture.lock:
+                        fixture.submissions += 1
+                        receipt = f"SABnzbd_nzo_{fixture.submissions}"
+                    self.reply(json.dumps({"status": True, "nzo_ids": [receipt]}))
+                elif parsed.path == "/api" and mode in ("queue", "history"):
+                    receipt = form.get("nzo_ids", [""])[0]
+                    slots = [] if mode == "queue" else [{"nzo_id": receipt, "cat": "libraryd", "status": "Completed", "storage": "owned.cbz"}]
+                    self.reply(json.dumps({mode: {"slots": slots}}))
+                elif parsed.path == "/":
+                    self.reply('<div class="post-list-posts"><article><h1 class="post-title"><a href="/dc/owned-1/">Owned Fixture #1</a></h1></article></div>', "text/html")
+                elif parsed.path == "/dc/owned-1/":
+                    # This is an inert adapter identity. The debug fixture transport rewrites it
+                    # before DNS/connect; it is never an external request or configured endpoint.
+                    self.reply('<h1 class="post-title">Owned Fixture #1</h1><article class="post-body"><section class="post-contents"><a class="aio-red" href="https://fs3.comicfiles.ru/owned.cbz">Download</a></section></article>', "text/html")
+                elif parsed.path == "/owned.cbz":
+                    ranged = self.headers.get("Range")
+                    etag = '"changed"' if fixture.changed and ranged else '"owned"'
+                    headers = {"Accept-Ranges": "bytes", "ETag": etag}
+                    if ranged:
+                        start = int(ranged.removeprefix("bytes=").removesuffix("-"))
+                        headers["Content-Range"] = f"bytes {start}-{len(fixture.archive)-1}/{len(fixture.archive)}"
+                        self.reply(fixture.archive[start:], "application/zip", 206, headers)
+                    else:
+                        with fixture.lock:
+                            cut = "next" in fixture.cuts
+                            fixture.cuts.discard("next")
+                        self.reply(fixture.archive, "application/zip", headers=headers, cut=cut)
+                else:
+                    self.reply("unexpected fixture request", status=500)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = loopback(f"http://127.0.0.1:{self.server.server_port}")
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.payload_release.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+
+class Soak:
+    def __init__(self, args, report):
+        self.args, self.report = args, report
+        self.home = args.state_dir
+        self.state = self.home / "state"
+        self.child = None
+        self.log = None
+        self.fixture = None
+        self.clock = time.monotonic()
+        self.end = self.clock + args.duration_seconds
+        self.cookie = http.cookiejar.CookieJar()
+        self.http = build_opener(ProxyHandler({}), NoRedirect(), HTTPCookieProcessor(self.cookie))
+        self.last = {}
+
+    def event(self, kind, id, state, **extra):
+        event = {"at_seconds": round(time.monotonic()-self.clock, 3), "kind": kind,
+                 "id": id, "state": state, **extra}
+        self.report["transitions"].append(event)
+        self.save()
+        print(f'{event["at_seconds"]:7.2f}s {kind} {state}', flush=True)
+
+    def save(self):
+        temporary = self.home / "report.tmp"
+        temporary.write_text(json.dumps(self.report, indent=2) + "\n")
+        temporary.replace(self.home / "report.json")
+
+    def guard(self):
+        if time.monotonic() >= self.end:
+            raise RuntimeError("bounded window exhausted before workload finished")
+        if self.child and self.child.poll() is not None:
+            raise RuntimeError(f"owned libraryd exited {self.child.returncode}; inspect service.log")
+        used = sum(p.stat().st_size for p in self.home.rglob("*") if p.is_file())
+        if used > MAX_DISK:
+            raise RuntimeError("disposable footprint exceeded 256 MiB")
+        if self.child:
+            status = Path(f"/proc/{self.child.pid}/status").read_text()
+            rss = next(int(line.split()[1])*1024 for line in status.splitlines() if line.startswith("VmRSS:"))
+            if rss > 1024**3:
+                raise RuntimeError("libraryd RSS exceeded 1 GiB")
+
+    def api(self, method, path, data=None, expected=200, headers=None):
+        self.guard()
+        payload = None if data is None else json.dumps(data).encode()
+        request = Request(self.args.listen_url + path, payload, method=method,
+                          headers={"Content-Type": "application/json", "Origin": self.args.listen_url,
+                                   **(headers or {})})
+        try:
+            response = self.http.open(request, timeout=min(20, max(0.1, self.end-time.monotonic())))
+        except HTTPError as error:
+            response = error
+        with response:
+            body = response.read(2*1024**2+1)
+            if response.status != expected:
+                raise RuntimeError(f"{method} {path}: expected {expected}, got {response.status}: {body[:800].decode(errors='replace')}")
+            if len(body) > 2*1024**2:
+                raise RuntimeError("API body exceeded 2 MiB")
+            value = json.loads(body) if body else None
+        if isinstance(value, dict) and "id" in value and "state" in value:
+            identity = (path.split("/")[3], value["id"])
+            state = (value["state"], value.get("reason"))
+            if self.last.get(identity) != state:
+                self.last[identity] = state
+                self.event(identity[0], value["id"], state[0], reason=state[1])
+        return value
+
+    def post(self, path, data, expected=200, key=None):
+        return self.api("POST", "/api/v1/"+path, data, expected,
+                        {"Idempotency-Key": key} if key else None)
+
+    def wait(self, get, predicate, description, timeout=40):
+        deadline = min(self.end, time.monotonic()+timeout)
+        while time.monotonic() < deadline:
+            self.guard()
+            value = get()
+            if predicate(value):
+                return value
+            time.sleep(0.2)
+        raise RuntimeError("timed out: " + description)
+
+    def journal(self, acquisition):
+        # Inspection only: never manufacture recovery eligibility or mutate lifecycle rows.
+        database = (self.state / "library.sqlite3").as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(database, uri=True)) as connection:
+            row = connection.execute("SELECT phase, request_json FROM import_operations WHERE id=?",
+                                     (acquisition["import_id"],)).fetchone()
+        if row is None:
+            raise RuntimeError("expected existing import journal is missing")
+        phase, request = row[0], json.loads(row[1])
+        if request["policy"] != "Copy":
+            raise RuntimeError("source-preserving Copy policy changed")
+        self.event("import_journal", acquisition["import_id"], phase, policy="Copy")
+        return phase
+
+    def start(self):
+        env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG") if k in os.environ}
+        env.update(LIBRARY_STATE_DIR=str(self.state), LIBRARY_LISTEN=urlsplit(self.args.listen_url).netloc,
+                   LIBRARY_ORIGIN=self.args.listen_url, LIBRARY_WORKERS="true",
+                   LIBRARY_SOAK_ADDRESS=urlsplit(self.fixture.url).netloc, RUST_LOG="libraryd=info,warn")
+        self.log = (self.home / "service.log").open("a")
+        self.child = subprocess.Popen([str(self.args.binary), "serve"], env=env, stdout=self.log, stderr=subprocess.STDOUT)
+        def ready():
+            try:
+                return self.api("GET", "/health/ready")["status"] == "ready"
+            except URLError:
+                return False
+        self.wait(ready, bool, "service readiness", 30)
+        self.event("service", "owned", "started", pid=self.child.pid)
+
+    def stop(self):
+        if self.child:
+            child = self.child
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=35)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+                    self.child = None
+                    raise RuntimeError("owned service failed bounded shutdown")
+            else:
+                child.wait()
+            self.child = None
+            if child.returncode != 0:
+                raise RuntimeError(f"owned service shutdown exit {child.returncode}")
+        if self.log:
+            self.log.close()
+            self.log = None
+
+    def hashes(self):
+        return {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in (ROOT / "tests/fixtures/natural-order.cbz",)} | {
+                    "readonly-copy": hashlib.sha256((self.home / "originals/owned.cbz").read_bytes()).hexdigest()}
+
+    def setup(self):
+        original = self.home / "originals"
+        original.mkdir(mode=0o700)
+        archive = (ROOT / "tests/fixtures/natural-order.cbz").read_bytes()
+        (original / "owned.cbz").write_bytes(archive)
+        (original / "owned.cbz").chmod(0o400)
+        original.chmod(0o500)
+        self.report["originals_before"] = self.hashes()
+        self.fixture = Fixtures(archive)
+        self.report["configured_urls"] = [self.args.listen_url, self.fixture.url]
+        self.report["fixture_bound_addresses"] = [list(self.fixture.server.server_address)]
+        self.report["invariants"]["loopback_configuration"] = loopback_configuration(
+            self.report["configured_urls"], self.report["fixture_bound_addresses"])
+        if not self.report["invariants"]["loopback_configuration"]:
+            raise RuntimeError("non-loopback fixture configuration")
+        self.start()
+        token = (self.state / "setup-token").read_text().strip()
+        self.api("POST", "/api/v1/auth/setup", {"username": "soak-owner", "password": "owned disposable soak password"}, 201,
+                 {"X-Setup-Token": token})
+        self.roots = {}
+        for label in ("source", "downloads", "destination"):
+            path = self.home / label
+            path.mkdir(mode=0o700)
+            self.roots[label] = self.post("library/roots", {"label": label, "path": str(path)}, 201)["id"]
+        # Import source is an independent read-only copy. Direct staging uses another root.
+        (self.home / "source/owned.cbz").write_bytes(archive)
+        (self.home / "source/owned.cbz").chmod(0o400)
+        (self.home / "source").chmod(0o500)
+        self.report["originals_before"]["import-source"] = hashlib.sha256(archive).hexdigest()
+        self.integrations = {}
+        for kind in ("prowlarr", "sabnzbd", "getcomics"):
+            options = {"indexer_id": 7, "protocol": "usenet", "categories": {"comics": [7030]}} if kind == "prowlarr" else {"category": "libraryd"} if kind == "sabnzbd" else {}
+            self.integrations[kind] = self.post("settings/integrations", {"kind": kind, "label": "owned "+kind,
+                "base_url": self.fixture.url+"/", "enabled": True, "api_key": "owned-fixture-key", "options": options}, 201)["id"]
+
+    def catalog(self, name):
+        publication = self.post("publications", {"content_type": "comic", "title": "Owned Fixture", "run_label": name}, 201)
+        edition = self.post("editions", {"publication_id": publication["id"], "language": "en"}, 201)
+        unit = self.post("units", {"edition_id": edition["id"], "label": "1", "kind": "issue"}, 201)
+        return edition["id"], unit["id"]
+
+    def direct(self, cycle, changed):
+        name = f"direct-{cycle}-{'restart' if changed else 'resume'}"
+        _, unit = self.catalog(name)
+        posts = self.post("direct/search", {"integration_id": self.integrations["getcomics"], "query": "Owned Fixture"})
+        detail = self.post("direct/details", {"post_handle": posts["posts"][0]["post_handle"]})
+        link = detail["links"][0]["link_handle"]
+        self.fixture.cuts.add("next")
+        self.fixture.changed = False
+        first_request = len(self.fixture.requests)
+        intent = self.post("direct/acquisitions", {"link_handle": link, "unit_id": unit,
+            "download_root_id": self.roots["downloads"], "destination": {"root_id": self.roots["destination"], "relative_path": name+".cbz"}}, 202, name)
+        path = "/api/v1/direct/acquisitions/"+intent["id"]
+        self.wait(lambda: self.api("GET", path), lambda v: v["state"] == "needs_review", name+" cut")
+        # A real service restart must retain the partial/checkpoint and authenticated session.
+        if not changed:
+            self.stop()
+            self.start()
+            self.report["checks"]["service_restart"] = True
+        review = self.api("GET", path+"/review")
+        if not review["resume"]["eligible"]:
+            raise RuntimeError("cut transfer is not resumable: "+str(review))
+        action = {k: review[k] for k in ("revision", "transfer_fingerprint")}
+        self.fixture.changed = changed
+        self.api("POST", path+"/resume", action, 202)
+        if changed:
+            stopped = self.wait(lambda: self.api("GET", path), lambda v: v["state"] == "needs_review", "validator change review")
+            if stopped["reason"] != "transfer_restart_required":
+                raise RuntimeError("validator change did not require restart")
+            review = self.api("GET", path+"/review")
+            action = {k: review[k] for k in ("revision", "transfer_fingerprint")}
+            self.fixture.changed = False
+            replacement = self.api("POST", path+"/restart", action, 202)
+            replay = self.api("POST", path+"/restart", action, 202)
+            if replay["id"] != replacement["id"] or self.api("GET", path)["state"] != "canceled":
+                raise RuntimeError("restart replay or retirement invariant violated")
+            path = "/api/v1/direct/acquisitions/"+replacement["id"]
+        self.wait(lambda: self.api("GET", path), lambda v: v["state"] == "completed", name+" import")
+        if (self.home / "destination" / (name+".cbz")).read_bytes() != self.fixture.archive:
+            raise RuntimeError("direct imported bytes changed")
+        ranges = [request for request in self.fixture.requests[first_request:]
+                  if request["path"] == "/owned.cbz" and request["range"] is not None]
+        if (len(ranges) != 1 or ranges[0]["range"] != f"bytes={len(self.fixture.archive)//2}-"
+                or ranges[0]["if_range"] != '"owned"'):
+            raise RuntimeError("resume did not use the exact saved offset and If-Range validator")
+        self.report["checks"]["direct_restart" if changed else "direct_resume"] = True
+
+    def indexer(self, cycle):
+        edition, unit = self.catalog(f"indexer-{cycle}")
+        monitor = self.post("monitors", {"unit_id": unit, "integration_id": self.integrations["prowlarr"],
+            "query": "Owned Fixture #1", "interval_seconds": 900, "enabled": True, "selection_policy": "review_only"}, 201)
+        self.post(f'monitors/{monitor["id"]}/run', {"revision": monitor["revision"]}, 202)
+        def monitor_status():
+            value = next(v for v in self.api("GET", f"/api/v1/monitors?limit=100&unit_id={unit}")["items"] if v["id"] == monitor["id"])
+            self.event_if_monitor(value)
+            return value
+        ready = self.wait(monitor_status, lambda v: v["last_state"] == "needs_review" and not v["running"], "review-only monitor")
+        if not ready["candidates"] or self.fixture.submissions != cycle-1:
+            raise RuntimeError("monitor did not remain review-only")
+        self.report["checks"]["monitor_review"] = True
+        release = ready["candidates"][0]["release_handle"]
+        assessment = self.post("search/release-assessments", {"unit_id": unit, "release_handle": release})
+        decision = self.post("search/release-decisions", {"assessment_id": assessment["assessment_id"], "action": "selected",
+            "acknowledged_assessment_id": assessment["assessment_id"]}, key=f"decision-{cycle}")
+        request = {"release_handle": release, "client_id": self.integrations["sabnzbd"], "unit_id": unit,
+            "selection_decision_id": decision["id"], "destination": {"root_id": self.roots["destination"], "relative_path": f"indexer-{cycle}.cbz"}}
+        self.fixture.payload_started.clear()
+        self.fixture.payload_release.clear()
+        stale = self.post("acquisition", request, 202, f"stale-{cycle}")
+        self.wait(lambda: self.fixture.payload_started.is_set(), bool, "selected payload gate")
+        self.api("PATCH", f"/api/v1/editions/{edition}", {"region": "US"})
+        self.event("injection", stale["id"], "target_changed_during_payload")
+        self.fixture.payload_release.set()
+        path = "/api/v1/acquisition/"+stale["id"]
+        stopped = self.wait(lambda: self.api("GET", path), lambda v: v["state"] == "needs_review", "selection reassessment review")
+        if stopped["submitted"] or stopped["reason"] != "selection_review_required":
+            raise RuntimeError("stale selection crossed submission fence")
+        assessment = self.post("search/release-assessments", {"unit_id": unit, "release_handle": release})
+        review = self.api("GET", path+"/review")
+        action = {k: review[k] for k in ("revision", "polling_fingerprint")}
+        reassessed = self.api("POST", path+"/reassess-selection", {**action, "acknowledged_assessment_id": assessment["assessment_id"]})
+        if reassessed["acquisition"]["state"] != "canceled" or self.fixture.submissions != cycle-1:
+            raise RuntimeError("reassessment changed client or failed retirement")
+        self.report["checks"]["reassessment"] = True
+        request.update(release_handle=reassessed["release_handle"], selection_decision_id=reassessed["decision"]["id"])
+        intent = self.post("acquisition", request, 202, f"fresh-{cycle}")
+        path = "/api/v1/acquisition/"+intent["id"]
+        self.wait(lambda: self.api("GET", path), lambda v: v["state"] == "downloaded", "fake receipt completion")
+        associated = self.api("POST", path+"/files", {"source_root_id": self.roots["source"], "source_relative_path": "missing.cbz"}, 202)
+        self.wait(lambda: self.api("GET", path), lambda v: v["state"] == "needs_review", "bad mapping")
+        review = self.api("GET", path+"/review")
+        action = {k: review[k] for k in ("revision", "polling_fingerprint")}
+        staging = self.home / "destination/.library-imports"
+        staging.chmod(0o755)
+        self.event("injection", intent["id"], "staging_permissions_0755")
+        self.api("POST", path+"/correct-mapping", {**action, "source_root_id": self.roots["source"], "source_relative_path": "owned.cbz"}, 202)
+        stopped = self.wait(lambda: self.api("GET", path), lambda v: v["state"] == "needs_review", "journal staging refusal")
+        if stopped["import_id"] != associated["import_id"] or self.journal(stopped) != "planned":
+            raise RuntimeError("mapping correction did not retain the planned journal")
+        self.report["checks"]["mapping_correction"] = True
+        staging.chmod(0o700)
+        review = self.api("GET", path+"/review")
+        self.api("POST", path+"/resume-import", {k: review[k] for k in ("revision", "polling_fingerprint")}, 202)
+        completed = self.wait(lambda: self.api("GET", path), lambda v: v["state"] == "completed", "same-journal recovery")
+        if completed["import_id"] != associated["import_id"] or self.journal(completed) != "done":
+            raise RuntimeError("import recovery did not complete the same journal")
+        if self.fixture.submissions != cycle:
+            raise RuntimeError("duplicate client submission")
+        if (self.home / "destination" / f"indexer-{cycle}.cbz").read_bytes() != self.fixture.archive:
+            raise RuntimeError("indexer imported bytes changed")
+        self.report["checks"]["import_recovery"] = True
+        # Stop this cycle's monitor from accumulating due work in later cycles.
+        current = monitor_status()
+        self.api("PATCH", f'/api/v1/monitors/{monitor["id"]}', {"revision": current["revision"], "enabled": False})
+
+    def event_if_monitor(self, value):
+        state = (value["last_state"], value["running"], value["revision"])
+        if self.last.get(value["id"]) != state:
+            self.last[value["id"]] = state
+            self.event("monitor", value["id"], state[0], running=state[1], reason=value["reason"])
+
+    def run(self):
+        self.setup()
+        cycle, next_at = 0, time.monotonic()
+        while time.monotonic() < self.end:
+            if time.monotonic() >= next_at and (cycle == 0 or self.end-time.monotonic() >= 90):
+                cycle += 1
+                self.event("cycle", str(cycle), "started")
+                self.direct(cycle, False)
+                self.direct(cycle, True)
+                self.indexer(cycle)
+                self.report["cycles_completed"] = cycle
+                self.event("cycle", str(cycle), "completed")
+                next_at = max(next_at+self.args.interval_seconds, time.monotonic()+self.args.interval_seconds)
+            else:
+                self.guard()
+                self.api("GET", "/health/ready")
+                time.sleep(min(1, max(0, self.end-time.monotonic())))
+
+    def finish(self):
+        for signum in STOP_SIGNALS:
+            signal.signal(signum, signal.SIG_IGN)
+        try:
+            try:
+                self.stop()
+            except Exception as error:
+                self.report["failures"].append(f"shutdown: {error}")
+        finally:
+            if self.fixture:
+                self.fixture.close()
+                self.report["fixture_requests"] = self.fixture.requests
+                self.report["client_submissions"] = self.fixture.submissions
+            self.report["invariants"]["loopback_configuration"] = loopback_configuration(
+                self.report.get("configured_urls", []), self.report.get("fixture_bound_addresses", []))
+            if (self.home / "originals/owned.cbz").exists():
+                self.report["originals_after"] = self.hashes()
+                source = self.home / "source/owned.cbz"
+                if source.exists():
+                    self.report["originals_after"]["import-source"] = hashlib.sha256(source.read_bytes()).hexdigest()
+                self.report["invariants"]["original_hashes_unchanged"] = self.report["originals_before"] == self.report["originals_after"]
+            self.report["cleanup_completed"] = self.child is None and (self.fixture is None or not self.fixture.thread.is_alive())
+            self.report["window"].update(ended_at=utc(), elapsed_seconds=round(time.monotonic()-self.clock, 3))
+            self.report["classification"] = classifications(self.report)
+            self.save()
+            verdict = self.report["classification"]
+            summary = (f"Fixture result: {verdict['fixture result']}\nCompleted cycles: {self.report['cycles_completed']}\n"
+                       f"Observed seconds: {self.report['window']['elapsed_seconds']}\n"
+                       f"Multi-day observation: {verdict['multi-day observation']}\nReal-household acceptance: unmeasured\n"
+                       + (f"Interrupted: {self.report['interrupted']}\n" if self.report["interrupted"] else "")
+                       + "".join(f"Failure: {failure}\n" for failure in self.report["failures"]))
+            (self.home / "summary.txt").write_text(summary)
+            print(summary, end="")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--state-dir", type=Path, help="absent disposable run directory; retained as evidence")
+    parser.add_argument("--binary", type=Path, default=ROOT / "target/debug/libraryd", help="debug libraryd built with --features soak-fixtures")
+    parser.add_argument("--duration-seconds", type=int, default=180, help="bounded observation window, 60..604800 seconds")
+    parser.add_argument("--interval-seconds", type=int, default=900, help="idle gap between complete cycles, at least 60 seconds")
+    parser.add_argument("--listen-url", help="literal loopback HTTP origin; default unused 127.0.0.1 port")
+    parser.add_argument("--classify", type=Path, help="classify existing JSON only; never run a service")
+    args = parser.parse_args()
+    if args.classify:
+        try:
+            report = json.loads(args.classify.read_text())
+        except (OSError, ValueError):
+            report = None
+        result = classifications(report)
+        print(json.dumps(result))
+        return 0 if result["fixture result"] in ("pass", "unmeasured") else 1
+    if args.state_dir is None:
+        parser.error("--state-dir is required for a run")
+    if sys.platform != "linux":
+        parser.error("Linux local disposable storage is required")
+    if not 60 <= args.duration_seconds <= 604800 or args.interval_seconds < 60:
+        parser.error("duration must be 60..604800 seconds; interval must be at least 60 seconds")
+    try:
+        if args.listen_url is None:
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", 0))
+                args.listen_url = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        args.listen_url = loopback(args.listen_url)
+        args.binary = args.binary.resolve(strict=True)
+        identity = subprocess.check_output([str(args.binary), "--version"], text=True, timeout=10).strip()
+        checkout_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        revision = binary_revision(identity, checkout_commit)
+        parsed = urlsplit(args.listen_url)
+        family = socket.AF_INET6 if ":" in parsed.hostname else socket.AF_INET
+        with socket.socket(family) as reservation:
+            reservation.bind((parsed.hostname, parsed.port))
+        args.state_dir = args.state_dir.absolute()
+        filesystem = subprocess.check_output(["stat", "-f", "-c", "%T", str(args.state_dir.parent)], text=True).strip()
+        if filesystem not in {"ext2/ext3", "ext4", "btrfs", "xfs", "zfs", "tmpfs", "overlayfs"}:
+            parser.error(f"unapproved filesystem {filesystem!r}; disposable state requires local storage")
+        # mkdir is exclusive, rejecting existing directories and dangling symlinks too.
+        os.umask(0o077)
+        args.state_dir.mkdir(mode=0o700)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    report = {"schema_version": 1, "fixture_class": "owned loopback", "artifact": {
+        "git_commit": revision, "checkout_git_commit": checkout_commit, "binary_version": identity,
+        "dirty_tree": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
+        "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
+        "build_profile": "debug; soak-fixtures"},
+        "window": {"started_at": utc(), "ended_at": None, "requested_seconds": args.duration_seconds,
+                   "elapsed_seconds": 0, "interval_seconds": args.interval_seconds},
+        "checks": dict.fromkeys(REQUIRED, False), "cycles_completed": 0, "transitions": [], "failures": [], "interrupted": None,
+        "configured_urls": [], "fixture_bound_addresses": [],
+        "originals_before": {}, "originals_after": {}, "cleanup_completed": False,
+        "invariants": {"original_hashes_unchanged": False, "loopback_configuration": False},
+        "real_household": {"authorization": None, "observation": None, "result": "unmeasured"}}
+    runner = Soak(args, report)
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt(signal.Signals(signum).name)
+    for signum in STOP_SIGNALS:
+        signal.signal(signum, interrupted)
+    try:
+        runner.run()
+    except KeyboardInterrupt as error:
+        report["interrupted"] = str(error) or "SIGINT"
+    except Exception as error:
+        traceback.print_exc()
+        report["failures"].append(f"{type(error).__name__}: {error}")
+    finally:
+        try:
+            runner.finish()
+        except Exception as error:
+            report["failures"].append(f"cleanup: {error}")
+            report["cleanup_completed"] = False
+            report["classification"] = classifications(report)
+            runner.save()
+    return 0 if report.get("classification", {}).get("fixture result") == "pass" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
