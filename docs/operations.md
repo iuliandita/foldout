@@ -67,9 +67,18 @@ is signed with cosign keyless signing and carries SBOM and provenance attestatio
 cosign verify ghcr.io/iuliandita/foldout:nightly \
   --certificate-identity-regexp '^https://github.com/iuliandita/foldout/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+cosign verify 'ghcr.io/iuliandita/foldout:<tag>' \
+  --certificate-identity 'https://github.com/iuliandita/foldout/.github/workflows/release.yml@refs/tags/<tag>' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-There are no tagged releases yet.
+Release tags must match the Cargo package version (`vMAJOR.MINOR.PATCH` with an
+optional prerelease suffix). Version 0 tags must point to a commit reachable from
+`develop`; version 1 and later tags must be reachable from `main`. Version 0 and
+suffixed tags are prereleases and do not update `:latest`. Run the Release workflow
+manually on a tag with `dry_run` enabled to build both architectures and variants
+without publishing, signing, or creating a release.
 
 ## Initial administrator
 
