@@ -80,6 +80,33 @@ suffixed tags are prereleases and do not update `:latest`. Run the Release workf
 manually on a tag with `dry_run` enabled to build both architectures and variants
 without publishing, signing, or creating a release.
 
+## Performance evidence
+
+On Linux, run `cargo fetch --locked` first, then build the frontend before a
+release run. Run `./scripts/benchmark --binary` with `BENCHMARK_FILES=50000`
+for the owned synthetic corpus, or `BENCHMARK_FILES=1000 ./scripts/benchmark
+--binary --debug` for a small smoke run. The command uses offline Cargo and
+writes a JSON report to `docs/local/benchmark-results.md`. It creates and
+removes private disposable state and independent fixture copies in the checkout.
+
+The binary mode starts the real executable on loopback, warms the catalog and
+pages, then records five concurrent sessions. The mixed phase contains catalog and warm page requests with a queued scan,
+without imports. It records each request window and observed scan state, and
+samples the executable and its descendants every 50 ms; short child peaks can
+be missed. OS caches are not dropped. The older default mode uses the in-process
+router; its cold reader cache is not a cold OS cache. CPU affinity, cgroup v2
+hierarchy limits, storage mount and workload details accompany the results.
+Unavailable limits are reported as unmeasured. Compose's configured limits are
+not evidence that a local run used them.
+
+Each target has a fixture result of `pass`, `fail`, or `unmeasured`, and a
+separate reference-environment acceptance result. Missing measurements, failed
+runs, or missing five-session overlap yield `unmeasured`. Synthetic fixtures and
+loopback cannot establish reference-host or LAN acceptance, which remains
+`unmeasured`, even with `--assert-reference-host` and operator-supplied
+`--host-metadata` and `--network-metadata`. Do not interpret a fixture pass as
+acceptance evidence. The owner must measure the reference environment and LAN.
+
 ## Initial administrator
 
 Fresh instances require a setup token before an administrator
