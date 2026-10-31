@@ -135,9 +135,9 @@ async fn run(
 impl From<MonitorError> for ApiError {
     fn from(error: MonitorError) -> Self {
         match error {
-            MonitorError::Invalid => {
-                Self::invalid("Invalid monitor scope, query, interval, revision, or pagination")
-            }
+            MonitorError::Invalid => Self::invalid(
+                "Invalid monitor scope, query, schedule, timezone, interval, revision, or pagination",
+            ),
             MonitorError::NotFound => Self::new(
                 StatusCode::NOT_FOUND,
                 "not_found",

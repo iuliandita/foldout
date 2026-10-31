@@ -1,8 +1,9 @@
 //! Durable per-unit, per-source searches. Results always require explicit selection.
 //!
-//! Fixed intervals (900..=31536000 seconds) are UTC epoch-aligned, not cron/IANA
-//! schedules. Creation schedules the next boundary; run requests make work due now.
-//! Missed intervals coalesce into one search. A 45-second bounded search holds a
+//! Fixed intervals (900..=31536000 seconds) remain UTC epoch-aligned. Daily and
+//! weekly schedules use IANA zones; gaps run at the first valid instant that day,
+//! folds at the first occurrence. Creation schedules the next occurrence.
+//! Missed runs coalesce into one search. A 45-second bounded search holds a
 //! 120-second lease; restart recovers abandoned leases after expiry. No DB write
 //! transaction spans network I/O. Handles expire through the shared search service.
 use crate::{
@@ -19,6 +20,10 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, sqlite::SqliteRow};
 use uuid::Uuid;
+
+#[path = "monitor_schedule.rs"]
+mod schedule;
+pub use schedule::MonitorSchedule;
 
 const CANDIDATE_LIMIT: u32 = 20;
 const LEASE_SECONDS: i64 = 120;
@@ -81,6 +86,10 @@ pub struct CreateMonitor {
     pub integration_id: String,
     pub query: String,
     pub interval_seconds: i64,
+    #[serde(default)]
+    pub schedule: MonitorSchedule,
+    #[serde(default = "schedule::default_timezone")]
+    pub timezone: String,
     pub enabled: bool,
     /// Required even though review_only is currently the sole supported policy.
     pub selection_policy: SelectionPolicy,
@@ -94,6 +103,10 @@ pub struct UpdateMonitor {
     pub query: Option<String>,
     #[serde(default, deserialize_with = "non_null")]
     pub interval_seconds: Option<i64>,
+    #[serde(default, deserialize_with = "non_null")]
+    pub schedule: Option<MonitorSchedule>,
+    #[serde(default, deserialize_with = "non_null")]
+    pub timezone: Option<String>,
     #[serde(default, deserialize_with = "non_null")]
     pub enabled: Option<bool>,
     #[serde(default, deserialize_with = "non_null")]
@@ -127,7 +140,8 @@ pub struct MonitorView {
     pub content_type: ContentType,
     pub query: String,
     pub interval_seconds: i64,
-    pub timezone: &'static str,
+    pub schedule: MonitorSchedule,
+    pub timezone: String,
     pub selection_policy: SelectionPolicy,
     pub enabled: bool,
     pub revision: i64,
@@ -186,6 +200,7 @@ impl Monitor {
         request: CreateMonitor,
     ) -> Result<MonitorView, MonitorError> {
         validate(&request.query, request.interval_seconds)?;
+        let (schedule_kind, schedule_time, schedule_weekday) = request.schedule.columns();
         let content_type = self.content_type(&request.unit_id).await?;
         let source = self.settings.get(&request.integration_id).await?;
         let IntegrationOptions::Prowlarr(options) = source.options else {
@@ -204,9 +219,14 @@ impl Monitor {
         }
         let id = Uuid::new_v4().to_string();
         let mut tx = self.store.begin_write().await?;
-        sqlx::query("INSERT INTO monitors (id, owner, unit_id, integration_id, content_type, query, interval_seconds, selection_policy, enabled, next_run, last_state) VALUES (?, ?, ?, ?, ?, ?, ?, 'review_only', ?, ?, ?)")
+        let next_run =
+            request
+                .schedule
+                .next_run(now(), request.interval_seconds, &request.timezone)?;
+        sqlx::query("INSERT INTO monitors (id, owner, unit_id, integration_id, content_type, query, interval_seconds, selection_policy, enabled, next_run, last_state, schedule_kind, schedule_time, schedule_weekday, timezone) VALUES (?, ?, ?, ?, ?, ?, ?, 'review_only', ?, ?, ?, ?, ?, ?, ?)")
             .bind(&id).bind(owner).bind(&request.unit_id).bind(&request.integration_id).bind(content_type.as_str()).bind(request.query.trim()).bind(request.interval_seconds).bind(request.enabled)
-            .bind(next_boundary(now(), request.interval_seconds)).bind(if request.enabled { "scheduled" } else { "disabled" }).execute(&mut *tx).await?;
+            .bind(next_run).bind(if request.enabled { "scheduled" } else { "disabled" })
+            .bind(schedule_kind).bind(schedule_time).bind(schedule_weekday).bind(&request.timezone).execute(&mut *tx).await?;
         let row = sqlx::query(monitor_target_query!("WHERE id = ?"))
             .bind(&id)
             .fetch_one(&mut *tx)
@@ -293,10 +313,15 @@ impl Monitor {
         let query = request.query.unwrap_or(old.query);
         let interval = request.interval_seconds.unwrap_or(old.interval_seconds);
         let enabled = request.enabled.unwrap_or(old.enabled);
+        let schedule = request.schedule.unwrap_or(old.schedule);
+        let timezone = request.timezone.unwrap_or(old.timezone);
         validate(&query, interval)?;
+        let next_run = schedule.next_run(now(), interval, &timezone)?;
+        let (schedule_kind, schedule_time, schedule_weekday) = schedule.columns();
         // Keep the old lease: changing a revision invalidates publication, not in-flight I/O.
-        sqlx::query("UPDATE monitors SET query = ?, interval_seconds = ?, enabled = ?, revision = revision + 1, next_run = ?, last_state = ?, reason = NULL, candidates = '[]', candidates_truncated = 0, updated_at = unixepoch() WHERE id = ?")
-            .bind(query.trim()).bind(interval).bind(enabled).bind(next_boundary(now(),interval)).bind(if enabled {"scheduled"} else {"disabled"}).bind(id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE monitors SET query = ?, interval_seconds = ?, enabled = ?, revision = revision + 1, next_run = ?, last_state = ?, reason = NULL, candidates = '[]', candidates_truncated = 0, schedule_kind = ?, schedule_time = ?, schedule_weekday = ?, timezone = ?, updated_at = unixepoch() WHERE id = ?")
+            .bind(query.trim()).bind(interval).bind(enabled).bind(next_run).bind(if enabled {"scheduled"} else {"disabled"})
+            .bind(schedule_kind).bind(schedule_time).bind(schedule_weekday).bind(timezone).bind(id).execute(&mut *tx).await?;
         let row = sqlx::query(monitor_target_query!("WHERE id = ?"))
             .bind(id)
             .fetch_one(&mut *tx)
@@ -436,7 +461,11 @@ impl Monitor {
         };
         let mut candidates = Vec::new();
         let mut truncated = false;
-        let mut next_run = next_boundary(now(), claim.item.interval_seconds);
+        let mut next_run = claim.item.schedule.next_run(
+            now(),
+            claim.item.interval_seconds,
+            &claim.item.timezone,
+        )?;
         let (state, reason) = match result {
             Ok(page) => {
                 let found = !page.releases.is_empty();
@@ -499,7 +528,11 @@ impl Monitor {
             }
         };
         if next_run > now() {
-            next_run = next_boundary(next_run - 1, claim.item.interval_seconds);
+            next_run = claim.item.schedule.next_run(
+                next_run - 1,
+                claim.item.interval_seconds,
+                &claim.item.timezone,
+            )?;
         }
         let json = serde_json::to_string(&candidates).map_err(|_| MonitorError::Database)?;
         sqlx::query("UPDATE monitors SET revision = revision + 1, next_run = ?, last_run_at = unixepoch(), last_state = ?, reason = ?, candidates = ?, candidates_truncated = ?, lease_token = NULL, lease_until = NULL, updated_at = unixepoch() WHERE id = ? AND revision = ? AND lease_token = ?")
@@ -543,7 +576,8 @@ fn decode(row: &SqliteRow) -> Result<MonitorView, MonitorError> {
             .map_err(|_| MonitorError::Database)?,
         query: row.try_get("query")?,
         interval_seconds: row.try_get("interval_seconds")?,
-        timezone: "UTC",
+        schedule: MonitorSchedule::decode(row)?,
+        timezone: row.try_get("timezone")?,
         selection_policy: SelectionPolicy::ReviewOnly,
         enabled: row.try_get("enabled")?,
         revision: row.try_get("revision")?,

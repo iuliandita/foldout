@@ -92,6 +92,20 @@ This also protects loopback instances exposed through a reverse proxy. Keep the 
 service-owned with mode 0700; startup rejects insecure directories before writing
 or migrating the database.
 
+## Monitor schedule upgrades
+
+Before upgrading, make a verified [backup](#backup-commands). Startup applies the
+additive calendar schedule migration. Existing monitors remain fixed UTC intervals;
+their next-run timestamps, revisions, and active leases are preserved. Daily and
+weekly monitors use the bundled IANA timezone database, with UTC as the default.
+No system timezone configuration or online lookup is required.
+
+Older binaries reject an upgraded database. To roll back, stop the upgraded service
+and restore a verified pre-upgrade backup into a fresh state directory using the
+older binary. Keep the upgraded state until recovery is verified; do not remove
+schedule columns or migration records in place. Calendar edits made after that
+backup are absent from the restored state.
+
 ## Backup commands
 
 Use an existing state directory as the backup source and absent destination paths:

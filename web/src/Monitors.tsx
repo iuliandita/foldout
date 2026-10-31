@@ -193,6 +193,7 @@ function CreateMonitorForm({
           integration_id: value(data, 'monitor_source'),
           query: value(data, 'monitor_query'),
           interval_seconds: Number(value(data, 'interval')),
+          ...scheduleInput(data),
           enabled: value(data, 'monitor_enabled') === 'true',
           selection_policy: 'review_only',
         };
@@ -347,12 +348,17 @@ function MonitorFields({
   query,
   interval,
   enabled,
+  schedule = { kind: 'interval' },
+  timezone = 'UTC',
 }: {
   query: string;
   interval: number;
   enabled: boolean;
+  schedule?: Schema['MonitorSchedule'];
+  timezone?: string;
 }) {
   const { t } = useI18n();
+  const [kind, setKind] = useState(schedule.kind);
   return (
     <>
       <Field
@@ -362,7 +368,18 @@ function MonitorFields({
         defaultValue={query}
         maxLength={512}
       />
-      <Field
+      <label className="field">
+        <span>{t('monitorScheduleType')}</span>
+        <select name="schedule_kind" value={kind} onChange={(event) => {
+          const next = event.target.value;
+          if (next === 'interval' || next === 'daily' || next === 'weekly') setKind(next);
+        }}>
+          <option value="interval">{t('monitorScheduleInterval')}</option>
+          <option value="daily">{t('monitorScheduleDaily')}</option>
+          <option value="weekly">{t('monitorScheduleWeekly')}</option>
+        </select>
+      </label>
+      {kind === 'interval' ? <Field
         name="interval"
         label={t('intervalSeconds')}
         hint={t('utcIntervalHint')}
@@ -372,7 +389,37 @@ function MonitorFields({
         step={1}
         required
         defaultValue={interval}
-      />
+      /> : <input type="hidden" name="interval" value={interval} />}
+      {kind !== 'interval' && (
+        <>
+          <Field name="schedule_time" label={t('monitorScheduleTime')} type="time" step={60}
+            required defaultValue={schedule.kind === 'interval' ? '09:00' : schedule.time} />
+          {kind === 'weekly' && (
+            <label className="field">
+              <span>{t('monitorScheduleWeekday')} *</span>
+              <select required name="schedule_weekday" defaultValue={schedule.kind === 'weekly' ? schedule.weekday : 1}>
+                {weekdays.map((day) => <option key={day} value={day}>{t(weekdayKeys[day - 1])}</option>)}
+              </select>
+            </label>
+          )}
+          <Field name="schedule_timezone" label={t('monitorScheduleTimezone')} required maxLength={255}
+            defaultValue={timezone}
+            hint={t('monitorScheduleTimezoneHint')} onInput={(event) => {
+              const input = event.currentTarget;
+              if (/^[+-]/.test(input.value)) {
+                input.setCustomValidity(t('monitorScheduleTimezoneInvalid'));
+                return;
+              }
+              try {
+                new Intl.DateTimeFormat('en', { timeZone: input.value });
+                input.setCustomValidity('');
+              } catch {
+                input.setCustomValidity(t('monitorScheduleTimezoneInvalid'));
+              }
+            }} />
+          <p className="wanted-meta">{t('monitorScheduleDstHint')}</p>
+        </>
+      )}
       <label className="field">
         <span>{t('state')}</span>
         <select name="monitor_enabled" defaultValue={String(enabled)}>
@@ -383,6 +430,28 @@ function MonitorFields({
       <p>{t('reviewOnly')}</p>
     </>
   );
+}
+
+const weekdays = [1, 2, 3, 4, 5, 6, 7] as const;
+const weekdayKeys = ['monitorMonday', 'monitorTuesday', 'monitorWednesday', 'monitorThursday', 'monitorFriday', 'monitorSaturday', 'monitorSunday'] satisfies MessageKey[];
+
+function scheduleInput(data: FormData): Pick<Schema['CreateMonitor'], 'schedule' | 'timezone'> {
+  const kind = value(data, 'schedule_kind');
+  if (kind === 'interval') return { schedule: { kind }, timezone: 'UTC' };
+  const time = value(data, 'schedule_time');
+  const timezone = value(data, 'schedule_timezone');
+  if (kind === 'daily') return { schedule: { kind, time }, timezone };
+  const weekday = weekdays.find((day) => day === Number(value(data, 'schedule_weekday')));
+  if (kind === 'weekly' && weekday !== undefined) return { schedule: { kind, time, weekday }, timezone };
+  throw new Error('Invalid monitor schedule');
+}
+
+function scheduleLabel(item: Schema['MonitorView'], t: (key: MessageKey) => string, locale: Locale) {
+  const schedule = item.schedule;
+  if (schedule.kind === 'interval') return t('monitorEvery').replace('{interval}', formatInterval(item.interval_seconds, locale));
+  return t(schedule.kind === 'daily' ? 'monitorDailyAt' : 'monitorWeeklyAt')
+    .replace('{time}', schedule.time).replace('{timezone}', item.timezone)
+    .replace('{weekday}', schedule.kind === 'weekly' ? t(weekdayKeys[schedule.weekday - 1]) : '');
 }
 function MonitorRow({
   item,
@@ -463,7 +532,7 @@ function MonitorRow({
         </div>
       </div>
       <p className="wanted-meta">
-        {t('monitorEvery').replace('{interval}', formatInterval(item.interval_seconds, locale))}
+        {scheduleLabel(item, t, locale)}
         {item.enabled && (
           <>
             {'. '}
@@ -488,6 +557,7 @@ function MonitorRow({
               revision: item.revision,
               query: value(data, 'monitor_query'),
               interval_seconds: Number(value(data, 'interval')),
+              ...scheduleInput(data),
               enabled: value(data, 'monitor_enabled') === 'true',
               selection_policy: 'review_only',
             };
@@ -504,6 +574,8 @@ function MonitorRow({
             query={item.query}
             interval={item.interval_seconds}
             enabled={item.enabled}
+            schedule={item.schedule}
+            timezone={item.timezone}
           />
         </SaveForm>
       ) : canManage ? (

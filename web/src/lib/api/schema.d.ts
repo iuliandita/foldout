@@ -1682,7 +1682,7 @@ export interface components {
         };
         /** @enum {string} */
         SelectionPolicy: "review_only";
-        /** @description All fields are required. Select an existing unit and an enabled, credential-configured Prowlarr integration with categories configured for the unit content type. Duplicate active caller/unit/integration scope conflicts. Query is trimmed when stored; the first run is scheduled at the next interval boundary. */
+        /** @description Select an existing unit and an enabled, credential-configured Prowlarr integration with categories for its content type. Duplicate active caller/unit/integration scope conflicts. Query is trimmed. Schedule defaults to interval and timezone to UTC; the first run is the next occurrence strictly after creation. interval_seconds remains required for compatibility and is retained when using a calendar schedule. */
         CreateMonitor: {
             unit_id: string;
             integration_id: string;
@@ -1690,13 +1690,16 @@ export interface components {
             query: string;
             /**
              * Format: int64
-             * @description Fixed interval aligned to UTC epoch boundaries. Missed intervals coalesce into one search.
+             * @description Fixed interval aligned to UTC epoch boundaries. Retained but unused for calendar schedules. Missed runs coalesce into one search at the next worker tick, never a backlog.
              */
             interval_seconds: number;
             enabled: boolean;
             selection_policy: components["schemas"]["SelectionPolicy"];
+            schedule?: components["schemas"]["MonitorSchedule"];
+            /** @description IANA timezone name from the bundled database. Defaults to UTC on creation. Interval schedules require UTC. */
+            timezone?: string;
         };
-        /** @description Revision must match the current view. Optional fields cannot be null. Unit and integration cannot change. Every update increments revision, clears candidates/reason, and schedules the next interval boundary. */
+        /** @description Revision must match the current view. Optional fields cannot be null. A schedule replaces the entire schedule object; timezone can be edited independently. The resulting schedule and timezone must be valid together. Unit and integration cannot change. Every update increments revision, clears candidates/reason, and schedules the next occurrence. In-flight searches keep their leases but cannot publish results for an older revision. */
         UpdateMonitor: {
             /** Format: int64 */
             revision: number;
@@ -1704,11 +1707,14 @@ export interface components {
             query?: string;
             /**
              * Format: int64
-             * @description Fixed interval aligned to UTC epoch boundaries. Missed intervals coalesce into one search.
+             * @description Fixed interval aligned to UTC epoch boundaries. Retained but unused for calendar schedules. Missed runs coalesce into one search at the next worker tick, never a backlog.
              */
             interval_seconds?: number;
             enabled?: boolean;
             selection_policy?: components["schemas"]["SelectionPolicy"];
+            schedule?: components["schemas"]["MonitorSchedule"];
+            /** @description IANA timezone name from the bundled database. Defaults to UTC on creation. Interval schedules require UTC. */
+            timezone?: string;
         };
         MonitorRevision: {
             /** Format: int64 */
@@ -1748,11 +1754,11 @@ export interface components {
             query: string;
             /**
              * Format: int64
-             * @description Fixed interval aligned to UTC epoch boundaries. Missed intervals coalesce into one search.
+             * @description Fixed interval aligned to UTC epoch boundaries. Retained but unused for calendar schedules. Missed runs coalesce into one search at the next worker tick, never a backlog.
              */
             interval_seconds: number;
-            /** @enum {string} */
-            timezone: "UTC";
+            /** @description IANA timezone name from the bundled database. Defaults to UTC on creation. Interval schedules require UTC. */
+            timezone: string;
             selection_policy: components["schemas"]["SelectionPolicy"];
             enabled: boolean;
             /** Format: int64 */
@@ -1776,6 +1782,7 @@ export interface components {
             candidates: components["schemas"]["MonitorCandidate"][];
             /** @description Search results exceeded the stored candidate window or the provider reported additional results. */
             candidates_truncated: boolean;
+            schedule: components["schemas"]["MonitorSchedule"];
         };
         MonitorPage: {
             items: components["schemas"]["MonitorView"][];
@@ -2168,6 +2175,24 @@ export interface components {
             unit_label: string;
             /** @enum {string} */
             unit_kind: "issue" | "chapter" | "volume" | "special" | "combined";
+        };
+        /** @description Calendar times are HH:MM in the configured IANA timezone. A nonexistent time runs at the first valid instant that day; a repeated time runs once, at the first occurrence. Dates skipped entirely by a timezone transition are skipped. No cron syntax. */
+        MonitorSchedule: {
+            /** @enum {string} */
+            kind: "interval";
+        } | {
+            /** @enum {string} */
+            kind: "daily";
+            time: string;
+        } | {
+            /** @enum {string} */
+            kind: "weekly";
+            time: string;
+            /**
+             * @description ISO weekday: Monday = 1, Sunday = 7.
+             * @enum {integer}
+             */
+            weekday: 1 | 2 | 3 | 4 | 5 | 6 | 7;
         };
     };
     responses: never;

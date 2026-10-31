@@ -32,6 +32,7 @@ sha1 = "=0.11.0"
 chacha20poly1305 = "=0.11.0"
 libc = "=0.2.191"
 scraper = "=0.27.0"
+jiff = { version = "=0.2.37", default-features = false, features = ["std", "tzdb-bundle-always"] }
 
 [dev-dependencies]
 tempfile = "3"
