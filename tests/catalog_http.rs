@@ -268,6 +268,9 @@ async fn catalog_http_updates_editions_and_units() {
     let changed = json(response).await;
     assert_eq!(changed["publication_id"], publication["id"]);
     assert_eq!(changed["publisher"], "Press");
+    assert_eq!(changed["language_locked"], true);
+    assert_eq!(changed["region_locked"], true);
+    assert_eq!(changed["publisher_locked"], false);
     let unit_path = format!("/api/v1/units/{}", unit["id"].as_str().unwrap());
     let response = request(
         &app,
@@ -281,6 +284,8 @@ async fn catalog_http_updates_editions_and_units() {
     let changed = json(response).await;
     assert_eq!(changed["edition_id"], edition["id"]);
     assert_eq!(changed["date_precision"], "day");
+    assert_eq!(changed["sort_key_locked"], true);
+    assert_eq!(changed["date_locked"], true);
     for (path, body, expected) in [
         (
             edition_path.as_str(),

@@ -6060,6 +6060,15 @@
               "string",
               "null"
             ]
+          },
+          "language_locked": {
+            "type": "boolean"
+          },
+          "region_locked": {
+            "type": "boolean"
+          },
+          "publisher_locked": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -6067,7 +6076,10 @@
           "publication_id",
           "language",
           "region",
-          "publisher"
+          "publisher",
+          "language_locked",
+          "region_locked",
+          "publisher_locked"
         ]
       },
       "Unit": {
@@ -6118,6 +6130,18 @@
               "day",
               null
             ]
+          },
+          "label_locked": {
+            "type": "boolean"
+          },
+          "kind_locked": {
+            "type": "boolean"
+          },
+          "sort_key_locked": {
+            "type": "boolean"
+          },
+          "date_locked": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -6127,7 +6151,11 @@
           "kind",
           "sort_key",
           "date",
-          "date_precision"
+          "date_precision",
+          "label_locked",
+          "kind_locked",
+          "sort_key_locked",
+          "date_locked"
         ]
       },
       "UnitContext": {

@@ -144,6 +144,10 @@ fn item(kind: &'static str, row: &SqliteRow) -> Result<ReviewItem, sqlx::Error> 
                     .map(DatePrecision::parse)
                     .transpose()
                     .map_err(|error| sqlx::Error::Decode(error.into()))?,
+                label_locked: row.try_get::<i64, _>("label_locked")? != 0,
+                kind_locked: row.try_get::<i64, _>("kind_locked")? != 0,
+                sort_key_locked: row.try_get::<i64, _>("sort_key_locked")? != 0,
+                date_locked: row.try_get::<i64, _>("date_locked")? != 0,
             })
         })
         .transpose()?;
@@ -217,7 +221,7 @@ pub async fn review_feed(
         store,
         "acquisition_needs_review",
         queries!(
-            "a.id, a.created_at, a.state, COALESCE(a.reason, j.reason) AS reason, e.publication_id, p.title AS publication_title, a.unit_id, u.edition_id, u.label AS unit_label, u.kind AS unit_kind, u.sort_key AS unit_sort_key, u.date AS unit_date, u.date_precision AS unit_date_precision, a.id AS acquisition_id, j.id AS job_id, j.kind AS job_kind",
+            "a.id, a.created_at, a.state, COALESCE(a.reason, j.reason) AS reason, e.publication_id, p.title AS publication_title, a.unit_id, u.edition_id, u.label AS unit_label, u.kind AS unit_kind, u.sort_key AS unit_sort_key, u.date AS unit_date, u.date_precision AS unit_date_precision, u.label_locked, u.kind_locked, u.sort_key_locked, u.date_locked, a.id AS acquisition_id, j.id AS job_id, j.kind AS job_kind",
             acquisition_filter,
             "a.created_at DESC, a.id DESC"
         ),
@@ -231,7 +235,7 @@ pub async fn review_feed(
                 store,
                 "direct_acquisition_needs_review",
                 queries!(
-                    "d.id, d.created_at, d.state, d.reason, e.publication_id, p.title AS publication_title, d.unit_id, u.edition_id, u.label AS unit_label, u.kind AS unit_kind, u.sort_key AS unit_sort_key, u.date AS unit_date, u.date_precision AS unit_date_precision, d.id AS acquisition_id",
+                    "d.id, d.created_at, d.state, d.reason, e.publication_id, p.title AS publication_title, d.unit_id, u.edition_id, u.label AS unit_label, u.kind AS unit_kind, u.sort_key AS unit_sort_key, u.date AS unit_date, u.date_precision AS unit_date_precision, u.label_locked, u.kind_locked, u.sort_key_locked, u.date_locked, d.id AS acquisition_id",
                     direct_filter,
                     "d.created_at DESC, d.id DESC"
                 ),
@@ -277,7 +281,7 @@ pub async fn review_feed(
         store,
         "monitor_needs_review",
         queries!(
-            "m.id, COALESCE(m.last_run_at, m.updated_at) AS created_at, m.last_state AS state, m.reason, e.publication_id, p.title AS publication_title, m.unit_id, u.edition_id, u.label AS unit_label, u.kind AS unit_kind, u.sort_key AS unit_sort_key, u.date AS unit_date, u.date_precision AS unit_date_precision, m.id AS monitor_id",
+            "m.id, COALESCE(m.last_run_at, m.updated_at) AS created_at, m.last_state AS state, m.reason, e.publication_id, p.title AS publication_title, m.unit_id, u.edition_id, u.label AS unit_label, u.kind AS unit_kind, u.sort_key AS unit_sort_key, u.date AS unit_date, u.date_precision AS unit_date_precision, u.label_locked, u.kind_locked, u.sort_key_locked, u.date_locked, m.id AS monitor_id",
             monitor_filter,
             "COALESCE(m.last_run_at, m.updated_at) DESC, m.id DESC"
         ),

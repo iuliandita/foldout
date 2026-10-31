@@ -1173,3 +1173,91 @@ async fn unit_kind_filter_pages_and_binds_cursor() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn metadata_refresh_preserves_explicit_locks_and_rolls_back_invalid_values() {
+    let (_directory, repository) = repository().await;
+    let publication = repository
+        .create_publication(publication("Locks", None))
+        .await
+        .unwrap();
+    let edition = repository
+        .create_edition(NewEdition {
+            publication_id: publication.id.clone(),
+            language: "en".into(),
+            region: Some("US".into()),
+            publisher: None,
+        })
+        .await
+        .unwrap();
+    let unit = repository
+        .create_unit(NewUnit {
+            edition_id: edition.id.clone(),
+            label: "1".into(),
+            kind: UnitKind::Issue,
+            sort_key: Some("001".into()),
+            date: Some("2020".into()),
+        })
+        .await
+        .unwrap();
+    repository
+        .update_edition(
+            &edition.id,
+            serde_json::from_value(serde_json::json!({"region":null})).unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .update_unit(
+            &unit.id,
+            serde_json::from_value(serde_json::json!({"label":"Corrected", "sort_key":null}))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let refreshed = repository
+        .refresh_edition(
+            &edition.id,
+            serde_json::from_value(
+                serde_json::json!({"language":"es", "region":"ES", "publisher":"Press"}),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refreshed.publication_id, publication.id);
+    assert_eq!(refreshed.region, None);
+    assert!(refreshed.region_locked);
+    assert_eq!(refreshed.language, "es");
+    assert_eq!(refreshed.publisher.as_deref(), Some("Press"));
+    let refreshed = repository.refresh_unit(&unit.id, serde_json::from_value(serde_json::json!({"label":"Provider", "sort_key":"002", "kind":"volume", "date":"2024-02"})).unwrap()).await.unwrap();
+    assert_eq!(refreshed.edition_id, edition.id);
+    assert_eq!(refreshed.label, "Corrected");
+    assert_eq!(refreshed.sort_key, None);
+    assert_eq!(refreshed.kind, UnitKind::Volume);
+    assert_eq!(refreshed.date.as_deref(), Some("2024-02"));
+    assert_eq!(refreshed.date_precision, Some(DatePrecision::Month));
+    let invalid =
+        serde_json::from_value(serde_json::json!({"kind":"issue", "date":"2024-02-30"})).unwrap();
+    assert!(repository.refresh_unit(&unit.id, invalid).await.is_err());
+    assert_eq!(
+        repository.list_units(&edition.id).await.unwrap()[0],
+        refreshed
+    );
+    let locked = repository
+        .update_unit(
+            &unit.id,
+            serde_json::from_value(serde_json::json!({"date":"2023-05"})).unwrap(),
+        )
+        .await
+        .unwrap();
+    let refreshed = repository
+        .refresh_unit(
+            &unit.id,
+            serde_json::from_value(serde_json::json!({"date":"2024-02-29"})).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refreshed.date, locked.date);
+    assert_eq!(refreshed.date_precision, Some(DatePrecision::Month));
+}

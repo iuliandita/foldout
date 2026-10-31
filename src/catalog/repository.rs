@@ -449,6 +449,9 @@ impl CatalogRepository {
             language: input.language,
             region: input.region,
             publisher: input.publisher,
+            language_locked: false,
+            region_locked: false,
+            publisher_locked: false,
         })
     }
 
@@ -457,6 +460,36 @@ impl CatalogRepository {
         id: &str,
         input: EditionUpdate,
     ) -> Result<Edition, CatalogError> {
+        self.apply_edition(id, input, true).await
+    }
+
+    pub async fn refresh_edition(
+        &self,
+        id: &str,
+        input: EditionUpdate,
+    ) -> Result<Edition, CatalogError> {
+        self.apply_edition(id, input, false).await
+    }
+
+    async fn apply_edition(
+        &self,
+        id: &str,
+        mut input: EditionUpdate,
+        lock: bool,
+    ) -> Result<Edition, CatalogError> {
+        let mut transaction = self.store.begin_write().await?;
+        let current = edition_in_transaction(&mut transaction, id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        if !lock && current.language_locked {
+            input.language = None;
+        }
+        if !lock && current.region_locked {
+            input.region = None;
+        }
+        if !lock && current.publisher_locked {
+            input.publisher = None;
+        }
         if input
             .language
             .as_ref()
@@ -466,18 +499,18 @@ impl CatalogRepository {
                 "edition update contains an invalid value".into(),
             ));
         }
-        let mut transaction = self.store.begin_write().await?;
-        let current = edition_in_transaction(&mut transaction, id)
-            .await?
-            .ok_or(CatalogError::NotFound)?;
+        let language_locked = current.language_locked || (lock && input.language.is_some());
+        let region_locked = current.region_locked || (lock && input.region.is_some());
+        let publisher_locked = current.publisher_locked || (lock && input.publisher.is_some());
+
         let language = input.language.unwrap_or_else(|| current.language.clone());
         let region = input.region.unwrap_or(current.region.clone());
         let publisher = input.publisher.unwrap_or(current.publisher.clone());
-        sqlx::query("UPDATE editions SET language = ?, region = ?, publisher = ? WHERE id = ?")
+        sqlx::query("UPDATE editions SET language = ?, region = ?, publisher = ?, language_locked = ?, region_locked = ?, publisher_locked = ? WHERE id = ?")
             .bind(&language)
             .bind(&region)
             .bind(&publisher)
-            .bind(id)
+            .bind(language_locked).bind(region_locked).bind(publisher_locked).bind(id)
             .execute(&mut *transaction)
             .await
             .map_err(map_database)?;
@@ -488,11 +521,14 @@ impl CatalogRepository {
             language,
             region,
             publisher,
+            language_locked,
+            region_locked,
+            publisher_locked,
         })
     }
 
     pub async fn list_editions(&self, publication_id: &str) -> Result<Vec<Edition>, CatalogError> {
-        sqlx::query("SELECT id, publication_id, language, region, publisher FROM editions WHERE publication_id = ? ORDER BY language, COALESCE(region, ''), id").bind(publication_id).fetch_all(self.store.reader()).await?.into_iter().map(edition_row).collect()
+        sqlx::query("SELECT id, publication_id, language, region, publisher, language_locked, region_locked, publisher_locked FROM editions WHERE publication_id = ? ORDER BY language, COALESCE(region, ''), id").bind(publication_id).fetch_all(self.store.reader()).await?.into_iter().map(edition_row).collect()
     }
 
     pub async fn list_editions_page(
@@ -528,8 +564,8 @@ impl CatalogRepository {
             ));
         }
         let rows = match &cursor {
-            Some(cursor) => sqlx::query("SELECT id, publication_id, language, region, publisher FROM editions WHERE (? IS NULL OR instr(lower(language), lower(?)) > 0 OR instr(lower(COALESCE(region, '')), lower(?)) > 0 OR instr(lower(COALESCE(publisher, '')), lower(?)) > 0) AND (publication_id = ? AND (language > ? OR (language = ? AND (COALESCE(region, '') > ? OR (COALESCE(region, '') = ? AND id > ?))))) ORDER BY language, COALESCE(region, ''), id LIMIT ?").bind(q.as_deref()).bind(q.as_deref().unwrap_or("")).bind(q.as_deref().unwrap_or("")).bind(q.as_deref().unwrap_or("")).bind(publication_id).bind(&cursor.language).bind(&cursor.language).bind(&cursor.region).bind(&cursor.region).bind(&cursor.id).bind(i64::from(limit) + 1).fetch_all(self.store.reader()).await?,
-            None => sqlx::query("SELECT id, publication_id, language, region, publisher FROM editions WHERE (? IS NULL OR instr(lower(language), lower(?)) > 0 OR instr(lower(COALESCE(region, '')), lower(?)) > 0 OR instr(lower(COALESCE(publisher, '')), lower(?)) > 0) AND (publication_id = ?) ORDER BY language, COALESCE(region, ''), id LIMIT ?").bind(q.as_deref()).bind(q.as_deref().unwrap_or("")).bind(q.as_deref().unwrap_or("")).bind(q.as_deref().unwrap_or("")).bind(publication_id).bind(i64::from(limit) + 1).fetch_all(self.store.reader()).await?,
+            Some(cursor) => sqlx::query("SELECT id, publication_id, language, region, publisher, language_locked, region_locked, publisher_locked FROM editions WHERE (? IS NULL OR instr(lower(language), lower(?)) > 0 OR instr(lower(COALESCE(region, '')), lower(?)) > 0 OR instr(lower(COALESCE(publisher, '')), lower(?)) > 0) AND (publication_id = ? AND (language > ? OR (language = ? AND (COALESCE(region, '') > ? OR (COALESCE(region, '') = ? AND id > ?))))) ORDER BY language, COALESCE(region, ''), id LIMIT ?").bind(q.as_deref()).bind(q.as_deref().unwrap_or("")).bind(q.as_deref().unwrap_or("")).bind(q.as_deref().unwrap_or("")).bind(publication_id).bind(&cursor.language).bind(&cursor.language).bind(&cursor.region).bind(&cursor.region).bind(&cursor.id).bind(i64::from(limit) + 1).fetch_all(self.store.reader()).await?,
+            None => sqlx::query("SELECT id, publication_id, language, region, publisher, language_locked, region_locked, publisher_locked FROM editions WHERE (? IS NULL OR instr(lower(language), lower(?)) > 0 OR instr(lower(COALESCE(region, '')), lower(?)) > 0 OR instr(lower(COALESCE(publisher, '')), lower(?)) > 0) AND (publication_id = ?) ORDER BY language, COALESCE(region, ''), id LIMIT ?").bind(q.as_deref()).bind(q.as_deref().unwrap_or("")).bind(q.as_deref().unwrap_or("")).bind(q.as_deref().unwrap_or("")).bind(publication_id).bind(i64::from(limit) + 1).fetch_all(self.store.reader()).await?,
         };
         let mut items: Vec<_> = rows
             .into_iter()
@@ -567,10 +603,43 @@ impl CatalogRepository {
             sort_key: input.sort_key,
             date: input.date,
             date_precision,
+            label_locked: false,
+            kind_locked: false,
+            sort_key_locked: false,
+            date_locked: false,
         })
     }
 
     pub async fn update_unit(&self, id: &str, input: UnitUpdate) -> Result<Unit, CatalogError> {
+        self.apply_unit(id, input, true).await
+    }
+
+    pub async fn refresh_unit(&self, id: &str, input: UnitUpdate) -> Result<Unit, CatalogError> {
+        self.apply_unit(id, input, false).await
+    }
+
+    async fn apply_unit(
+        &self,
+        id: &str,
+        mut input: UnitUpdate,
+        lock: bool,
+    ) -> Result<Unit, CatalogError> {
+        let mut transaction = self.store.begin_write().await?;
+        let current = unit_in_transaction(&mut transaction, id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        if !lock && current.label_locked {
+            input.label = None;
+        }
+        if !lock && current.kind_locked {
+            input.kind = None;
+        }
+        if !lock && current.sort_key_locked {
+            input.sort_key = None;
+        }
+        if !lock && current.date_locked {
+            input.date = None;
+        }
         if input
             .label
             .as_ref()
@@ -580,18 +649,19 @@ impl CatalogRepository {
                 "unit update contains an invalid value".into(),
             ));
         }
-        let mut transaction = self.store.begin_write().await?;
-        let current = unit_in_transaction(&mut transaction, id)
-            .await?
-            .ok_or(CatalogError::NotFound)?;
+        let label_locked = current.label_locked || (lock && input.label.is_some());
+        let kind_locked = current.kind_locked || (lock && input.kind.is_some());
+        let sort_key_locked = current.sort_key_locked || (lock && input.sort_key.is_some());
+        let date_locked = current.date_locked || (lock && input.date.is_some());
+
         let label = input.label.unwrap_or_else(|| current.label.clone());
         let kind = input.kind.unwrap_or_else(|| current.kind.clone());
         let sort_key = input.sort_key.unwrap_or(current.sort_key.clone());
         let date = input.date.unwrap_or(current.date.clone());
         let date_precision = date.as_deref().map(identity::date).transpose()?;
-        sqlx::query("UPDATE units SET label = ?, kind = ?, sort_key = ?, date = ?, date_precision = ? WHERE id = ?")
+        sqlx::query("UPDATE units SET label = ?, kind = ?, sort_key = ?, date = ?, date_precision = ?, label_locked = ?, kind_locked = ?, sort_key_locked = ?, date_locked = ? WHERE id = ?")
             .bind(&label).bind(kind.as_str()).bind(&sort_key).bind(&date)
-            .bind(date_precision.as_ref().map(DatePrecision::as_str)).bind(id)
+            .bind(date_precision.as_ref().map(DatePrecision::as_str)).bind(label_locked).bind(kind_locked).bind(sort_key_locked).bind(date_locked).bind(id)
             .execute(&mut *transaction).await.map_err(map_database)?;
         transaction.commit().await?;
         Ok(Unit {
@@ -602,11 +672,15 @@ impl CatalogRepository {
             sort_key,
             date,
             date_precision,
+            label_locked,
+            kind_locked,
+            sort_key_locked,
+            date_locked,
         })
     }
 
     pub async fn list_units(&self, edition_id: &str) -> Result<Vec<Unit>, CatalogError> {
-        sqlx::query("SELECT id, edition_id, label, kind, sort_key, date, date_precision FROM units WHERE edition_id = ? ORDER BY COALESCE(sort_key, label), id").bind(edition_id).fetch_all(self.store.reader()).await?.into_iter().map(unit_row).collect()
+        sqlx::query("SELECT id, edition_id, label, kind, sort_key, date, date_precision, label_locked, kind_locked, sort_key_locked, date_locked FROM units WHERE edition_id = ? ORDER BY COALESCE(sort_key, label), id").bind(edition_id).fetch_all(self.store.reader()).await?.into_iter().map(unit_row).collect()
     }
 
     pub async fn list_units_page(
@@ -654,8 +728,8 @@ impl CatalogRepository {
         }
         let kind_name = kind.as_ref().map(UnitKind::as_str);
         let rows = match &cursor {
-            Some(cursor) => sqlx::query("SELECT id, edition_id, label, kind, sort_key, date, date_precision FROM units WHERE (? IS NULL OR instr(lower(label), lower(?)) > 0) AND (? IS NULL OR kind = ?) AND (edition_id = ? AND (COALESCE(sort_key, label) > ? OR (COALESCE(sort_key, label) = ? AND id > ?))) ORDER BY COALESCE(sort_key, label), id LIMIT ?").bind(q.as_deref()).bind(q.as_deref().unwrap_or("")).bind(kind_name).bind(kind_name).bind(edition_id).bind(&cursor.sort).bind(&cursor.sort).bind(&cursor.id).bind(i64::from(limit) + 1).fetch_all(self.store.reader()).await?,
-            None => sqlx::query("SELECT id, edition_id, label, kind, sort_key, date, date_precision FROM units WHERE (? IS NULL OR instr(lower(label), lower(?)) > 0) AND (? IS NULL OR kind = ?) AND (edition_id = ?) ORDER BY COALESCE(sort_key, label), id LIMIT ?").bind(q.as_deref()).bind(q.as_deref().unwrap_or("")).bind(kind_name).bind(kind_name).bind(edition_id).bind(i64::from(limit) + 1).fetch_all(self.store.reader()).await?,
+            Some(cursor) => sqlx::query("SELECT id, edition_id, label, kind, sort_key, date, date_precision, label_locked, kind_locked, sort_key_locked, date_locked FROM units WHERE (? IS NULL OR instr(lower(label), lower(?)) > 0) AND (? IS NULL OR kind = ?) AND (edition_id = ? AND (COALESCE(sort_key, label) > ? OR (COALESCE(sort_key, label) = ? AND id > ?))) ORDER BY COALESCE(sort_key, label), id LIMIT ?").bind(q.as_deref()).bind(q.as_deref().unwrap_or("")).bind(kind_name).bind(kind_name).bind(edition_id).bind(&cursor.sort).bind(&cursor.sort).bind(&cursor.id).bind(i64::from(limit) + 1).fetch_all(self.store.reader()).await?,
+            None => sqlx::query("SELECT id, edition_id, label, kind, sort_key, date, date_precision, label_locked, kind_locked, sort_key_locked, date_locked FROM units WHERE (? IS NULL OR instr(lower(label), lower(?)) > 0) AND (? IS NULL OR kind = ?) AND (edition_id = ?) ORDER BY COALESCE(sort_key, label), id LIMIT ?").bind(q.as_deref()).bind(q.as_deref().unwrap_or("")).bind(kind_name).bind(kind_name).bind(edition_id).bind(i64::from(limit) + 1).fetch_all(self.store.reader()).await?,
         };
         let mut items: Vec<_> = rows.into_iter().map(unit_row).collect::<Result<_, _>>()?;
         let next_cursor = if items.len() > limit as usize {
@@ -777,7 +851,7 @@ async fn edition_in_transaction(
     id: &str,
 ) -> Result<Option<Edition>, CatalogError> {
     let row = sqlx::query(
-        "SELECT id, publication_id, language, region, publisher FROM editions WHERE id = ?",
+        "SELECT id, publication_id, language, region, publisher, language_locked, region_locked, publisher_locked FROM editions WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&mut **transaction)
@@ -788,7 +862,7 @@ async fn unit_in_transaction(
     transaction: &mut Transaction<'_, Sqlite>,
     id: &str,
 ) -> Result<Option<Unit>, CatalogError> {
-    let row = sqlx::query("SELECT id, edition_id, label, kind, sort_key, date, date_precision FROM units WHERE id = ?").bind(id).fetch_optional(&mut **transaction).await?;
+    let row = sqlx::query("SELECT id, edition_id, label, kind, sort_key, date, date_precision, label_locked, kind_locked, sort_key_locked, date_locked FROM units WHERE id = ?").bind(id).fetch_optional(&mut **transaction).await?;
     row.map(unit_row).transpose()
 }
 fn publication_row(row: sqlx::sqlite::SqliteRow) -> Result<Publication, CatalogError> {
@@ -810,6 +884,9 @@ fn edition_row(row: sqlx::sqlite::SqliteRow) -> Result<Edition, CatalogError> {
         language: row.try_get("language")?,
         region: row.try_get("region")?,
         publisher: row.try_get("publisher")?,
+        language_locked: row.try_get::<i64, _>("language_locked")? != 0,
+        region_locked: row.try_get::<i64, _>("region_locked")? != 0,
+        publisher_locked: row.try_get::<i64, _>("publisher_locked")? != 0,
     })
 }
 fn unit_row(row: sqlx::sqlite::SqliteRow) -> Result<Unit, CatalogError> {
@@ -825,6 +902,10 @@ fn unit_row(row: sqlx::sqlite::SqliteRow) -> Result<Unit, CatalogError> {
             .map(DatePrecision::parse)
             .transpose()
             .map_err(CatalogError::Invalid)?,
+        label_locked: row.try_get::<i64, _>("label_locked")? != 0,
+        kind_locked: row.try_get::<i64, _>("kind_locked")? != 0,
+        sort_key_locked: row.try_get::<i64, _>("sort_key_locked")? != 0,
+        date_locked: row.try_get::<i64, _>("date_locked")? != 0,
     })
 }
 // SQLite lower() folds ASCII only; non-ASCII text remains an exact substring match.

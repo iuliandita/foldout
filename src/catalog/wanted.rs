@@ -282,8 +282,8 @@ fn bind_filters<'q>(
 
 pub(crate) const CONTEXT_SQL: &str = r#"
 SELECT p.id AS p_id, p.content_type AS p_content_type, p.title AS p_title, p.sort_title AS p_sort_title, p.run_label AS p_run_label, p.title_locked AS p_title_locked, p.known_unit_count AS p_known_unit_count,
-       e.id AS e_id, e.publication_id AS e_publication_id, e.language AS e_language, e.region AS e_region, e.publisher AS e_publisher,
-       u.id AS u_id, u.edition_id AS u_edition_id, u.label AS u_label, u.kind AS u_kind, u.sort_key AS u_sort_key, u.date AS u_date, u.date_precision AS u_date_precision
+       e.id AS e_id, e.publication_id AS e_publication_id, e.language AS e_language, e.region AS e_region, e.publisher AS e_publisher, e.language_locked AS e_language_locked, e.region_locked AS e_region_locked, e.publisher_locked AS e_publisher_locked,
+       u.id AS u_id, u.edition_id AS u_edition_id, u.label AS u_label, u.kind AS u_kind, u.sort_key AS u_sort_key, u.date AS u_date, u.date_precision AS u_date_precision, u.label_locked AS u_label_locked, u.kind_locked AS u_kind_locked, u.sort_key_locked AS u_sort_key_locked, u.date_locked AS u_date_locked
 FROM units u JOIN editions e ON e.id = u.edition_id JOIN publications p ON p.id = e.publication_id
 WHERE u.id = ?
 "#;
@@ -393,8 +393,8 @@ const LIST_SQL: &str = concat!(
     r#"
 WITH page AS (
     SELECT p.id AS p_id, p.content_type AS p_content_type, p.title AS p_title, p.sort_title AS p_sort_title, p.run_label AS p_run_label, p.title_locked AS p_title_locked, p.known_unit_count AS p_known_unit_count,
-           e.id AS e_id, e.publication_id AS e_publication_id, e.language AS e_language, e.region AS e_region, e.publisher AS e_publisher,
-           u.id AS u_id, u.edition_id AS u_edition_id, u.label AS u_label, u.kind AS u_kind, u.sort_key AS u_sort_key, u.date AS u_date, u.date_precision AS u_date_precision
+           e.id AS e_id, e.publication_id AS e_publication_id, e.language AS e_language, e.region AS e_region, e.publisher AS e_publisher, e.language_locked AS e_language_locked, e.region_locked AS e_region_locked, e.publisher_locked AS e_publisher_locked,
+           u.id AS u_id, u.edition_id AS u_edition_id, u.label AS u_label, u.kind AS u_kind, u.sort_key AS u_sort_key, u.date AS u_date, u.date_precision AS u_date_precision, u.label_locked AS u_label_locked, u.kind_locked AS u_kind_locked, u.sort_key_locked AS u_sort_key_locked, u.date_locked AS u_date_locked
 "#,
     wanted_match!(),
     r#"
@@ -500,6 +500,9 @@ pub(crate) fn context_row(row: &sqlx::sqlite::SqliteRow) -> Result<UnitContext, 
             language: row.try_get("e_language")?,
             region: row.try_get("e_region")?,
             publisher: row.try_get("e_publisher")?,
+            language_locked: row.try_get::<i64, _>("e_language_locked")? != 0,
+            region_locked: row.try_get::<i64, _>("e_region_locked")? != 0,
+            publisher_locked: row.try_get::<i64, _>("e_publisher_locked")? != 0,
         },
         unit: Unit {
             id: row.try_get("u_id")?,
@@ -513,6 +516,10 @@ pub(crate) fn context_row(row: &sqlx::sqlite::SqliteRow) -> Result<UnitContext, 
                 .map(DatePrecision::parse)
                 .transpose()
                 .map_err(CatalogError::Invalid)?,
+            label_locked: row.try_get::<i64, _>("u_label_locked")? != 0,
+            kind_locked: row.try_get::<i64, _>("u_kind_locked")? != 0,
+            sort_key_locked: row.try_get::<i64, _>("u_sort_key_locked")? != 0,
+            date_locked: row.try_get::<i64, _>("u_date_locked")? != 0,
         },
     })
 }

@@ -1111,6 +1111,9 @@ export interface components {
             language: string;
             region: string | null;
             publisher: string | null;
+            language_locked: boolean;
+            region_locked: boolean;
+            publisher_locked: boolean;
         };
         Unit: {
             /** Format: uuid */
@@ -1125,6 +1128,10 @@ export interface components {
             date: string | null;
             /** @enum {string|null} */
             date_precision: "year" | "month" | "day" | null;
+            label_locked: boolean;
+            kind_locked: boolean;
+            sort_key_locked: boolean;
+            date_locked: boolean;
         };
         UnitContext: {
             publication: components["schemas"]["Publication"];

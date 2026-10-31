@@ -390,6 +390,9 @@ mod tests {
                 language: "en".into(),
                 region: None,
                 publisher: None,
+                language_locked: false,
+                region_locked: false,
+                publisher_locked: false,
             },
             unit: Unit {
                 id: "u".into(),
@@ -399,6 +402,10 @@ mod tests {
                 sort_key: None,
                 date: None,
                 date_precision: None,
+                label_locked: false,
+                kind_locked: false,
+                sort_key_locked: false,
+                date_locked: false,
             },
         }
     }

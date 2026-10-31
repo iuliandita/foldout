@@ -296,7 +296,7 @@ async fn review_feed_keeps_each_source_access_rule() {
         serde_json::json!({"kind": "acquisition_needs_review", "id": "acq-own", "created_at": 3000,
             "state": "needs_review", "reason": "uncertain_submission", "publication_id": "pub",
             "publication_title": "Two editions", "unit_id": "en-2",
-            "unit": {"id":"en-2","edition_id":"ed-en","label":"2","kind":"volume","sort_key":"2","date":null,"date_precision":null},
+            "unit": {"id":"en-2","edition_id":"ed-en","label":"2","kind":"volume","sort_key":"2","date":null,"date_precision":null,"label_locked":false,"kind_locked":false,"sort_key_locked":false,"date_locked":false},
             "acquisition_id": "acq-own", "job_id": "job-own",
             "job_kind": "acquisition", "root_id": null, "entry_id": null, "relative_path": null,
             "monitor_id": null})
