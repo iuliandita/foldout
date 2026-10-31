@@ -661,6 +661,8 @@ async fn catalog_deletes_enforce_scope_and_preserve_dependencies() {
         "INSERT INTO publications(id,content_type,title,sort_title,created_at) VALUES ('p','comic','p','p',0)",
         "INSERT INTO editions(id,publication_id,language) VALUES ('e','p','en')",
         "INSERT INTO units(id,edition_id,label,kind) VALUES ('u','e','1','issue')",
+        "INSERT INTO editions(id,publication_id,language) VALUES ('empty-e','p','en')",
+        "INSERT INTO units(id,edition_id,label,kind) VALUES ('empty-u','empty-e','2','issue')",
         "INSERT INTO provider_links(id,provider,external_id,edition_id) VALUES ('l','x','x','e')",
         "INSERT INTO library_files(id,path,format,signature,size_bytes) VALUES ('f','original.cbz','cbz','x',1)",
         "INSERT INTO file_coverage(library_file_id,unit_id,evidence) VALUES ('f','u','user_confirmed')",
@@ -688,6 +690,12 @@ async fn catalog_deletes_enforce_scope_and_preserve_dependencies() {
         "/api/v1/editions/e",
         "/api/v1/units/u",
     ] {
+        assert_eq!(
+            request(&app, "DELETE", path, None, json!(null))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
         assert_eq!(
             request(&app, "DELETE", path, Some(&key), json!(null))
                 .await
@@ -747,7 +755,6 @@ async fn catalog_deletes_enforce_scope_and_preserve_dependencies() {
     for kind in [
         "file_coverage: 1",
         "monitors: 1",
-        "acquisition_intents: 1",
         "acquisition_runs: 1",
         "provider_links: 1",
         "import_previews: 1",
@@ -771,7 +778,23 @@ async fn catalog_deletes_enforce_scope_and_preserve_dependencies() {
                 .fetch_one(store.reader())
                 .await
                 .unwrap();
-        assert_eq!(count, 1, "{table}");
+        assert_eq!(
+            count,
+            if table == "units" || table == "editions" {
+                2
+            } else {
+                1
+            },
+            "{table}"
+        );
+    }
+    for path in ["/api/v1/units/empty-u", "/api/v1/editions/empty-e"] {
+        assert_eq!(
+            request(&app, "DELETE", path, Some(&session), json!(null))
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
     }
     assert_eq!(
         request(

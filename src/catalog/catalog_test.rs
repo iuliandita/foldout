@@ -1314,3 +1314,41 @@ async fn delete_records_refuses_dependencies_and_preserves_them() {
         Err(CatalogError::NotFound)
     ));
 }
+
+#[tokio::test]
+async fn delete_rolls_back_trigger_changes_on_failure() {
+    let directory = tempfile::Builder::new()
+        .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let store = SqliteStore::open(directory.path()).await.unwrap();
+    let mut tx = store.begin_write().await.unwrap();
+    for sql in [
+        "INSERT INTO publications(id,content_type,title,sort_title,created_at) VALUES ('p','comic','original','original',0)",
+        "INSERT INTO editions(id,publication_id,language) VALUES ('e','p','en')",
+        "INSERT INTO units(id,edition_id,label,kind) VALUES ('target','e','1','issue'),('other','e','2','issue')",
+        "INSERT INTO provider_links(id,provider,external_id,unit_id) VALUES ('link','test','1','other')",
+        "CREATE TRIGGER fail_delete BEFORE DELETE ON units WHEN OLD.id = 'target' BEGIN DELETE FROM provider_links WHERE id = 'link'; UPDATE publications SET title = 'changed' WHERE id = 'p'; SELECT RAISE(ABORT, 'injected failure'); END",
+    ] {
+        sqlx::query(sql).execute(&mut *tx).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    let repository = CatalogRepository::new(store.clone());
+    assert!(repository.delete_unit("target").await.is_err());
+    let units: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM units WHERE id IN ('target', 'other')")
+            .fetch_one(store.reader())
+            .await
+            .unwrap();
+    let links: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM provider_links WHERE id = 'link' AND unit_id = 'other'",
+    )
+    .fetch_one(store.reader())
+    .await
+    .unwrap();
+    let title: String = sqlx::query_scalar("SELECT title FROM publications WHERE id = 'p'")
+        .fetch_one(store.reader())
+        .await
+        .unwrap();
+    assert_eq!((units, links, title.as_str()), (2, 1, "original"));
+}

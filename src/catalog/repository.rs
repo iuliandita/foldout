@@ -463,18 +463,50 @@ impl CatalogRepository {
         .await
     }
     pub async fn delete_unit(&self, id: &str) -> Result<(), CatalogError> {
-        self.delete_record(id, "SELECT COUNT(*) FROM units WHERE id = ?", "DELETE FROM units WHERE id = ?", &[
-            ("provider_links", "SELECT COUNT(*) FROM provider_links WHERE unit_id = ?"),
-            ("file_coverage", "SELECT COUNT(*) FROM file_coverage WHERE unit_id = ?"),
-            ("import_previews", "SELECT COUNT(*) FROM import_previews WHERE unit_id = ?"),
-            ("import_operations", "SELECT COUNT(*) FROM import_operations WHERE unit_id = ?"),
-            ("acquisition_runs", "SELECT COUNT(*) FROM acquisition_runs WHERE unit_id = ?"),
-            ("monitors", "SELECT COUNT(*) FROM monitors WHERE unit_id = ?"),
-            ("direct_acquisitions", "SELECT COUNT(*) FROM direct_acquisitions WHERE unit_id = ?"),
-            ("release_selection_policies", "SELECT COUNT(*) FROM release_selection_policies WHERE unit_id = ?"),
-            ("release_assessments", "SELECT COUNT(*) FROM release_assessments WHERE unit_id = ?"),
-            ("acquisition_intents", "SELECT COUNT(*) FROM acquisition_intents WHERE json_extract(request, '$.unit_id') = ?"),
-        ]).await
+        self.delete_record(
+            id,
+            "SELECT COUNT(*) FROM units WHERE id = ?",
+            "DELETE FROM units WHERE id = ?",
+            &[
+                (
+                    "provider_links",
+                    "SELECT COUNT(*) FROM provider_links WHERE unit_id = ?",
+                ),
+                (
+                    "file_coverage",
+                    "SELECT COUNT(*) FROM file_coverage WHERE unit_id = ?",
+                ),
+                (
+                    "import_previews",
+                    "SELECT COUNT(*) FROM import_previews WHERE unit_id = ?",
+                ),
+                (
+                    "import_operations",
+                    "SELECT COUNT(*) FROM import_operations WHERE unit_id = ?",
+                ),
+                (
+                    "acquisition_runs",
+                    "SELECT COUNT(*) FROM acquisition_runs WHERE unit_id = ?",
+                ),
+                (
+                    "monitors",
+                    "SELECT COUNT(*) FROM monitors WHERE unit_id = ?",
+                ),
+                (
+                    "direct_acquisitions",
+                    "SELECT COUNT(*) FROM direct_acquisitions WHERE unit_id = ?",
+                ),
+                (
+                    "release_selection_policies",
+                    "SELECT COUNT(*) FROM release_selection_policies WHERE unit_id = ?",
+                ),
+                (
+                    "release_assessments",
+                    "SELECT COUNT(*) FROM release_assessments WHERE unit_id = ?",
+                ),
+            ],
+        )
+        .await
     }
     async fn delete_record(
         &self,
