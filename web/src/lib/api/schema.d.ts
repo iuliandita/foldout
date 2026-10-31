@@ -210,7 +210,8 @@ export interface paths {
         get: operations["getUnitContext"];
         put?: never;
         post?: never;
-        delete?: never;
+        /** @description Requires Manage scope. Cookie-authenticated requests require a matching Origin. Referenced records are retained; library files and history are never deleted. */
+        delete: operations["deleteUnit"];
         options?: never;
         head?: never;
         /** @description Correct catalog metadata. Requires Manage access. Does not rename or move files, change parent identity, or remove file associations. */
@@ -952,7 +953,8 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete?: never;
+        /** @description Requires Manage scope. Cookie-authenticated requests require a matching Origin. Referenced records are retained; library files and history are never deleted. */
+        delete: operations["deleteEdition"];
         options?: never;
         head?: never;
         /** @description Correct catalog metadata. Requires Manage access. Does not rename or move files, change parent identity, or remove file associations. */
@@ -1005,6 +1007,23 @@ export interface paths {
         /** @description Assess a caller-owned cached release for a catalog unit without fetching a provider. Validates source configuration and handle expiry, returns the canonical target, persists an immutable assessment, and returns any active scoped rejection. Supports monitor candidates and targeted search results. Requires manage scope and matching Origin for cookie authentication. JSON body limit is 8 KiB. */
         post: operations["assessRelease"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/provider-links/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** @description Requires Manage scope. Cookie-authenticated requests require a matching Origin. Referenced records are retained; library files and history are never deleted. */
+        delete: operations["deleteProviderLink"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2818,6 +2837,71 @@ export interface operations {
             };
             /** @description Operation failed; response includes a safe reason and trace ID */
             default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    deleteUnit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Record deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Manage scope or matching Origin required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Catalog record not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Referenced record; message contains blocking record kinds and counts */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Operation failed */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6388,6 +6472,71 @@ export interface operations {
             };
         };
     };
+    deleteEdition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Record deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Manage scope or matching Origin required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Catalog record not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Referenced record; message contains blocking record kinds and counts */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Operation failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     updateEdition: {
         parameters: {
             query?: never;
@@ -6686,6 +6835,71 @@ export interface operations {
             };
             /** @description unavailable: authentication temporarily unavailable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    deleteProviderLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Record deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Manage scope or matching Origin required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Catalog record not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Referenced record; message contains blocking record kinds and counts */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Operation failed */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
