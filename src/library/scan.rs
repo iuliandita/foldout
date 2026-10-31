@@ -18,6 +18,8 @@ use uuid::Uuid;
 
 use super::{
     LibraryFormat,
+    hints::IdentityHint,
+    metadata::EmbeddedMetadata,
     roots::{Library, LibraryError, canonical_directory},
 };
 
@@ -54,12 +56,14 @@ struct Entry {
     mtime: Option<i64>,
     state: &'static str,
     reason: Option<&'static str>,
+    hints: Option<Vec<IdentityHint>>,
 }
 #[derive(Clone, Debug)]
 struct Prior {
     size: i64,
     mtime: i64,
     signature: String,
+    hints_signature: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct HashResult {
@@ -181,6 +185,37 @@ impl Library {
                 }
                 entries.push(entry);
             }
+            let decoder = crate::reader::archive::ArchiveDecoder::new();
+            let mut extraction = JoinSet::new();
+            for (index, entry) in entries.iter_mut().enumerate() {
+                let changed = entry.signature.as_ref().is_some_and(|signature| {
+                    prior
+                        .get(&entry.relative)
+                        .is_none_or(|old| old.hints_signature.as_ref() != Some(signature))
+                });
+                if changed && matches!(entry.format, Some(LibraryFormat::Cbz | LibraryFormat::Cbr))
+                {
+                    let root = root.to_path_buf();
+                    let path = root.join(&entry.relative);
+                    let expected_size = entry.size;
+                    let expected_mtime = entry.mtime;
+                    let decoder = decoder.clone();
+                    extraction.spawn(async move {
+                        let hints =
+                            extract_hints(&decoder, &root, &path, expected_size, expected_mtime)
+                                .await
+                                .unwrap_or_default();
+                        (index, hints)
+                    });
+                } else if changed {
+                    entry.hints = Some(Vec::new());
+                }
+            }
+            while let Some(result) = extraction.join_next().await {
+                if let Ok((index, hints)) = result {
+                    entries[index].hints = Some(hints);
+                }
+            }
             self.persist_entries(root_id, run_id, entries).await?;
             #[cfg(test)]
             if let Some(gate) = &self.scan_commit_gate {
@@ -209,7 +244,7 @@ impl Library {
         Ok(())
     }
     async fn prior(&self, root_id: &str) -> Result<HashMap<String, Prior>, LibraryError> {
-        Ok(sqlx::query("SELECT relative_path, size_bytes, mtime_ns, signature FROM scan_entries WHERE root_id = ? AND state = 'pending_association'").bind(root_id).fetch_all(self.store.reader()).await?.into_iter().filter_map(|row| Some((row.get::<String, _>("relative_path"), Prior { size: row.get::<Option<i64>, _>("size_bytes")?, mtime: row.get::<Option<i64>, _>("mtime_ns")?, signature: row.get::<Option<String>, _>("signature")? }))).collect())
+        Ok(sqlx::query("SELECT relative_path, size_bytes, mtime_ns, signature, hints_signature FROM scan_entries WHERE root_id = ? AND state = 'pending_association'").bind(root_id).fetch_all(self.store.reader()).await?.into_iter().filter_map(|row| Some((row.get::<String, _>("relative_path"), Prior { size: row.get::<Option<i64>, _>("size_bytes")?, mtime: row.get::<Option<i64>, _>("mtime_ns")?, signature: row.get::<Option<String>, _>("signature")?, hints_signature: row.get("hints_signature") }))).collect())
     }
     async fn persist_entries(
         &self,
@@ -219,7 +254,42 @@ impl Library {
     ) -> Result<(), LibraryError> {
         let mut tx = self.store.begin_write().await?;
         for entry in entries {
-            sqlx::query("INSERT INTO scan_entries (id, root_id, relative_path, format, signature, size_bytes, mtime_ns, state, reason, last_seen_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET format=excluded.format, signature=excluded.signature, size_bytes=excluded.size_bytes, mtime_ns=excluded.mtime_ns, state=excluded.state, reason=excluded.reason, last_seen_run_id=excluded.last_seen_run_id").bind(Uuid::new_v4().to_string()).bind(root_id).bind(&entry.relative).bind(entry.format.as_ref().map(LibraryFormat::as_str)).bind(entry.signature).bind(entry.size).bind(entry.mtime).bind(entry.state).bind(entry.reason).bind(run_id).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO scan_entries (id, root_id, relative_path, format, signature, size_bytes, mtime_ns, state, reason, last_seen_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(root_id, relative_path) DO UPDATE SET format=excluded.format, signature=excluded.signature, size_bytes=excluded.size_bytes, mtime_ns=excluded.mtime_ns, state=excluded.state, reason=excluded.reason, last_seen_run_id=excluded.last_seen_run_id").bind(Uuid::new_v4().to_string()).bind(root_id).bind(&entry.relative).bind(entry.format.as_ref().map(LibraryFormat::as_str)).bind(&entry.signature).bind(entry.size).bind(entry.mtime).bind(entry.state).bind(entry.reason).bind(run_id).execute(&mut *tx).await?;
+            if let Some(mut hints) = entry.hints {
+                let entry_id: String = sqlx::query_scalar(
+                    "SELECT id FROM scan_entries WHERE root_id=? AND relative_path=?",
+                )
+                .bind(root_id)
+                .bind(&entry.relative)
+                .fetch_one(&mut *tx)
+                .await?;
+                let old: Vec<(String, String)> = sqlx::query_as(
+                    "SELECT kind,value FROM identity_hints WHERE entry_id=? AND value IS NOT NULL",
+                )
+                .bind(&entry_id)
+                .fetch_all(&mut *tx)
+                .await?;
+                for hint in &mut hints {
+                    if hint.value.as_ref().is_some_and(|value| {
+                        old.iter()
+                            .any(|(kind, previous)| kind == &hint.kind && previous != value)
+                    }) {
+                        hint.status = "needs_review".into();
+                    }
+                }
+                sqlx::query("DELETE FROM identity_hints WHERE entry_id=?")
+                    .bind(&entry_id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("UPDATE scan_entries SET hints_signature=? WHERE id=?")
+                    .bind(&entry.signature)
+                    .bind(&entry_id)
+                    .execute(&mut *tx)
+                    .await?;
+                for hint in hints {
+                    sqlx::query("INSERT INTO identity_hints(entry_id,library_file_id,signature,kind,raw_value,value,status,source_field,container_path,extracted_at) VALUES (?,(SELECT id FROM library_files WHERE root_id=? AND relative_path=? AND signature=? LIMIT 1),?,?,?,?,?,?,?,?)").bind(&entry_id).bind(root_id).bind(&entry.relative).bind(&entry.signature).bind(&entry.signature).bind(hint.kind).bind(hint.raw_value).bind(hint.value).bind(hint.status).bind(hint.source_field).bind(hint.container_path).bind(hint.extracted_at).execute(&mut *tx).await?;
+                }
+            }
         }
         tx.commit().await?;
         Ok(())
@@ -388,6 +458,7 @@ fn inventory_candidate(
             mtime: None,
             state: candidate.state,
             reason: candidate.reason,
+            hints: None,
         });
     }
     if cancellation.load(Ordering::Relaxed) {
@@ -404,6 +475,7 @@ fn inventory_candidate(
                 mtime: None,
                 state: "error",
                 reason: Some(classify(&error)),
+                hints: None,
             });
         }
     };
@@ -419,6 +491,7 @@ fn inventory_candidate(
             mtime: Some(current.mtime_ns),
             state: "pending_association",
             reason: Some("metadata_unchanged"),
+            hints: None,
         });
     }
     #[cfg(test)]
@@ -434,6 +507,7 @@ fn inventory_candidate(
             mtime: Some(result.mtime_ns),
             state: "pending_association",
             reason: Some("unmatched"),
+            hints: None,
         }),
         Err(error) => Ok(Entry {
             relative: candidate.relative,
@@ -443,6 +517,7 @@ fn inventory_candidate(
             mtime: None,
             state: "error",
             reason: Some(classify(&error)),
+            hints: None,
         }),
     }
 }
@@ -606,4 +681,35 @@ fn hash_safe_cancelled(
             mtime_ns: before.mtime_ns,
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn extract_hints(
+    decoder: &crate::reader::archive::ArchiveDecoder,
+    root: &Path,
+    path: &Path,
+    size: Option<i64>,
+    mtime: Option<i64>,
+) -> Option<Vec<IdentityHint>> {
+    let (file, before) = safe_open(root, path).ok()?;
+    if Some(before.size) != size || Some(before.mtime_ns) != mtime {
+        return None;
+    }
+    let (container, bytes) = decoder.comic_info_with_path(Arc::new(file)).await.ok()??;
+    verify_path(path, before).ok()?;
+    Some(
+        EmbeddedMetadata::parse_for_hints(&bytes)
+            .ok()?
+            .identity_hints(&container, now()),
+    )
+}
+#[cfg(not(target_os = "linux"))]
+async fn extract_hints(
+    _: &crate::reader::archive::ArchiveDecoder,
+    _: &Path,
+    _: &Path,
+    _: Option<i64>,
+    _: Option<i64>,
+) -> Option<Vec<IdentityHint>> {
+    None
 }

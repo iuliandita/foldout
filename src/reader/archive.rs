@@ -105,6 +105,16 @@ impl ArchiveDecoder {
     /// Extracts one unambiguous ComicInfo.xml using the supervised archive worker.
     /// The descriptor stays owned through cancellation and child reaping.
     pub async fn comic_info(&self, file: Arc<File>) -> Result<Option<Vec<u8>>, ArchiveError> {
+        Ok(self
+            .comic_info_with_path(file)
+            .await?
+            .map(|(_, bytes)| bytes))
+    }
+
+    pub async fn comic_info_with_path(
+        &self,
+        file: Arc<File>,
+    ) -> Result<Option<(String, Vec<u8>)>, ArchiveError> {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = file;
@@ -169,7 +179,7 @@ impl ArchiveDecoder {
                 return Err(ArchiveError::InvalidListing("metadata size changed".into()));
             }
             drop(file);
-            Ok(Some(bytes))
+            Ok(Some((entry.name, bytes)))
         })
         .await
     }

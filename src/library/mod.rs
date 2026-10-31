@@ -1,4 +1,5 @@
 pub mod coverage;
+pub mod hints;
 pub mod metadata;
 pub mod roots;
 pub mod scan;

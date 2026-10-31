@@ -37,6 +37,8 @@ pub struct EmbeddedMetadata {
     pub manga: Option<String>,
     /// HTTP(S) URLs only. Never fetched or converted into provider identities here.
     pub web_urls: Vec<String>,
+    #[serde(skip)]
+    pub(crate) identity_fields: BTreeMap<String, String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +71,14 @@ impl EmbeddedMetadata {
     /// DTDs and custom entities (including in attributes) are rejected.
     /// Unknown elements are ignored but still subject to XML and nesting checks.
     pub fn parse(xml: &[u8]) -> Result<Self, EmbeddedMetadataError> {
+        Self::parse_inner(xml, true)
+    }
+
+    pub(crate) fn parse_for_hints(xml: &[u8]) -> Result<Self, EmbeddedMetadataError> {
+        Self::parse_inner(xml, false)
+    }
+
+    fn parse_inner(xml: &[u8], strict_urls: bool) -> Result<Self, EmbeddedMetadataError> {
         use EmbeddedMetadataError::{InvalidXml, LimitExceeded};
         if xml.len() > MAX_COMIC_INFO_BYTES {
             return Err(LimitExceeded);
@@ -183,12 +193,34 @@ impl EmbeddedMetadata {
                 .map(|v| v.trim().to_owned())
                 .filter(|v| !v.is_empty())
         };
-        let web = take("Web");
+        let mut identity_fields = BTreeMap::new();
+        for name in [
+            "Web",
+            "URL",
+            "ISBN",
+            "ISBN10",
+            "ISBN13",
+            "GTIN",
+            "GTIN13",
+            "EAN",
+            "EAN13",
+            "ComicVineID",
+            "MangaDexID",
+            "MangaUpdatesID",
+        ] {
+            if let Some(value) = take(name) {
+                identity_fields.insert(name.to_owned(), value);
+            }
+        }
+        let web = identity_fields.get("Web").cloned();
         let mut web_urls = Vec::new();
         if let Some(web) = web {
             for raw in web.split_whitespace() {
                 if raw.len() > 2048 {
-                    return Err(LimitExceeded);
+                    if strict_urls {
+                        return Err(LimitExceeded);
+                    }
+                    continue;
                 }
                 if let Ok(url) = reqwest::Url::parse(raw)
                     && matches!(url.scheme(), "http" | "https")
@@ -218,6 +250,7 @@ impl EmbeddedMetadata {
             publisher: take("Publisher"),
             manga: take("Manga"),
             web_urls,
+            identity_fields,
         })
     }
 
@@ -265,7 +298,9 @@ fn field_limit(name: &str) -> Option<usize> {
     match name {
         "Title" | "Series" | "Publisher" => Some(MAX_FIELD_BYTES),
         "Number" | "Volume" | "Year" | "Month" | "Day" | "LanguageISO" | "Manga" => Some(64),
-        "Web" => Some(MAX_WEB_URLS * 2049),
+        "Web" | "URL" => Some(MAX_WEB_URLS * 2049),
+        "ISBN" | "ISBN10" | "ISBN13" | "GTIN" | "GTIN13" | "EAN" | "EAN13" | "ComicVineID"
+        | "MangaDexID" | "MangaUpdatesID" => Some(MAX_FIELD_BYTES),
         _ => None,
     }
 }
