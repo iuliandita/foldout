@@ -291,3 +291,41 @@
     padding: var(--space-4);
   }
 }
+
+.archive-unit-review {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  padding: var(--space-4);
+  margin-block: var(--space-4);
+  overflow-wrap: anywhere;
+}
+.archive-unit-review h4 {
+  margin-top: 0;
+}
+.archive-proposal-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: var(--space-4);
+  margin-block: var(--space-4);
+}
+.archive-proposal-fields .field {
+  min-width: 0;
+}
+.archive-proposal-fields input,
+.archive-proposal-fields select {
+  width: 100%;
+  min-width: 0;
+}
+.archive-unit-review .status-badge {
+  white-space: normal;
+}
+
+@media (max-width: 40rem) {
+  .archive-unit-review .job-details {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+  }
+  .archive-unit-review .job-details dd {
+    margin-bottom: var(--space-3);
+  }
+}

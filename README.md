@@ -1,6 +1,6 @@
 # Foldout
 
-Foldout is a self-hosted manager for comics, magazines, and manga. The development build includes a Rust HTTP service, SQLite catalog, administrator setup, scoped API keys, durable jobs, read-only library scans, reviewed adoption, and a built-in CBZ/CBR/PDF reader. It supports configured indexer searches, download-client workflows, GetComics and MangaDex direct acquisition, and Internet Archive magazine discovery. See [integration status](docs/integrations.md) for supported behavior and remaining live-transfer checks. This is not a released replacement yet.
+Foldout is a self-hosted manager for comics, magazines, and manga. The development build includes a Rust HTTP service, SQLite catalog, administrator setup, scoped API keys, durable jobs, read-only library scans, reviewed adoption, and a built-in CBZ/CBR/PDF reader. It supports configured indexer searches, download-client workflows, GetComics and MangaDex direct acquisition, and Internet Archive magazine discovery with reviewed catalog unit proposals. See [integration status](docs/integrations.md) for supported behavior and remaining live-transfer checks. This is not a released replacement yet.
 
 ## Run locally
 

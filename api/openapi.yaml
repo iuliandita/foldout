@@ -19,6 +19,308 @@
     }
   ],
   "paths": {
+    "/api/v1/search/archive/proposal": {
+      "get": {
+        "operationId": "proposeArchiveUnit",
+        "description": "Requires manage scope. Read-only dry run for an existing edition; no catalog changes, file transfer, or calendar generation. Returns 409 with existing_unit_id and the proposal for the same normalized label in this edition, the same provider link, or the same date and precision in a magazine edition.",
+        "responses": {
+          "200": {
+            "description": "Successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveUnitProposal"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request: invalid input or mixed authentication methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized: authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "forbidden or invalid_origin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal_error: operation could not be completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "unavailable: authentication temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found: edition or integration not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "duplicate_unit includes existing_unit_id and proposal; integration or provider conflicts use Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ArchiveUnitConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "unsupported: integration or provider capability unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "provider_cooldown: retry later; no Retry-After header is returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "provider_unavailable: provider could not complete this request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "integration_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "identifier",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "edition_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/search/archive/accept": {
+      "post": {
+        "operationId": "acceptArchiveUnit",
+        "description": "Requires manage scope and matching Origin for cookie writes. Recomputes source metadata server-side, validates reviewed label/kind/date using manual unit rules, and atomically creates exactly one unit, its internet_archive provider link (external_id = identifier), and a durable acceptance receipt. Combined source labels must keep kind issue. The same owner, idempotency key, and body replay the original response without contacting the provider; a different body conflicts. No file acquisition or calendar generation.",
+        "responses": {
+          "400": {
+            "description": "invalid_request: invalid input or mixed authentication methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized: authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "forbidden or invalid_origin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal_error: operation could not be completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "unavailable: authentication temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found: edition or integration not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "duplicate_unit includes existing_unit_id and proposal; integration or provider conflicts use Error; idempotency_conflict: key reused with a different body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ArchiveUnitConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "unsupported: integration or provider capability unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "provider_cooldown: retry later; no Retry-After header is returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "provider_unavailable: provider could not complete this request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveUnitAcceptance"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchiveAcceptRequest"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/auth/setup": {
       "get": {
         "operationId": "setupStatus",
@@ -6009,6 +6311,169 @@
   },
   "components": {
     "schemas": {
+      "ArchiveUnitProposal": {
+        "type": "object",
+        "properties": {
+          "edition_id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "issue",
+              "chapter",
+              "volume",
+              "special",
+              "combined"
+            ]
+          },
+          "date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "YYYY, YYYY-MM, or YYYY-MM-DD; precision is preserved."
+          },
+          "date_precision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "year",
+              "month",
+              "day",
+              null
+            ]
+          },
+          "raw_labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "raw_dates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "combined": {
+            "type": "boolean"
+          },
+          "identifier": {
+            "type": "string"
+          },
+          "source_url": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "edition_id",
+          "label",
+          "kind",
+          "date",
+          "date_precision",
+          "raw_labels",
+          "raw_dates",
+          "combined",
+          "identifier",
+          "source_url"
+        ],
+        "additionalProperties": false,
+        "description": "Read-only proposal. Raw source labels and dates are preserved, including ambiguous dates; only an exact single YYYY, YYYY-MM, or YYYY-MM-DD is parsed. Combined labels represent one issue. Source URL is canonical Archive item provenance."
+      },
+      "ArchiveAcceptRequest": {
+        "type": "object",
+        "properties": {
+          "integration_id": {
+            "type": "string"
+          },
+          "identifier": {
+            "type": "string"
+          },
+          "edition_id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "issue",
+              "chapter",
+              "volume",
+              "special",
+              "combined"
+            ]
+          },
+          "date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "YYYY, YYYY-MM, or YYYY-MM-DD; precision is preserved."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "integration_id",
+          "identifier",
+          "edition_id",
+          "label",
+          "kind",
+          "idempotency_key"
+        ],
+        "additionalProperties": false
+      },
+      "ArchiveUnitAcceptance": {
+        "type": "object",
+        "properties": {
+          "unit": {
+            "$ref": "#/components/schemas/Unit"
+          },
+          "proposal": {
+            "$ref": "#/components/schemas/ArchiveUnitProposal"
+          }
+        },
+        "required": [
+          "unit",
+          "proposal"
+        ],
+        "additionalProperties": false
+      },
+      "ArchiveUnitConflict": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Error"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "existing_unit_id": {
+                "type": "string"
+              },
+              "proposal": {
+                "$ref": "#/components/schemas/ArchiveUnitProposal"
+              }
+            },
+            "required": [
+              "existing_unit_id",
+              "proposal"
+            ]
+          }
+        ]
+      },
       "Error": {
         "type": "object",
         "properties": {

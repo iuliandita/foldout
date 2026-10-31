@@ -7,6 +7,7 @@ export class ApiError extends Error {
     public code: string,
     message: string,
     public trace?: string,
+    public existingUnitId?: string,
   ) {
     super(message);
   }
@@ -60,7 +61,9 @@ async function fetchResponse(path: string, options: RequestInit = {}): Promise<R
         : undefined;
     if (response.status === 401 && !['/auth/setup', '/auth/login', '/auth/session'].includes(path))
       window.dispatchEvent(new Event('library:unauthorized'));
-    throw new ApiError(response.status, code, message, trace);
+    const existingUnitId = body && typeof body === 'object' && 'existing_unit_id' in body && typeof body.existing_unit_id === 'string'
+      ? body.existing_unit_id : undefined;
+    throw new ApiError(response.status, code, message, trace, existingUnitId);
   }
   return response;
 }

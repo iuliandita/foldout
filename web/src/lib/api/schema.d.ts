@@ -4,6 +4,40 @@
  */
 
 export interface paths {
+    "/api/v1/search/archive/proposal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Requires manage scope. Read-only dry run for an existing edition; no catalog changes, file transfer, or calendar generation. Returns 409 with existing_unit_id and the proposal for the same normalized label in this edition, the same provider link, or the same date and precision in a magazine edition. */
+        get: operations["proposeArchiveUnit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/search/archive/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Requires manage scope and matching Origin for cookie writes. Recomputes source metadata server-side, validates reviewed label/kind/date using manual unit rules, and atomically creates exactly one unit, its internet_archive provider link (external_id = identifier), and a durable acceptance receipt. Combined source labels must keep kind issue. The same owner, idempotency key, and body replay the original response without contacting the provider; a different body conflicts. No file acquisition or calendar generation. */
+        post: operations["acceptArchiveUnit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/setup": {
         parameters: {
             query?: never;
@@ -1033,6 +1067,42 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Read-only proposal. Raw source labels and dates are preserved, including ambiguous dates; only an exact single YYYY, YYYY-MM, or YYYY-MM-DD is parsed. Combined labels represent one issue. Source URL is canonical Archive item provenance. */
+        ArchiveUnitProposal: {
+            edition_id: string;
+            label: string;
+            /** @enum {string} */
+            kind: "issue" | "chapter" | "volume" | "special" | "combined";
+            /** @description YYYY, YYYY-MM, or YYYY-MM-DD; precision is preserved. */
+            date: string | null;
+            /** @enum {string|null} */
+            date_precision: "year" | "month" | "day" | null;
+            raw_labels: string[];
+            raw_dates: string[];
+            combined: boolean;
+            identifier: string;
+            /** Format: uri */
+            source_url: string;
+        };
+        ArchiveAcceptRequest: {
+            integration_id: string;
+            identifier: string;
+            edition_id: string;
+            label: string;
+            /** @enum {string} */
+            kind: "issue" | "chapter" | "volume" | "special" | "combined";
+            /** @description YYYY, YYYY-MM, or YYYY-MM-DD; precision is preserved. */
+            date?: string | null;
+            idempotency_key: string;
+        };
+        ArchiveUnitAcceptance: {
+            unit: components["schemas"]["Unit"];
+            proposal: components["schemas"]["ArchiveUnitProposal"];
+        };
+        ArchiveUnitConflict: components["schemas"]["Error"] & {
+            existing_unit_id: string;
+            proposal: components["schemas"]["ArchiveUnitProposal"];
+        };
         Error: {
             error: {
                 code: string;
@@ -2246,6 +2316,236 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    proposeArchiveUnit: {
+        parameters: {
+            query: {
+                integration_id: string;
+                identifier: string;
+                edition_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful operation */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArchiveUnitProposal"];
+                };
+            };
+            /** @description invalid_request: invalid input or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: edition or integration not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description duplicate_unit includes existing_unit_id and proposal; integration or provider conflicts use Error */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArchiveUnitConflict"] | components["schemas"]["Error"];
+                };
+            };
+            /** @description unsupported: integration or provider capability unavailable */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description provider_cooldown: retry later; no Retry-After header is returned */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description provider_unavailable: provider could not complete this request */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    acceptArchiveUnit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArchiveAcceptRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful operation */
+            201: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArchiveUnitAcceptance"];
+                };
+            };
+            /** @description invalid_request: invalid input or mixed authentication methods */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unauthorized: authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description forbidden or invalid_origin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description not_found: edition or integration not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description duplicate_unit includes existing_unit_id and proposal; integration or provider conflicts use Error; idempotency_conflict: key reused with a different body */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArchiveUnitConflict"] | components["schemas"]["Error"];
+                };
+            };
+            /** @description unsupported: integration or provider capability unavailable */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description provider_cooldown: retry later; no Retry-After header is returned */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description internal_error: operation could not be completed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description provider_unavailable: provider could not complete this request */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description unavailable: authentication temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     setupStatus: {
         parameters: {
             query?: never;

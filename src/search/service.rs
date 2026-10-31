@@ -129,7 +129,7 @@ pub struct IntegrationChoice {
 type MetadataCache = Arc<Mutex<HashMap<String, (i64, MetadataPage)>>>;
 #[derive(Clone)]
 pub struct Search {
-    store: SqliteStore,
+    pub(super) store: SqliteStore,
     settings: Settings,
     metadata: MetadataCache,
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { IconExternalLink, IconSearch } from '@tabler/icons-react';
 import { useI18n } from './i18n';
+import { ArchiveUnitReview } from './ArchiveUnitReview';
 import { request, type Schema } from './lib/api/client';
 import { Button, EmptyState, ErrorNotice, Icon, Loading, StatusBadge, formatSize } from './ui';
 
@@ -39,6 +40,8 @@ export function ArchiveSearch({
   const [lastAction, setLastAction] = useState<Action>();
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
+  const proposeButton = useRef<HTMLSpanElement>(null);
   const eligibleFiles = item?.files.filter((file) => file.eligibility === 'available') ?? [];
   const otherFiles = item?.files.filter((file) => file.eligibility !== 'available') ?? [];
   const active = useRef<AbortController | null>(null);
@@ -49,6 +52,7 @@ export function ArchiveSearch({
     setPage(undefined);
     setInspecting(undefined);
     setItem(undefined);
+    setReviewing(false);
     setLastAction(undefined);
     setError(undefined);
   }
@@ -61,6 +65,7 @@ export function ArchiveSearch({
     setError(undefined);
     setLastAction(action);
     setItem(undefined);
+    setReviewing(false);
     try {
       if (action.kind === 'search') {
         setSearch(action.input);
@@ -178,6 +183,7 @@ export function ArchiveSearch({
                   if (active.current) return;
                   setInspecting(undefined);
                   setItem(undefined);
+                  setReviewing(false);
                   setError(undefined);
                   setLastAction(undefined);
                 }}
@@ -189,6 +195,11 @@ export function ArchiveSearch({
               <>
                 <ArchiveMetadata magazine={item.magazine} />
                 <ArchiveSource identifier={item.magazine.identifier} />
+                {reviewing ? <ArchiveUnitReview
+                  integrationId={search?.integration_id ?? source}
+                  magazine={item.magazine}
+                  onClose={() => { setReviewing(false); requestAnimationFrame(() => proposeButton.current?.querySelector('button')?.focus()); }}
+                /> : <span ref={proposeButton}><Button size="sm" onClick={() => setReviewing(true)}>{t('archiveProposeUnit')}</Button></span>}
                 <h4 className="release-subheading">
                   {t('files')} ({eligibleFiles.length.toLocaleString(locale)})
                 </h4>
