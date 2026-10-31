@@ -206,6 +206,34 @@ pub(crate) fn check_content(file: &mut File, intent: &IntentIdentity) -> Result<
     Ok(mtime)
 }
 
+pub(crate) fn check_mapping(
+    source: &Path,
+    source_relative: &str,
+    destination: &Path,
+    destination_relative: &str,
+) -> Result<(), ImportError> {
+    let source_root = root(source)?;
+    let destination_root = root(destination)?;
+    let (source_parent, source_name) = parent(&source_root, source_relative)?;
+    let (destination_parent, destination_name) = parent(&destination_root, destination_relative)?;
+    check_location(
+        &source_parent,
+        source
+            .join(source_relative)
+            .parent()
+            .ok_or(ImportError::UnsafePath)?,
+    )?;
+    check_location(
+        &destination_parent,
+        destination
+            .join(destination_relative)
+            .parent()
+            .ok_or(ImportError::UnsafePath)?,
+    )?;
+    regular(&source_parent, &source_name)?;
+    absent(&destination_parent, &destination_name)
+}
+
 pub(crate) fn inspect_intent(
     source: PathBuf,
     destination: PathBuf,

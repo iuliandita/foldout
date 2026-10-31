@@ -3141,6 +3141,122 @@
         }
       }
     },
+    "/api/v1/acquisition/{id}/correct-mapping": {
+      "post": {
+        "operationId": "correctAcquisitionMapping",
+        "description": "Requires manage scope. Corrects only the explicit local source-file association after import planning stops with import_review_required and before any journal exists. Revision and polling_fingerprint must match the terminal review snapshot. Revalidates owner, completed owned receipts, current client configuration, complete actual-return lifecycle evidence and absence of outstanding work in one write transaction. Registered roots and safe relative paths are required; symlinks and traversal are rejected. Preserves the import UUID, unit, destination reservation and attempted-submission fence. Appends an audit event and queues import planning with no client writes. Does not change client remote/local path settings or an existing journal. Stale actions and replays return 409. Cookie authentication requires a matching Origin.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CorrectMapping"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Local source mapping corrected and import planning queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Acquisition"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request: invalid input or mixed authentication methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized: authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "forbidden or invalid_origin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal_error: operation could not be completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "unavailable: authentication temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found: acquisition not found for caller or source root not registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "acquisition_conflict: stale or replayed snapshot, changed receipts or configuration, existing import journal, active or uncertain work, or mapping correction is unsafe",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/acquisition/{id}/files": {
       "post": {
         "operationId": "associateAcquisitionFile",
@@ -8392,6 +8508,36 @@
           }
         }
       },
+      "CorrectMapping": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "polling_fingerprint",
+          "source_root_id",
+          "source_relative_path"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "polling_fingerprint": {
+            "type": "string",
+            "description": "Pass unchanged from the terminal review snapshot."
+          },
+          "source_root_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Canonical lowercase, hyphenated, non-nil UUID."
+          },
+          "source_relative_path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Relative path at most 4096 UTF-8 bytes. No control characters, backslashes, empty segments, dot segments, parent traversal, or leading slash."
+          }
+        }
+      },
       "AcquisitionReview": {
         "type": "object",
         "additionalProperties": false,
@@ -8400,7 +8546,7 @@
           "acquisition": {"$ref": "#/components/schemas/Acquisition"},
           "revision": {"type": "integer", "format": "int64", "minimum": 0, "description": "Latest job-event ID."},
           "lifecycle": {"type": "string", "enum": ["returned", "unproven"], "description": "Complete recorded claim returns only, not recovery eligibility; unproven includes historical, outstanding or malformed coverage."},
-          "polling_fingerprint": {"type": "string", "description": "Opaque receipt and configuration snapshot fence; pass unchanged to resume polling."}
+          "polling_fingerprint": {"type": "string", "description": "Opaque receipt, mapping and configuration snapshot fence; pass unchanged to resume polling or correct mapping."}
         }
       },
       "Acquisition": {

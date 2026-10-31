@@ -93,10 +93,26 @@ live production interoperability; no live provider/client mutations were made.
 
 This layer does not implement fuzzy release ranking, automatic file association,
 MangaDex page packaging, GetComics resolution, remote download-path discovery, or
-automatic reconciliation of uncertain submissions without receipts. Needs-review
-failures are deliberately terminal here; a dedicated reviewed-resume flow for
-safe polling/import recovery is not implemented. Monitoring and broader review UI
-are separate integrations. Do not mark plan tasks 7-10 wholly complete from these
+automatic reconciliation of uncertain submissions without receipts.
+
+Terminal review exposes an owner-scoped job-event revision and an opaque evidence
+fingerprint. Resume polling accepts only proven-safe owned receipts; it never
+submits another client job. Both reviewed actions revalidate the snapshot,
+configuration, ownership and complete actual-return claim history in one write
+transaction and append an audit event. Historical or unmatched claims fail closed,
+even after lease expiry or restart.
+
+`POST /api/v1/acquisition/{id}/correct-mapping` corrects only the explicit local
+source-file association after import planning fails with `import_review_required`
+and before a journal exists. It requires completed receipts and rejects active or
+uncertain work, changed evidence, stale revisions and replays. The corrected path
+must stay under a registered root without symlink traversal. The unit, destination
+reservation, reserved import UUID and submission fence stay intact. The worker
+then plans the import using the corrected source; the action performs no client
+writes or filesystem writes. Client remote/local path settings and catalog unit
+reassociation are outside this action. Recovery of existing immutable import
+journals, selection reassessment, monitoring integration and broader review UI
+remain separate slices. Do not mark plan tasks 7-10 wholly complete from these
 focused workflows alone.
 
 Parser reference: [bendy decoding API](https://docs.rs/bendy/0.6.1/bendy/decoding/index.html).

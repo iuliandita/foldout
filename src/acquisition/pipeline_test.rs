@@ -190,6 +190,46 @@ impl Fixture {
         self.server.seen.lock().unwrap().category = None;
         self.pipeline.review("owner", id).await.unwrap()
     }
+    async fn failed_mapping(&self, id: &str) -> AcquisitionReview {
+        self.submit(id).await;
+        self.server.seen.lock().unwrap().completed = true;
+        let receipts = self.pipeline.get("owner", id).await.unwrap().receipt_count;
+        for _ in 0..receipts {
+            self.pipeline
+                .tick_job(self.settings.clone(), id)
+                .await
+                .unwrap();
+        }
+        self.pipeline
+            .associate_file(
+                "owner",
+                id,
+                FileAssociation {
+                    source_root_id: self.source_id.clone(),
+                    source_relative_path: "missing.cbz".into(),
+                    destination: None,
+                },
+            )
+            .await
+            .unwrap();
+        self.pipeline
+            .tick_job(self.settings.clone(), id)
+            .await
+            .unwrap();
+        let review = self.pipeline.review("owner", id).await.unwrap();
+        assert_eq!(
+            review.acquisition.reason,
+            Some(AcquisitionReason::ImportReviewRequired)
+        );
+        assert_eq!(review.lifecycle, ReviewLifecycle::Returned);
+        let journals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM import_operations")
+            .fetch_one(self.store.reader())
+            .await
+            .unwrap();
+        assert_eq!(journals, 0);
+        review
+    }
+
     async fn submit(&self, id: &str) {
         self.server.seen.lock().unwrap().own_tag = format!("libraryd-{id}");
         mock::allow_search(&self.store).await;
@@ -198,6 +238,331 @@ impl Fixture {
             .await
             .unwrap();
     }
+}
+
+fn mapping_request(f: &Fixture, review: &AcquisitionReview) -> CorrectMapping {
+    CorrectMapping {
+        revision: review.revision,
+        polling_fingerprint: review.polling_fingerprint.clone(),
+        source_root_id: f.source_id.clone(),
+        source_relative_path: "owned.cbz".into(),
+    }
+}
+
+#[tokio::test]
+async fn mapping_correction_fences_stale_replayed_and_racing_actions_across_reopen() {
+    for torrent in [false, true] {
+        let f = Fixture::new(ContentType::Comic, torrent).await;
+        let intent = f.create("mapping").await;
+        let stale = f.failed_mapping(&intent.id).await;
+        let mut tx = f.store.begin_write().await.unwrap();
+        lifecycle_event(&mut tx, &intent.id, "mapping_test", None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(matches!(
+            f.pipeline
+                .correct_mapping(
+                    &f.settings,
+                    "owner",
+                    &intent.id,
+                    mapping_request(&f, &stale)
+                )
+                .await,
+            Err(PipelineError::Conflict)
+        ));
+        let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+        assert!(matches!(
+            f.pipeline
+                .correct_mapping(
+                    &f.settings,
+                    "other",
+                    &intent.id,
+                    mapping_request(&f, &review)
+                )
+                .await,
+            Err(PipelineError::NotFound)
+        ));
+        let receipts: Vec<(i64, String, bool)> = sqlx::query_as("SELECT ordinal, external_id, completed FROM acquisition_receipts WHERE acquisition_id = ? ORDER BY ordinal")
+            .bind(&intent.id).fetch_all(f.store.reader()).await.unwrap();
+        let fence: (bool, String, Option<String>, String, String, String) = sqlx::query_as("SELECT attempted, payload_digest, torrent_hash, destination_root, destination_relative, destination_path FROM acquisition_runs WHERE id = ?")
+            .bind(&intent.id).fetch_one(f.store.reader()).await.unwrap();
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        f.store.close().await;
+        let store = SqliteStore::open(f.dir.path()).await.unwrap();
+        let settings = Settings::new(
+            store.clone(),
+            EncryptionKey::load_or_create(f.dir.path()).await.unwrap(),
+        );
+        let pipeline = Pipeline::new(store.clone());
+        let other = Pipeline::new(SqliteStore::open(f.dir.path()).await.unwrap());
+        let reopened = pipeline.review("owner", &intent.id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&review).unwrap(),
+            serde_json::to_value(&reopened).unwrap()
+        );
+        let (a, b) = tokio::join!(
+            pipeline.correct_mapping(&settings, "owner", &intent.id, mapping_request(&f, &review)),
+            other.correct_mapping(&settings, "owner", &intent.id, mapping_request(&f, &review))
+        );
+        assert!(matches!(
+            (&a, &b),
+            (Ok(_), Err(PipelineError::Conflict)) | (Err(PipelineError::Conflict), Ok(_))
+        ));
+        assert!(matches!(
+            pipeline
+                .correct_mapping(&settings, "owner", &intent.id, mapping_request(&f, &review))
+                .await,
+            Err(PipelineError::Conflict)
+        ));
+        let after = pipeline.get("owner", &intent.id).await.unwrap();
+        assert_eq!(after.state, AcquisitionState::Importing);
+        assert_eq!(after.import_id, review.acquisition.import_id);
+        let after_fence: (bool, String, Option<String>, String, String, String) = sqlx::query_as("SELECT attempted, payload_digest, torrent_hash, destination_root, destination_relative, destination_path FROM acquisition_runs WHERE id = ?")
+            .bind(&intent.id).fetch_one(store.reader()).await.unwrap();
+        assert_eq!(fence, after_fence);
+        let after_receipts: Vec<(i64, String, bool)> = sqlx::query_as("SELECT ordinal, external_id, completed FROM acquisition_receipts WHERE acquisition_id = ? ORDER BY ordinal")
+            .bind(&intent.id).fetch_all(store.reader()).await.unwrap();
+        assert_eq!(receipts, after_receipts);
+        let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event = 'acquisition_mapping_corrected' AND from_state = 'needs_review' AND to_state = 'running'")
+            .bind(&intent.job_id).fetch_one(store.reader()).await.unwrap();
+        assert_eq!(audits, 1);
+        for _ in 0..10 {
+            pipeline
+                .tick_job(settings.clone(), &intent.id)
+                .await
+                .unwrap();
+        }
+        let completed = pipeline.get("owner", &intent.id).await.unwrap();
+        assert_eq!(completed.state, AcquisitionState::Completed);
+        assert_eq!(completed.import_id, after.import_id);
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+        assert_eq!(f.server.seen.lock().unwrap().submissions, 1);
+        assert_eq!(
+            std::fs::read(f.source.path().join("owned.cbz")).unwrap(),
+            std::fs::read(f.destination.path().join("selected.cbz")).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn mapping_correction_rejects_unsafe_work_and_journals_without_client_io_or_audit() {
+    for change in [
+        "DELETE FROM acquisition_receipts WHERE acquisition_id = ?",
+        "UPDATE acquisition_receipts SET completed = 0 WHERE acquisition_id = ?",
+        "UPDATE acquisition_receipts SET external_id = 'invalid' WHERE acquisition_id = ? AND ordinal = 0",
+        "UPDATE acquisition_receipts SET ordinal = -1 WHERE acquisition_id = ? AND ordinal = 0",
+        "UPDATE acquisition_runs SET reason = 'uncertain_submission' WHERE id = ?",
+        "UPDATE acquisition_runs SET attempted = 0 WHERE id = ?",
+        "UPDATE acquisition_runs SET import_id = NULL WHERE id = ?",
+        "UPDATE acquisition_runs SET source_root = NULL, source_relative = NULL WHERE id = ?",
+        "UPDATE acquisition_runs SET work_token = 'expired', work_until = 0 WHERE id = ?",
+        "UPDATE acquisition_runs SET work_until = 0 WHERE id = ?",
+        "UPDATE acquisition_runs SET state = 'queued' WHERE id = ?",
+        "UPDATE acquisition_runs SET state = 'downloading' WHERE id = ?",
+        "UPDATE acquisition_runs SET state = 'importing' WHERE id = ?",
+        "UPDATE acquisition_runs SET state = 'completed' WHERE id = ?",
+        "UPDATE acquisition_runs SET state = 'canceled' WHERE id = ?",
+        "UPDATE acquisition_runs SET state = 'downloaded' WHERE id = ?",
+        "UPDATE acquisition_runs SET destination_path = '/invalid.cbz' WHERE id = ?",
+        "UPDATE acquisition_runs SET category = 'foreign' WHERE id = ?",
+        "UPDATE acquisition_intents SET request = json_set(request, '$.client_id', 'foreign') WHERE id = ?",
+        "UPDATE acquisition_intents SET request = json_set(request, '$.unit_id', 'foreign') WHERE id = ?",
+        "UPDATE search_releases SET owner = 'foreign' WHERE handle = (SELECT release_handle FROM acquisition_runs WHERE id = ?)",
+        "UPDATE jobs SET worker = 'expired', lease_until = 0 WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "UPDATE jobs SET retry_at = 0 WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "UPDATE jobs SET state = 'cancel_requested' WHERE id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "DELETE FROM job_events WHERE event = 'client_accepted' AND job_id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "DELETE FROM job_events WHERE event = 'acquisition_lifecycle_v1' AND job_id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "DELETE FROM job_events WHERE event = 'acquisition_claim_returned' AND job_id = (SELECT job_id FROM acquisition_intents WHERE id = ?)",
+        "INSERT INTO import_operations(id,source_root,destination_root,destination_relative,destination_path,unit_id,request_json,identity_json,phase) SELECT import_id,source_root,destination_root,destination_relative,destination_path,unit_id,'{}','{}','planned' FROM acquisition_runs WHERE id = ?",
+        "INSERT INTO import_operations(id,source_root,destination_root,destination_relative,destination_path,unit_id,request_json,identity_json,phase) SELECT 'other-journal',source_root,destination_root,destination_relative,destination_path,unit_id,'{}','{}','done' FROM acquisition_runs WHERE id = ?",
+    ] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("unsafe-mapping").await;
+        let review = f.failed_mapping(&intent.id).await;
+        let mut tx = f.store.begin_write().await.unwrap();
+        sqlx::query(change)
+            .bind(&intent.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        f.store.close().await;
+        let store = SqliteStore::open(f.dir.path()).await.unwrap();
+        let settings = Settings::new(
+            store.clone(),
+            EncryptionKey::load_or_create(f.dir.path()).await.unwrap(),
+        );
+        let pipeline = Pipeline::new(store.clone());
+        let snapshot = pipeline.review("owner", &intent.id).await.unwrap_or(review);
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        assert!(
+            matches!(
+                pipeline
+                    .correct_mapping(
+                        &settings,
+                        "owner",
+                        &intent.id,
+                        mapping_request(&f, &snapshot)
+                    )
+                    .await,
+                Err(PipelineError::Conflict)
+            ),
+            "{change}"
+        );
+        let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event = 'acquisition_mapping_corrected'")
+            .bind(&intent.job_id).fetch_one(store.reader()).await.unwrap();
+        assert_eq!(audits, 0, "{change}");
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+    }
+}
+
+#[tokio::test]
+async fn mapping_correction_rechecks_changed_evidence_and_rolls_back_guarded_updates() {
+    for change in [
+        "UPDATE acquisition_receipts SET external_id = 'SABnzbd_nzo_changed' WHERE acquisition_id = ? AND ordinal = 0",
+        "UPDATE integrations SET enabled = 0 WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET base_url = 'http://127.0.0.1:1' WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET options = '{\"category\":\"changed\"}' WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET options = json_set(options, '$.remote_path', '/remote', '$.local_path', '/local') WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE integrations SET secret_nonce = zeroblob(24), secret_ciphertext = zeroblob(28) WHERE id = (SELECT client_id FROM acquisition_runs WHERE id = ?)",
+        "UPDATE library_roots SET path = '/changed' WHERE id = (SELECT destination_root FROM acquisition_runs WHERE id = ?)",
+        "CREATE TRIGGER ignore_mapping BEFORE UPDATE ON acquisition_runs BEGIN SELECT RAISE(IGNORE); END",
+        "CREATE TRIGGER ignore_mapping BEFORE UPDATE ON jobs BEGIN SELECT RAISE(IGNORE); END",
+    ] {
+        let f = Fixture::new(ContentType::Comic, false).await;
+        let intent = f.create("changed-mapping").await;
+        let review = f.failed_mapping(&intent.id).await;
+        let requests = f.server.seen.lock().unwrap().requests.clone();
+        let mut tx = f.store.begin_write().await.unwrap();
+        let query = sqlx::query(change);
+        if change.starts_with("CREATE") {
+            query.execute(&mut *tx).await.unwrap();
+        } else {
+            query.bind(&intent.id).execute(&mut *tx).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+        let changed = f.pipeline.review("owner", &intent.id).await.unwrap();
+        assert_eq!(changed.revision, review.revision);
+        assert!(
+            matches!(
+                f.pipeline
+                    .correct_mapping(
+                        &f.settings,
+                        "owner",
+                        &intent.id,
+                        mapping_request(&f, &review)
+                    )
+                    .await,
+                Err(PipelineError::Conflict)
+            ),
+            "{change}"
+        );
+        if !change.contains("external_id") {
+            assert!(
+                matches!(
+                    f.pipeline
+                        .correct_mapping(
+                            &f.settings,
+                            "owner",
+                            &intent.id,
+                            mapping_request(&f, &changed)
+                        )
+                        .await,
+                    Err(PipelineError::Conflict)
+                ),
+                "{change}"
+            );
+        }
+        let after = f.pipeline.review("owner", &intent.id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&changed).unwrap(),
+            serde_json::to_value(&after).unwrap(),
+            "{change}"
+        );
+        let job: (String, Option<String>) =
+            sqlx::query_as("SELECT state, reason FROM jobs WHERE id = ?")
+                .bind(&intent.job_id)
+                .fetch_one(f.store.reader())
+                .await
+                .unwrap();
+        assert_eq!(
+            job,
+            ("needs_review".into(), Some("import_review_required".into()))
+        );
+        assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+    }
+}
+
+#[tokio::test]
+async fn mapping_correction_rejects_paths_outside_registered_roots() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new(ContentType::Comic, false).await;
+    let intent = f.create("mapping-paths").await;
+    let review = f.failed_mapping(&intent.id).await;
+    symlink(f.destination.path(), f.source.path().join("escape")).unwrap();
+    symlink(
+        f.source.path().join("owned.cbz"),
+        f.source.path().join("linked.cbz"),
+    )
+    .unwrap();
+    let requests = f.server.seen.lock().unwrap().requests.clone();
+    for path in [
+        "/owned.cbz",
+        "../owned.cbz",
+        "sub/../../owned.cbz",
+        "./owned.cbz",
+        "a//owned.cbz",
+        "a\\owned.cbz",
+        "escape/selected.cbz",
+        "linked.cbz",
+        ".library-imports/owned.cbz",
+        "missing.cbz",
+    ] {
+        let mut request = mapping_request(&f, &review);
+        request.source_relative_path = path.into();
+        assert!(
+            matches!(
+                f.pipeline
+                    .correct_mapping(&f.settings, "owner", &intent.id, request)
+                    .await,
+                Err(PipelineError::Invalid | PipelineError::Conflict)
+            ),
+            "{path}"
+        );
+    }
+    let mut request = mapping_request(&f, &review);
+    request.source_root_id = Uuid::new_v4().to_string();
+    assert!(matches!(
+        f.pipeline
+            .correct_mapping(&f.settings, "owner", &intent.id, request)
+            .await,
+        Err(PipelineError::NotFound)
+    ));
+    std::fs::create_dir(f.destination.path().join("nested")).unwrap();
+    let mut tx = f.store.begin_write().await.unwrap();
+    sqlx::query("UPDATE acquisition_runs SET destination_relative = 'nested/selected.cbz', destination_path = ? WHERE id = ?")
+        .bind(f.destination.path().join("nested/selected.cbz").to_str().unwrap()).bind(&intent.id).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let changed = f.pipeline.review("owner", &intent.id).await.unwrap();
+    std::fs::remove_dir(f.destination.path().join("nested")).unwrap();
+    symlink(f.source.path(), f.destination.path().join("nested")).unwrap();
+    assert!(matches!(
+        f.pipeline
+            .correct_mapping(
+                &f.settings,
+                "owner",
+                &intent.id,
+                mapping_request(&f, &changed)
+            )
+            .await,
+        Err(PipelineError::Invalid)
+    ));
+    assert_eq!(requests, f.server.seen.lock().unwrap().requests);
+    let after = f.pipeline.review("owner", &intent.id).await.unwrap();
+    assert_eq!(after.revision, review.revision);
+    assert!(!f.destination.path().join("selected.cbz").exists());
 }
 
 fn resume_request(review: &AcquisitionReview) -> ResumePolling {
@@ -481,7 +846,13 @@ async fn resume_polling_rolls_back_when_either_guarded_update_changes_no_rows() 
 }
 
 #[tokio::test]
-async fn resume_polling_http_success_matches_contract_and_cookie_origin_is_required() {
+async fn reviewed_actions_http_match_contract_and_require_cookie_origin() {
+    for mapping in [false, true] {
+        assert_reviewed_action_http(mapping).await;
+    }
+}
+
+async fn assert_reviewed_action_http(mapping: bool) {
     use axum::{
         body::Body,
         http::{Request, StatusCode, header},
@@ -491,13 +862,44 @@ async fn resume_polling_http_success_matches_contract_and_cookie_origin_is_requi
 
     let f = Fixture::new(ContentType::Comic, false).await;
     let intent = f.create("http-resume").await;
-    f.submit(&intent.id).await;
-    f.stop_polling(&intent.id).await;
+    if mapping {
+        f.failed_mapping(&intent.id).await;
+    } else {
+        f.submit(&intent.id).await;
+        f.stop_polling(&intent.id).await;
+    }
     let auth = crate::auth::AuthService::new(f.store.clone());
     let login = auth
         .setup("owner", "correct horse battery staple")
         .await
         .unwrap();
+    if mapping {
+        let app = crate::app::router_with_settings(
+            f.store.clone(),
+            "http://127.0.0.1:8787",
+            f.settings.clone(),
+        );
+        let review = f.pipeline.review("owner", &intent.id).await.unwrap();
+        let body = serde_json::json!({"revision":review.revision,"polling_fingerprint":review.polling_fingerprint,"source_root_id":f.source_id,"source_relative_path":"owned.cbz"});
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/acquisition/{}/correct-mapping", intent.id))
+                    .header(header::COOKIE, format!("library_session={}", login.token))
+                    .header(header::ORIGIN, "http://127.0.0.1:8787")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let error: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(error["error"]["code"], "not_found");
+    }
     let mut tx = f.store.begin_write().await.unwrap();
     sqlx::query("UPDATE acquisition_intents SET caller = ? WHERE id = ?")
         .bind(&login.principal.user_id)
@@ -522,7 +924,17 @@ async fn resume_polling_http_success_matches_contract_and_cookie_origin_is_requi
         .review(&login.principal.user_id, &intent.id)
         .await
         .unwrap();
-    let body = serde_json::json!({"revision": review.revision, "polling_fingerprint": review.polling_fingerprint}).to_string();
+    let action = if mapping {
+        "correct-mapping"
+    } else {
+        "resume-polling"
+    };
+    let mut body = serde_json::json!({"revision": review.revision, "polling_fingerprint": review.polling_fingerprint});
+    if mapping {
+        body["source_root_id"] = f.source_id.clone().into();
+        body["source_relative_path"] = "owned.cbz".into();
+    }
+    let body = body.to_string();
     let requests = f.server.seen.lock().unwrap().requests.clone();
     for origin in [
         None,
@@ -531,7 +943,7 @@ async fn resume_polling_http_success_matches_contract_and_cookie_origin_is_requi
     ] {
         let mut request = Request::builder()
             .method("POST")
-            .uri(format!("/api/v1/acquisition/{}/resume-polling", intent.id))
+            .uri(format!("/api/v1/acquisition/{}/{action}", intent.id))
             .header(header::COOKIE, format!("library_session={}", login.token))
             .header(header::CONTENT_TYPE, "application/json");
         if let Some(origin) = origin {
@@ -561,7 +973,7 @@ async fn resume_polling_http_success_matches_contract_and_cookie_origin_is_requi
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let contract: serde_json::Value =
             serde_json::from_str(include_str!("../../api/openapi.yaml")).unwrap();
-        let success = &contract["paths"]["/api/v1/acquisition/{id}/resume-polling"]["post"]["responses"]
+        let success = &contract["paths"][format!("/api/v1/acquisition/{{id}}/{action}")]["post"]["responses"]
             ["202"];
         assert_eq!(
             success["content"]["application/json"]["schema"]["$ref"],
@@ -594,7 +1006,7 @@ async fn resume_polling_http_success_matches_contract_and_cookie_origin_is_requi
         assert!(body["updated_at"].is_i64());
         assert_eq!(
             body,
-            serde_json::json!({"id": intent.id, "job_id": intent.job_id, "unit_id": intent.unit_id, "state": "downloading", "reason": null, "submitted": true, "receipt_count": 2, "import_id": null, "destination_reserved": true, "updated_at": body["updated_at"]})
+            serde_json::json!({"id": intent.id, "job_id": intent.job_id, "unit_id": intent.unit_id, "state": if mapping { "importing" } else { "downloading" }, "reason": null, "submitted": true, "receipt_count": 2, "import_id": review.acquisition.import_id, "destination_reserved": true, "updated_at": body["updated_at"]})
         );
     }
     assert_eq!(requests, f.server.seen.lock().unwrap().requests);
@@ -1773,6 +2185,11 @@ async fn read_scope_cannot_search_submit_or_associate() {
             "POST",
             "/api/v1/acquisition",
             serde_json::to_value(&f.request).unwrap(),
+        ),
+        (
+            "POST",
+            "/api/v1/acquisition/unused/correct-mapping",
+            serde_json::json!({"revision":1,"polling_fingerprint":"unused","source_root_id":f.source_id,"source_relative_path":"owned.cbz"}),
         ),
         (
             "POST",

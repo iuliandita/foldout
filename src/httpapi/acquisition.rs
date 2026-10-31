@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     acquisition::pipeline::{
-        AcquisitionRequest, FileAssociation, Pipeline, PipelineError, ResumePolling,
+        AcquisitionRequest, CorrectMapping, FileAssociation, Pipeline, PipelineError, ResumePolling,
     },
     auth::Scope,
     settings::Settings,
@@ -34,6 +34,10 @@ pub fn routes(context: AcquisitionContext) -> Router {
         .route(
             "/api/v1/acquisition/{id}/resume-polling",
             post(resume_polling),
+        )
+        .route(
+            "/api/v1/acquisition/{id}/correct-mapping",
+            post(correct_mapping),
         )
         .route("/api/v1/acquisition/{id}/files", post(associate_file))
         .layer(DefaultBodyLimit::max(16 * 1024))
@@ -129,12 +133,33 @@ async fn resume_polling(
         .into_response())
 }
 
+async fn correct_mapping(
+    State(context): State<AcquisitionContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    ApiJson(request): ApiJson<CorrectMapping>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(&context.auth, &headers, &Method::POST, Scope::Manage).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(
+            context
+                .pipeline
+                .correct_mapping(&context.settings, &principal.user_id, &id, request)
+                .await
+                .map_err(review_error)?,
+        ),
+    )
+        .into_response())
+}
+
 fn review_error(error: PipelineError) -> ApiError {
     match error {
         PipelineError::Conflict => ApiError::new(
             StatusCode::CONFLICT,
             "acquisition_conflict",
-            "Acquisition is not reviewable, the snapshot changed, or polling recovery is not safe",
+            "Acquisition is not reviewable, the snapshot changed, or the reviewed action is not safe",
         ),
         other => other.into(),
     }
