@@ -745,7 +745,38 @@ pub(crate) struct SourceTombstone {
     expected_parent: PathBuf,
 }
 
+#[derive(Eq, PartialEq)]
+struct RecoveryMetadata {
+    identity: Identity,
+    size: u64,
+    mode: u32,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+#[derive(Eq, PartialEq)]
+pub(crate) struct RecoveryFacts(Vec<Option<RecoveryMetadata>>);
+
 impl SourceTombstone {
+    pub(crate) fn open_recovery(operation: &ImportOperation) -> Result<Self, ImportError> {
+        for (path, identity) in [
+            (
+                &operation.identity.source_root,
+                &operation.identity.source_root_identity,
+            ),
+            (
+                &operation.identity.destination_root,
+                &operation.identity.destination_root_identity,
+            ),
+        ] {
+            let current = root(path)?;
+            if Identity::of(&current)? != *identity {
+                return Err(ImportError::Conflict);
+            }
+        }
+        Self::open(operation)
+    }
+
     pub(crate) fn open(operation: &ImportOperation) -> Result<Self, ImportError> {
         let id = uuid::Uuid::parse_str(&operation.id).map_err(|_| ImportError::InvalidJournal)?;
         if id.to_string() != operation.id {
@@ -888,6 +919,78 @@ impl SourceTombstone {
             return Err(ImportError::Changed);
         }
         Ok(())
+    }
+
+    fn recovery_facts(&self, operation: &ImportOperation) -> Result<RecoveryFacts, ImportError> {
+        let directory = self.expected_parent.join(&self.directory_name);
+        let paths = [
+            operation.identity.source_root.clone(),
+            operation.identity.destination_root.clone(),
+            self.expected_parent.clone(),
+            directory.clone(),
+            self.expected_parent.join(&self.name),
+            directory.join("source"),
+        ];
+        let facts = paths
+            .iter()
+            .map(|path| match std::fs::symlink_metadata(path) {
+                Ok(m) => Ok(Some(RecoveryMetadata {
+                    identity: Identity {
+                        dev: m.dev(),
+                        ino: m.ino(),
+                    },
+                    size: m.len(),
+                    mode: m.mode(),
+                    modified: (m.mtime(), m.mtime_nsec()),
+                    changed: (m.ctime(), m.ctime_nsec()),
+                })),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            })
+            .collect::<Result<_, ImportError>>()?;
+        Ok(RecoveryFacts(facts))
+    }
+
+    pub(crate) fn check_recovery_facts(
+        &self,
+        operation: &ImportOperation,
+        facts: &RecoveryFacts,
+    ) -> Result<(), ImportError> {
+        if self.recovery_facts(operation)? != *facts {
+            return Err(ImportError::Changed);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_recovery(
+        &self,
+        operation: &ImportOperation,
+    ) -> Result<RecoveryFacts, ImportError> {
+        let facts = self.recovery_facts(operation)?;
+        check_location(&self.parent, &self.expected_parent)?;
+        if let Some(directory) = self.directory(false)? {
+            match regular(&directory, "source") {
+                Ok(mut file) => {
+                    Self::verify(&mut file, operation)?;
+                    if operation.source_cleanup == SourceCleanup::Pending {
+                        absent(&self.parent, &self.name)?;
+                    }
+                    self.check_recovery_facts(operation, &facts)?;
+                    return Ok(facts);
+                }
+                Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if operation.source_cleanup == SourceCleanup::Pending {
+            match regular(&self.parent, &self.name) {
+                Ok(mut file) => Self::verify(&mut file, operation)?,
+                Err(ImportError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.check_recovery_facts(operation, &facts)?;
+        Ok(facts)
     }
 
     pub(crate) fn restore(&self) -> Result<bool, ImportError> {

@@ -284,7 +284,7 @@ impl ImportService {
             .bind(id)
             .fetch_optional(self.store.reader())
             .await?
-            .map(decode)
+            .map(|row| decode(&row))
             .transpose()
     }
 
@@ -355,7 +355,7 @@ impl ImportService {
     }
 }
 
-fn decode(row: sqlx::sqlite::SqliteRow) -> Result<ImportOperation, ImportError> {
+pub(crate) fn decode(row: &sqlx::sqlite::SqliteRow) -> Result<ImportOperation, ImportError> {
     let phase = match row.get::<&str, _>("phase") {
         "planned" => ImportPhase::Planned,
         "staged" => ImportPhase::Staged,

@@ -297,10 +297,13 @@ pass `ImportMode::TorrentPreserving`; standalone callers pass
 `ImportMode::Standalone`. Policy resolution rejects Move before planning and
 again when staging or cleaning up. The acquisition pipeline selects the torrent
 mode for qBittorrent regardless of whether the client currently reports seeding.
-Both production acquisition paths continue to request Copy. Move and cleanup
-abandonment are available only through the internal importer API; HTTP and UI
-exposure are deferred by owner decision. Downloader job/payload cleanup remains
-separate from import source cleanup.
+Both production acquisition paths request Copy for new journals. Reviewed indexer
+acquisition recovery can resume an existing journal with its original policy,
+including Move, through the same importer steps. It cannot select a new policy or
+create a journal. Move cleanup with a recorded error or changed source evidence
+requires review or abandonment. Selecting Move and abandoning cleanup remain
+internal importer operations with no HTTP or UI action. Downloader job/payload
+cleanup remains separate from import source cleanup.
 
 ## Verification
 
