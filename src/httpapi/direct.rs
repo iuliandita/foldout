@@ -66,7 +66,7 @@ async fn resume(
         response(
             context
                 .direct
-                .resume_transfer(&context.settings, &principal.user_id, &id, request)
+                .start_resume_transfer(&context.settings, &principal.user_id, &id, request)
                 .await?,
         ),
     )

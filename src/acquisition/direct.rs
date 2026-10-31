@@ -791,6 +791,12 @@ impl Direct {
                 .await?;
             }
             let validated = fingerprint_file(&stage.file).await?;
+            if expected_pages.is_none() {
+                let checkpoint = journal.load(0).await?.ok_or(DirectError::RestartRequired)?;
+                if !checkpoint.complete || validated != (checkpoint.offset, checkpoint.digest) {
+                    return Err(DirectError::RestartRequired);
+                }
+            }
             verify_archive_count(&stage.file, format, expected_pages).await?;
             stage.check(&source)?;
             let (size, digest) = fingerprint_file(&stage.file).await?;
@@ -1451,7 +1457,7 @@ struct Stage {
     id: String,
 }
 impl Stage {
-    fn open(path: &Path, id: &str) -> Result<Self, DirectError> {
+    fn open(path: &Path, id: &str, writable: bool) -> Result<Self, DirectError> {
         let root = finalize::root(path).map_err(|_| DirectError::LocalReview)?;
         let area = open_at(
             &root,
@@ -1465,7 +1471,15 @@ impl Stage {
                 return Err(DirectError::LocalReview);
             }
         }
-        let file = open_at(&job, "filepartial", libc::O_RDWR)?;
+        let file = open_at(
+            &job,
+            "filepartial",
+            if writable {
+                libc::O_RDWR
+            } else {
+                libc::O_RDONLY
+            },
+        )?;
         let m = file.metadata().map_err(|_| DirectError::LocalReview)?;
         if !m.is_file()
             || m.nlink() != 1
@@ -1497,7 +1511,7 @@ impl Stage {
             Err(_) => return Err(DirectError::LocalReview),
             Ok(_) => {}
         }
-        let stage = Self::open(path, id)?;
+        let stage = Self::open(path, id, false)?;
         stage.check(path)?;
         for name in ["file.cbz", "file.cbr"] {
             absent_destination(&stage.job, name)?;

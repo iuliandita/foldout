@@ -1138,7 +1138,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description Requires manage scope. Returns the owner-scoped revision, transfer fingerprint and resume/restart eligibility. No network requests, client writes or file modifications. A worker lock and fresh source validation are still required at action time. */
+        /** @description Requires manage scope. Returns owner-scoped revision, transfer fingerprint and resume/restart eligibility using read-only opens and cheap metadata checks. Does not hash partial contents, make network requests or modify files. Full prefix verification is deferred to the accepted action, so eligible is provisional. Invalid checkpoint JSON/schema returns a 200 snapshot with transfer_checkpoint_invalid and restart remains available. Weak Last-Modified evidence returns transfer_validator_not_strong. A worker lock and fresh source validation are required at action time. */
         get: operations["reviewDirectAcquisition"];
         put?: never;
         post?: never;
@@ -1157,7 +1157,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Requires manage scope and cookie Origin. Revision-fenced, audited, single reviewed transfer attempt under the direct worker locks. Re-resolves the persisted selection handle without storing its URL. Preserves attempted and exact MangaDex manifest identity. A partial needs Accept-Ranges: bytes, total length and a strong ETag or Last-Modified; sends Range and If-Range. Only a matching 206 Content-Range, origin, total, content type and validators permits append. A 200, ignored range or changed evidence requires an explicit restart. The fsynced inode, offset and SHA-256 must match. MangaDex requires the exact expected page set and size/hash checkpoints for every page; incomplete/extra sets are refused. Complete verified pages are reused without GET. Never automatically retries. Returns downloaded after validation; normal import steps still determine completion. A disconnect after acceptance can leave downloading for startup review; replay cannot start another attempt. */
+        /** @description Requires manage scope and cookie Origin. Revision-fenced and audited. Re-resolves the selection without storing a URL and preserves the attempted fence and exact MangaDex manifest identity. Returns 202 with state downloading immediately after the fence commits, before the background transfer completes. Poll GET /api/v1/direct/acquisitions/{id}; transfer failures become needs_review with a reason, then fetch a fresh review. Caller disconnects do not cancel the owned task. Never automatically retries. Range uses If-Range with a strong ETag, else Last-Modified only when Date is at least one second later. Append requires a matching 206, exact Content-Range offset/total, content type and validators. Archive origin must match; MangaDex may use a newly resolved node/token only after the exact manifest and stable chapter-hash/filename page identities match. Started pages require verified size/hash checkpoints; absent/zero never-started pages with NULL checkpoints fetch from zero. Missing checkpointed pages or extra pages require restart. Complete pages are verified and reused. Prefix hashing runs once on the blocking pool; an overlong owned file is truncated to the saved offset only after the prefix hash matches. Checkpoints batch at 8 MiB or 5 seconds and at completion, syncing before each database save. Download validation and normal import steps still determine completion. */
         post: operations["resumeDirectTransfer"];
         delete?: never;
         options?: never;
@@ -1174,7 +1174,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Requires manage scope and cookie Origin. Revision-fenced, audited restart of an idle pre-import direct intent. Re-resolves the selection, checks unit/destination reservations, retires the old intent and creates a fresh queued intent in one write transaction. Preserves the old attempted fence, manifest evidence and original idempotency replay. Discards only private partial staging files; never library files or published archives. The new intent has a fresh UUID, import ID and replay key and enters normal creation/submission checks from zero. Changed chapter metadata requires a fresh explicit selection. Stale snapshots and replay cannot create duplicate intents. */
+        /** @description Requires manage scope and cookie Origin. Revision-fenced, audited restart of an idle pre-import direct intent. Re-resolves the selection, checks unit/destination reservations, retires the old intent and creates a fresh queued intent in one write transaction. Preserves the old attempted fence, manifest evidence and original idempotency replay. Discards only private partial staging files; never library files or published archives. The new intent has a fresh UUID, import ID and replay key and enters normal creation/submission checks from zero. Changed chapter metadata requires a fresh explicit selection. Stale snapshots and replay cannot create duplicate intents. Exact owner/revision/fingerprint replay returns the committed replacement, even after it progresses. Cleanup failures after commit are logged for local inspection and still return that replacement; they never turn a committed restart into a failed response. */
         post: operations["restartDirectTransfer"];
         delete?: never;
         options?: never;
@@ -2484,14 +2484,14 @@ export interface components {
         DirectTransferEligibility: {
             eligible: boolean;
             /** @enum {string|null} */
-            reason: "import_review_required" | "transfer_not_idle" | "transfer_evidence_missing" | "transfer_restart_required" | "transfer_resume_unavailable" | "local_review" | null;
+            reason: "import_review_required" | "transfer_not_idle" | "transfer_evidence_missing" | "transfer_restart_required" | "transfer_resume_unavailable" | "transfer_validator_not_strong" | "transfer_checkpoint_invalid" | "local_review" | null;
         };
         DirectTransferAction: {
             /** Format: int64 */
             revision: number;
             transfer_fingerprint: string;
         };
-        /** @description Owner-scoped direct recovery snapshot. Does not change the indexer AcquisitionReview contract. Eligibility reflects local persisted evidence; the action re-resolves and rechecks the source. No durable URLs or public filesystem paths. */
+        /** @description Owner-scoped direct recovery snapshot. Does not change the indexer AcquisitionReview contract. Eligibility reflects local persisted evidence; the action re-resolves and rechecks the source. No durable URLs or public filesystem paths. GET uses read-only opens and metadata only; full content hashing is deferred to the action. NULL checkpoints identify never-started MangaDex pages; malformed checkpoint records disable resume while retaining a restart snapshot. */
         DirectAcquisitionReview: {
             acquisition: components["schemas"]["DirectAcquisition"];
             /** Format: int64 */
@@ -7785,7 +7785,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description transfer_restart_required: stored checkpoint shape is invalid and requires local inspection. local_review: the registered download root is unavailable. No action was performed. */
+            /** @description local_review: the registered download root is unavailable. No action was performed. Invalid checkpoint shape is represented by a successful review snapshot, not a 409. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -7829,7 +7829,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Successful operation */
+            /** @description Reviewed downloading fence committed. The returned acquisition is a snapshot with state downloading. Transfer continues independently; poll the acquisition status for downloaded or needs_review. This response does not report transfer completion. */
             202: {
                 headers: {
                     "Cache-Control"?: "no-store";
@@ -7875,7 +7875,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description direct_review_conflict: stale snapshot or consumed action; fetch a fresh review. direct_busy: active worker; retry later. direct_review_required: import, coverage or non-idle state needs separate recovery. transfer_resume_unavailable: missing stable validators, byte-range support or complete page evidence; review restart. transfer_restart_required: changed origin, validators, range response, length, manifest or local checkpoint; review restart. local_review: unsafe registered root or staging identity; inspect locally. source_changed: selection or configuration changed; select again. direct_conflict: selection, unit or reservation conflict. manual_action or challenge_required: source needs user action. not_configured: source integration is disabled or lacks credentials; configure it before a fresh review. */
+            /** @description direct_review_conflict: stale snapshot or consumed resume action; an exact committed restart replay returns its replacement; fetch a fresh review. direct_busy: active worker; retry later. direct_review_required: import, coverage or non-idle state needs separate recovery. transfer_resume_unavailable: missing strong validators or byte-range support for a started partial; review restart. transfer_restart_required: restart-only state, changed archive origin, manifest/page set or local checkpoint detected before acceptance; review restart. local_review: unsafe registered root or staging identity; inspect locally. source_changed: selection or configuration changed; select again. direct_conflict: selection, unit or reservation conflict. manual_action or challenge_required: source needs user action. not_configured: source integration is disabled or lacks credentials; configure it before a fresh review. Once resume returns 202, HTTP range/validator failures are recorded as acquisition needs_review reasons instead of returned by this request. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -7946,7 +7946,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Successful operation */
+            /** @description Restart committed or exact committed replay. Returns the replacement acquisition. Retired partial cleanup failures are logged and do not change this committed result. */
             202: {
                 headers: {
                     "Cache-Control"?: "no-store";
@@ -7992,7 +7992,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description direct_review_conflict: stale snapshot or consumed action; fetch a fresh review. direct_busy: active worker; retry later. direct_review_required: import, coverage or non-idle state needs separate recovery. transfer_resume_unavailable: missing stable validators, byte-range support or complete page evidence; review restart. transfer_restart_required: changed origin, validators, range response, length, manifest or local checkpoint; review restart. local_review: unsafe registered root or staging identity; inspect locally. source_changed: selection or configuration changed; select again. direct_conflict: selection, unit or reservation conflict. manual_action or challenge_required: source needs user action. not_configured: source integration is disabled or lacks credentials; configure it before a fresh review. */
+            /** @description direct_review_conflict: stale snapshot or consumed resume action; an exact committed restart replay returns its replacement; fetch a fresh review. direct_busy: active worker; retry later. direct_review_required: import, coverage or non-idle state needs separate recovery. transfer_resume_unavailable: missing strong validators or byte-range support for a started partial; review restart. transfer_restart_required: restart-only state, changed archive origin, manifest/page set or local checkpoint detected before acceptance; review restart. local_review: unsafe registered root or staging identity; inspect locally. source_changed: selection or configuration changed; select again. direct_conflict: selection, unit or reservation conflict. manual_action or challenge_required: source needs user action. not_configured: source integration is disabled or lacks credentials; configure it before a fresh review. Once resume returns 202, HTTP range/validator failures are recorded as acquisition needs_review reasons instead of returned by this request. */
             409: {
                 headers: {
                     [name: string]: unknown;

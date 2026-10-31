@@ -13,11 +13,19 @@ enum Behavior {
     WrongStart,
     ChangedLength,
     DateOnly,
+    WeakDate,
+    MissingDate,
+    Twice,
+    FirstPageCut,
+    Paused,
+    Large,
+    FreshAll,
 }
 struct RangeFixture {
     address: SocketAddr,
     requests: Arc<Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
+    release: Arc<tokio::sync::Notify>,
 }
 impl Drop for RangeFixture {
     fn drop(&mut self) {
@@ -33,6 +41,8 @@ impl RangeFixture {
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = requests.clone();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let released = release.clone();
         let task = tokio::spawn(async move {
             let archive = if manga {
                 let mut png = std::io::Cursor::new(Vec::new());
@@ -41,7 +51,11 @@ impl RangeFixture {
                     .unwrap();
                 png.into_inner()
             } else {
-                ARCHIVE.to_vec()
+                let mut bytes = ARCHIVE.to_vec();
+                if behavior == Behavior::Large {
+                    bytes.resize(40 * 1024 * 1024, 0);
+                }
+                bytes
             };
             let bytes = archive.as_slice();
             loop {
@@ -70,9 +84,13 @@ impl RangeFixture {
                     .unwrap();
                 tx.rollback().await.unwrap();
                 seen.lock().unwrap().push(request.clone());
+                let number = seen.lock().unwrap().len();
                 let cut = bytes.len() / 2;
                 let etag = match behavior {
-                    Behavior::NoValidators | Behavior::DateOnly => "",
+                    Behavior::NoValidators
+                    | Behavior::DateOnly
+                    | Behavior::WeakDate
+                    | Behavior::MissingDate => "",
                     Behavior::WeakEtag => "ETag: W/\"owned\"\r\n",
                     Behavior::ChangedEtag if is_resume => "ETag: \"changed\"\r\n",
                     _ => "ETag: \"owned\"\r\n",
@@ -91,10 +109,20 @@ impl RangeFixture {
                 };
                 let (status, length, content_range, body) =
                     if is_resume && behavior != Behavior::IgnoreRange {
-                        assert!(
-                            request
-                                .to_ascii_lowercase()
-                                .contains(&format!("range: bytes={cut}-"))
+                        let requested = request
+                            .lines()
+                            .find_map(|line| line.strip_prefix("range: bytes="))
+                            .unwrap()
+                            .trim_end_matches('-')
+                            .parse::<usize>()
+                            .unwrap();
+                        assert_eq!(
+                            requested,
+                            if behavior == Behavior::Twice && number == 3 {
+                                cut + (bytes.len() - cut) / 2
+                            } else {
+                                cut
+                            }
                         );
                         assert!(request.contains(if behavior == Behavior::DateOnly {
                             "if-range: Wed, 21 Oct 2026 10:00:00 GMT"
@@ -102,31 +130,46 @@ impl RangeFixture {
                             "if-range: \"owned\""
                         }));
                         let start = if behavior == Behavior::WrongStart {
-                            cut + 1
+                            requested + 1
                         } else {
-                            cut
+                            requested
                         };
                         let total = bytes.len() + usize::from(behavior == Behavior::ChangedLength);
                         (
                             206,
-                            bytes.len() - cut,
+                            bytes.len() - requested,
                             format!("Content-Range: bytes {start}-{}/{total}\r\n", total - 1),
-                            &bytes[cut..],
+                            if behavior == Behavior::Twice && number == 2 {
+                                &bytes[requested..requested + (bytes.len() - requested) / 2]
+                            } else {
+                                &bytes[requested..]
+                            },
                         )
                     } else {
                         (
                             200,
                             bytes.len(),
                             String::new(),
-                            if is_resume || (manga && request.contains("first.png")) {
+                            if is_resume
+                                || (manga
+                                    && (behavior == Behavior::FreshAll
+                                        || number > 2
+                                        || (request.contains("first.png")
+                                            && behavior != Behavior::FirstPageCut)))
+                            {
                                 bytes
                             } else {
                                 &bytes[..cut]
                             },
                         )
                     };
+                let date = match behavior {
+                    Behavior::MissingDate => "",
+                    Behavior::WeakDate => "Date: Wed, 21 Oct 2026 10:00:00 GMT\r\n",
+                    _ => "Date: Fri, 23 Oct 2026 10:00:00 GMT\r\n",
+                };
                 let headers = format!(
-                    "HTTP/1.1 {status} OK\r\nContent-Type: {}\r\nContent-Length: {length}\r\n{etag}{modified}{ranges}{content_range}Connection: close\r\n\r\n",
+                    "HTTP/1.1 {status} OK\r\nContent-Type: {}\r\nContent-Length: {length}\r\n{date}{etag}{modified}{ranges}{content_range}Connection: close\r\n\r\n",
                     if manga {
                         "image/png"
                     } else {
@@ -134,6 +177,9 @@ impl RangeFixture {
                     }
                 );
                 stream.write_all(headers.as_bytes()).await.unwrap();
+                if behavior == Behavior::Paused && is_resume {
+                    released.notified().await;
+                }
                 stream.write_all(body).await.unwrap();
                 stream.shutdown().await.unwrap();
             }
@@ -142,8 +188,27 @@ impl RangeFixture {
             address,
             requests,
             task,
+            release,
         }
     }
+}
+async fn wait_idle(direct: &Direct, owner: &str, id: &str) -> DirectAcquisition {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let state = direct.get(owner, id).await.unwrap();
+            if state.state != "downloading"
+                && let Ok(slot) = SLOT.get().unwrap().try_lock()
+                && let Some(process) = direct.worker_lock().await.unwrap()
+            {
+                drop(process);
+                drop(slot);
+                return state;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("owned transfer must finish")
 }
 fn action(review: &DirectReview) -> TransferAction {
     TransferAction {
@@ -260,6 +325,8 @@ async fn reviewed_resume_refuses_changed_or_missing_response_evidence_before_app
         Behavior::IgnoreRange,
         Behavior::WrongStart,
         Behavior::ChangedLength,
+        Behavior::WeakDate,
+        Behavior::MissingDate,
     ] {
         let mut f = Fixture::new().await;
         let server = RangeFixture::new(f.store.clone(), behavior).await;
@@ -274,9 +341,19 @@ async fn reviewed_resume_refuses_changed_or_missing_response_evidence_before_app
         let review = f.direct.review("owner", &intent.id).await.unwrap();
         let unavailable = matches!(
             behavior,
-            Behavior::NoValidators | Behavior::WeakEtag | Behavior::NoRanges
+            Behavior::NoValidators
+                | Behavior::WeakEtag
+                | Behavior::NoRanges
+                | Behavior::WeakDate
+                | Behavior::MissingDate
         );
         assert_eq!(review.resume.eligible, !unavailable, "{behavior:?}");
+        if matches!(behavior, Behavior::WeakDate | Behavior::MissingDate) {
+            assert_eq!(
+                review.resume.reason.as_deref(),
+                Some("transfer_validator_not_strong")
+            );
+        }
         let error = f
             .direct
             .resume_transfer(&f.settings, "owner", &intent.id, action(&review))
@@ -303,7 +380,7 @@ async fn reviewed_resume_refuses_changed_or_missing_response_evidence_before_app
 #[tokio::test]
 async fn tampered_truncated_or_changed_origin_partials_require_restart() {
     let _serial = TEST_GATE.lock().await;
-    for change in ["tamper", "truncate", "origin", "extra_bytes"] {
+    for change in ["tamper", "truncate", "origin"] {
         let mut f = Fixture::new().await;
         let server = RangeFixture::new(f.store.clone(), Behavior::Resume).await;
         f.direct.fixture = Some(server.address);
@@ -389,9 +466,19 @@ async fn reviewed_restart_retires_the_fence_discards_only_partials_and_creates_o
         b"published evidence"
     );
     assert_eq!(f.enqueue("restart").await.id, intent.id);
-    assert!(matches!(
+    assert_eq!(
         f.direct
             .restart_transfer(&f.settings, "owner", &intent.id, action(&review))
+            .await
+            .unwrap()
+            .id,
+        next.id
+    );
+    let mut stale = action(&review);
+    stale.transfer_fingerprint = "0".repeat(64);
+    assert!(matches!(
+        f.direct
+            .restart_transfer(&f.settings, "owner", &intent.id, stale)
             .await,
         Err(DirectError::ReviewConflict)
     ));
@@ -544,7 +631,7 @@ async fn direct_review_actions_are_scoped_bounded_and_report_distinct_http_codes
     use tower::ServiceExt;
     let _serial = TEST_GATE.lock().await;
     let mut f = Fixture::new().await;
-    let server = RangeFixture::new(f.store.clone(), Behavior::Resume).await;
+    let server = RangeFixture::new(f.store.clone(), Behavior::Paused).await;
     f.direct.fixture = Some(server.address);
     let auth = crate::auth::AuthService::new(f.store.clone());
     auth.setup("fixture-admin", "fixture-secure-password")
@@ -649,9 +736,9 @@ async fn direct_review_actions_are_scoped_bounded_and_report_distinct_http_codes
             Some("direct_review_conflict"),
         ),
     ] {
-        let response = app
-            .clone()
-            .oneshot(
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            app.clone().oneshot(
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/direct/acquisitions/{path}"))
@@ -659,10 +746,27 @@ async fn direct_review_actions_are_scoped_bounded_and_report_distinct_http_codes
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await
+        .expect("202 must not await transfer completion")
+        .unwrap();
         assert_eq!(response.status(), status, "{path}");
+        if status == StatusCode::ACCEPTED {
+            let value: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(value["state"], "downloading");
+            loop {
+                if server.requests.lock().unwrap().len() == 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            server.release.notify_one();
+            wait_idle(&f.direct, &principal.user_id, &intent.id).await;
+            continue;
+        }
         if let Some(code) = code {
             let value: serde_json::Value =
                 serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -831,4 +935,277 @@ async fn reviewed_actions_keep_worker_configuration_and_import_fences() {
         Err(DirectError::ReviewRequired)
     ));
     assert_eq!(f.server.seen.lock().unwrap().transfers, 1);
+}
+
+#[tokio::test]
+async fn resumed_transfer_can_interrupt_again_and_trim_only_a_verified_tail() {
+    let _serial = TEST_GATE.lock().await;
+    for tampered in [false, true] {
+        let mut f = Fixture::new().await;
+        let server = RangeFixture::new(f.store.clone(), Behavior::Twice).await;
+        f.direct.fixture = Some(server.address);
+        let intent = f.enqueue("two-interruptions").await;
+        f.tick().await;
+        let review = f.direct.review("owner", &intent.id).await.unwrap();
+        assert!(matches!(
+            f.direct
+                .resume_transfer(&f.settings, "owner", &intent.id, action(&review))
+                .await,
+            Err(DirectError::Transfer)
+        ));
+        let partial = f
+            .source
+            .path()
+            .join(format!(".library-downloads/{}/filepartial", intent.id));
+        let before = std::fs::read(&partial).unwrap();
+        assert_eq!(
+            before.len(),
+            ARCHIVE.len() / 2 + (ARCHIVE.len() - ARCHIVE.len() / 2) / 2
+        );
+        assert_eq!(before, &ARCHIVE[..before.len()]);
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&partial)
+            .unwrap();
+        file.write_all(b"uncommitted tail").unwrap();
+        file.sync_all().unwrap();
+        if tampered {
+            let mut bytes = std::fs::read(&partial).unwrap();
+            bytes[0] ^= 1;
+            std::fs::write(&partial, bytes).unwrap();
+        }
+        let review = f.direct.review("owner", &intent.id).await.unwrap();
+        // GET is deliberately cheap: content verification belongs to the action.
+        assert!(review.resume.eligible);
+        let result = f
+            .direct
+            .resume_transfer(&f.settings, "owner", &intent.id, action(&review))
+            .await;
+        if tampered {
+            assert!(matches!(result, Err(DirectError::RestartRequired)));
+            assert_eq!(server.requests.lock().unwrap().len(), 2);
+            assert_eq!(
+                std::fs::metadata(&partial).unwrap().len(),
+                (before.len() + 16) as u64
+            );
+        } else {
+            assert_eq!(result.unwrap().state, "downloaded");
+            assert_eq!(server.requests.lock().unwrap().len(), 3);
+            assert_eq!(
+                std::fs::read(partial.with_file_name("file.cbz")).unwrap(),
+                ARCHIVE
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn manga_rotation_and_never_started_middle_page_use_fresh_manifest_locations() {
+    let _serial = TEST_GATE.lock().await;
+    for unstarted in [false, true] {
+        let mut f = Fixture::manga().await;
+        if unstarted {
+            f.server.seen.lock().unwrap().three_pages = true;
+            f.request.link_handle = f.chapter_page().await.chapters[0].link_handle.clone();
+        }
+        let first = RangeFixture::with_pages(
+            f.store.clone(),
+            if unstarted {
+                Behavior::FirstPageCut
+            } else {
+                Behavior::Resume
+            },
+            true,
+        )
+        .await;
+        f.direct.fixture = Some(first.address);
+        let intent = f.enqueue("node-rotation").await;
+        f.tick().await;
+        let before:i64=sqlx::query_scalar("SELECT COUNT(*) FROM direct_transfer_parts WHERE acquisition_id=? AND checkpoint IS NULL").bind(&intent.id).fetch_one(f.store.reader()).await.unwrap();
+        assert_eq!(before, if unstarted { 2 } else { 0 });
+        if !unstarted {
+            let raw: String = sqlx::query_scalar(
+                "SELECT checkpoint FROM direct_transfer_parts WHERE acquisition_id=? AND ordinal=1",
+            )
+            .bind(&intent.id)
+            .fetch_one(f.store.reader())
+            .await
+            .unwrap();
+            let mut complete: crate::acquisition::transfer_checkpoint::Checkpoint =
+                serde_json::from_str(&raw).unwrap();
+            assert!(complete.complete);
+            complete.etag = None;
+            complete.last_modified = Some("Wed, 21 Oct 2026 10:00:00 GMT".into());
+            complete.last_modified_strong = false;
+            let mut tx = f.store.begin_write().await.unwrap();
+            sqlx::query("UPDATE direct_transfer_parts SET checkpoint=? WHERE acquisition_id=? AND ordinal=1")
+                .bind(serde_json::to_string(&complete).unwrap()).bind(&intent.id)
+                .execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        if unstarted {
+            std::fs::remove_file(f.source.path().join(format!(
+                ".library-downloads/{}/page-000002.partial",
+                intent.id
+            )))
+            .unwrap();
+        }
+        f.server.seen.lock().unwrap().rotating_node = true;
+        let second = RangeFixture::with_pages(f.store.clone(), Behavior::FreshAll, true).await;
+        f.direct.fixture = Some(second.address);
+        let review = f.direct.review("owner", &intent.id).await.unwrap();
+        assert!(review.resume.eligible, "{review:?}");
+        let result = f
+            .direct
+            .resume_transfer(&f.settings, "owner", &intent.id, action(&review))
+            .await
+            .unwrap();
+        assert_eq!(result.state, "downloaded");
+        assert_eq!(
+            first.requests.lock().unwrap().len(),
+            if unstarted { 1 } else { 2 }
+        );
+        assert_eq!(
+            second.requests.lock().unwrap().len(),
+            if unstarted { 3 } else { 1 }
+        );
+        let requests = second.requests.lock().unwrap();
+        assert!(requests.iter().all(|r| r.contains("/rotated-token/data/")));
+        assert!(requests[0].contains("range: bytes="));
+        if unstarted {
+            assert!(requests[1..].iter().all(|r| !r.contains("range:")));
+        }
+    }
+}
+
+#[tokio::test]
+async fn corrupt_checkpoint_review_and_cleanup_failure_keep_restart_replay_available() {
+    let _serial = TEST_GATE.lock().await;
+    for unknown_field in [false, true] {
+        let mut f = Fixture::new().await;
+        let server = RangeFixture::new(f.store.clone(), Behavior::Resume).await;
+        f.direct.fixture = Some(server.address);
+        let intent = f.enqueue("invalid-checkpoint").await;
+        f.tick().await;
+        let staging = f
+            .source
+            .path()
+            .join(format!(".library-downloads/{}", intent.id));
+        let raw: String = sqlx::query_scalar(
+            "SELECT checkpoint FROM direct_transfer_parts WHERE acquisition_id=?",
+        )
+        .bind(&intent.id)
+        .fetch_one(f.store.reader())
+        .await
+        .unwrap();
+        let mut corrupt = if unknown_field {
+            serde_json::from_str::<serde_json::Value>(&raw).unwrap()
+        } else {
+            serde_json::json!({})
+        };
+        if unknown_field {
+            corrupt["unknown"] = true.into();
+        }
+        let mut tx = f.store.begin_write().await.unwrap();
+        sqlx::query("UPDATE direct_transfer_parts SET checkpoint=? WHERE acquisition_id=?")
+            .bind(corrupt.to_string())
+            .bind(&intent.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        // Cleanup cannot discard a multiply linked partial. This is an owned fixture only.
+        std::fs::hard_link(
+            staging.join("filepartial"),
+            staging.join("page-999999.partial"),
+        )
+        .unwrap();
+        // Restore single-link main file so preparation succeeds; the extra partial remains linked elsewhere.
+        let bytes = std::fs::read(staging.join("filepartial")).unwrap();
+        std::fs::remove_file(staging.join("filepartial")).unwrap();
+        std::fs::write(staging.join("filepartial"), &bytes).unwrap();
+        std::fs::hard_link(
+            staging.join("page-999999.partial"),
+            staging.join("keep.cbz"),
+        )
+        .unwrap();
+        let review = f.direct.review("owner", &intent.id).await.unwrap();
+        assert!(!review.resume.eligible);
+        assert_eq!(
+            review.resume.reason.as_deref(),
+            Some("transfer_checkpoint_invalid")
+        );
+        assert!(review.restart.eligible);
+        assert_eq!(review.transfer_fingerprint.len(), 64);
+        let replacement = f
+            .direct
+            .restart_transfer(&f.settings, "owner", &intent.id, action(&review))
+            .await
+            .unwrap();
+        assert_eq!(replacement.state, "queued");
+        assert_eq!(std::fs::read(staging.join("keep.cbz")).unwrap(), bytes);
+        assert_eq!(
+            f.direct
+                .restart_transfer(&f.settings, "owner", &intent.id, action(&review))
+                .await
+                .unwrap()
+                .id,
+            replacement.id
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM direct_acquisitions")
+            .fetch_one(f.store.reader())
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+}
+
+#[tokio::test]
+async fn durable_offsets_follow_synced_batches_not_individual_response_chunks() {
+    use crate::acquisition::transfer_checkpoint::CHECKPOINT_TRACE;
+    let _serial = TEST_GATE.lock().await;
+    let mut f = Fixture::new().await;
+    let server = RangeFixture::new(f.store.clone(), Behavior::Large).await;
+    f.direct.fixture = Some(server.address);
+    let intent = f.enqueue("batched-checkpoint").await;
+    CHECKPOINT_TRACE.lock().unwrap().clear();
+    f.tick().await;
+    let raw: String =
+        sqlx::query_scalar("SELECT checkpoint FROM direct_transfer_parts WHERE acquisition_id=?")
+            .bind(&intent.id)
+            .fetch_one(f.store.reader())
+            .await
+            .unwrap();
+    let cp: crate::acquisition::transfer_checkpoint::Checkpoint =
+        serde_json::from_str(&raw).unwrap();
+    assert_eq!(cp.offset, 20 * 1024 * 1024);
+    let mut synced = 0;
+    let mut saves = 0;
+    for (is_sync, id, offset) in CHECKPOINT_TRACE.lock().unwrap().iter() {
+        if id != &cp.file_identity {
+            continue;
+        }
+        if *is_sync {
+            synced = *offset;
+        } else {
+            assert!(*offset <= synced, "saved offset exceeds synced bytes");
+            saves += 1;
+        }
+    }
+    assert!(
+        (3..=5).contains(&saves),
+        "one checkpoint per batch, not per response chunk: {saves}"
+    );
+    assert_eq!(synced, cp.offset);
+    assert_eq!(
+        std::fs::metadata(
+            f.source
+                .path()
+                .join(format!(".library-downloads/{}/filepartial", intent.id))
+        )
+        .unwrap()
+        .len(),
+        cp.offset
+    );
 }

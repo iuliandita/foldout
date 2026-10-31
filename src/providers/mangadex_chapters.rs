@@ -76,6 +76,23 @@ impl MangaDexManifest {
         &self.identity
     }
 
+    pub(crate) fn page_identity(&self, index: usize) -> Result<String, ProviderError> {
+        let filename = self
+            .filenames
+            .get(index)
+            .ok_or(ProviderError::InvalidQuery)?;
+        let mut digest = Sha256::new();
+        for value in [&self.summary.hash, filename] {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+        Ok(digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect())
+    }
+
     /// Zero-based original-quality page. Future workers must also validate resolved
     /// IPs and redirects before fetching; hostname syntax alone cannot stop rebinding.
     pub(crate) fn page_url(&self, index: usize) -> Result<Url, ProviderError> {
@@ -507,7 +524,9 @@ mod tests {
 
     #[test]
     fn page_url_preserves_temporary_base_path_and_bounds_index() {
+        let mut identities = std::collections::HashSet::new();
         for base in [
+            "https://other.mangadex.network/another-token",
             "https://node.mangadex.network/temporary-secret",
             "https://node.mangadex.network/temporary-secret/",
         ] {
@@ -521,11 +540,24 @@ mod tests {
                 filenames: vec!["1-a.png".into()],
                 identity: String::new(),
             };
+            identities.insert(manifest.page_identity(0).unwrap());
             assert_eq!(
-                manifest.page_url(0).unwrap().as_str(),
-                "https://node.mangadex.network/temporary-secret/data/0123456789abcdef0123456789abcdef/1-a.png"
+                manifest.page_url(0).unwrap().path(),
+                format!(
+                    "{}/data/0123456789abcdef0123456789abcdef/1-a.png",
+                    reqwest::Url::parse(base)
+                        .unwrap()
+                        .path()
+                        .trim_end_matches('/')
+                )
             );
+            assert_eq!(manifest.page_identity(1), Err(ProviderError::InvalidQuery));
             assert_eq!(manifest.page_url(1), Err(ProviderError::InvalidQuery));
         }
+        assert_eq!(
+            identities.len(),
+            1,
+            "temporary node/path must not affect page identity"
+        );
     }
 }

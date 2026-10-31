@@ -333,16 +333,28 @@ private ownership/permissions, inode and contents unchanged; copying them to a
 new filesystem changes their identity and requires restart rather than resume.
 No new configured write root is introduced. Startup applies migration 024.
 
-Checkpoints record a synced byte offset and SHA-256 only after the file is synced.
-A crash may leave additional bytes beyond the last committed offset; recovery
-refuses that mismatch instead of truncating or guessing. A reviewed restart uses
+Checkpoints batch writes and fsync on the blocking pool at 8 MiB or 5 seconds,
+on interruption when possible, and at completion. The database offset and SHA-256
+are saved only after fsync succeeds, so a committed offset never exceeds synced
+bytes. A crash or cancellation between fsync and the database save can leave an
+extra tail. Resume hashes the recorded prefix once on the blocking pool and
+truncates only that owned tail after the prefix matches; mismatched or shortened
+prefixes require restart. Review GET uses read-only opens and metadata checks,
+not a full content hash. A reviewed restart uses
 a fresh intent and discards only the old private partial files. A crash after the
 restart transaction but before discard can leave orphan partials in the retired
-staging directory; preserve them for local inspection, never adopt them into the
-new intent. Published downloads and imported library files are outside discard.
+staging directory. Cleanup failures after commit are logged and the API still
+returns the committed replacement; exact revision/fingerprint replay returns the
+same replacement. Preserve leftover partials for local inspection and never adopt
+them into the new intent. Published downloads and imported library files are outside discard.
 
-For compatibility and rollback, keep the previous executable and pre-upgrade
-backup. Older executables reject the newer schema. Stop the upgraded service and
+For compatibility, older pre-release checkpoints with token-derived MangaDex
+page identities or only unqualified Last-Modified evidence require explicit restart.
+MangaDex page identity now uses chapter hash plus filename; temporary nodes and
+tokens are re-resolved rather than persisted. Malformed checkpoint records keep
+review/restart available and refuse resume. Never-started expected pages with no
+checkpoint can be absent or empty and fetch fresh under the unchanged manifest.
+For rollback, keep the previous executable and pre-upgrade backup. Older executables reject the newer schema. Stop the upgraded service and
 restore the pre-upgrade backup into a fresh state directory with the previous
 executable; there is no in-place downgrade. Do not clear attempted or manifest
 evidence with database edits. Validate upgrades and rollback only with disposable

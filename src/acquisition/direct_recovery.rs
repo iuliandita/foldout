@@ -119,6 +119,19 @@ impl Direct {
                 None
             }
         });
+        if resume_reason.is_none() && parts.iter().any(|p| p.invalid) {
+            resume_reason = Some("transfer_checkpoint_invalid");
+        }
+        if resume_reason.is_none()
+            && parts.iter().filter_map(|p| p.checkpoint.as_ref()).any(|c| {
+                !c.complete
+                    && c.etag.is_none()
+                    && c.last_modified.is_some()
+                    && !c.last_modified_strong
+            })
+        {
+            resume_reason = Some("transfer_validator_not_strong");
+        }
         if resume_reason.is_none() {
             resume_reason = match self.check_parts(&row, &parts, None).await {
                 Ok(_) => None,
@@ -138,8 +151,7 @@ impl Direct {
         })
     }
 
-    /// The worker locks cover preparation, the audited fence, and this single authorized attempt.
-    pub async fn resume_transfer(
+    pub async fn start_resume_transfer(
         &self,
         settings: &Settings,
         owner: &str,
@@ -150,14 +162,30 @@ impl Direct {
         let settings = settings.clone();
         let owner = owner.to_owned();
         let acquisition_id = acquisition_id.to_owned();
-        // A disconnected HTTP caller must not release the worker locks while a GET is alive.
+        let (send, ready) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            direct
-                .resume_transfer_owned(&settings, &owner, &acquisition_id, request)
-                .await
-        })
-        .await
-        .map_err(|_| DirectError::LocalReview)?
+            let mut started = Some(send);
+            let result = direct
+                .resume_transfer_owned(&settings, &owner, &acquisition_id, request, &mut started)
+                .await;
+            if let Some(send) = started.take() {
+                let _ = send.send(result);
+            } else if let Err(error) = result {
+                tracing::warn!(%error, "reviewed direct transfer stopped; inspect its current state");
+            }
+        });
+        ready.await.map_err(|_| DirectError::LocalReview)?
+    }
+    #[cfg(test)]
+    pub async fn resume_transfer(
+        &self,
+        settings: &Settings,
+        owner: &str,
+        acquisition_id: &str,
+        request: TransferAction,
+    ) -> Result<DirectAcquisition, DirectError> {
+        self.resume_transfer_owned(settings, owner, acquisition_id, request, &mut None)
+            .await
     }
     async fn resume_transfer_owned(
         &self,
@@ -165,6 +193,7 @@ impl Direct {
         owner: &str,
         acquisition_id: &str,
         request: TransferAction,
+        started: &mut Option<tokio::sync::oneshot::Sender<Result<DirectAcquisition, DirectError>>>,
     ) -> Result<DirectAcquisition, DirectError> {
         // Owner lookup precedes the global lock, preserving the scoped 404 contract.
         self.get(owner, acquisition_id).await?;
@@ -230,6 +259,9 @@ impl Direct {
             .bind(acquisition_id).execute(&mut *tx).await?;
         audit(&mut tx, acquisition_id, "resume", &request, None).await?;
         tx.commit().await?;
+        if let Some(send) = started.take() {
+            let _ = send.send(self.get(owner, acquisition_id).await);
+        }
         let result = self.finish_transfer(&row, resolved, stage, true).await;
         if let Err(error) = result {
             self.state(acquisition_id, "needs_review", Some(reason(&error)))
@@ -247,11 +279,17 @@ impl Direct {
         request: TransferAction,
     ) -> Result<DirectAcquisition, DirectError> {
         self.get(owner, acquisition_id).await?;
+        if let Some(replacement) = self.restart_replay(owner, acquisition_id, &request).await? {
+            return Ok(replacement);
+        }
         let _slot = SLOT
             .get_or_init(|| tokio::sync::Mutex::new(()))
             .try_lock()
             .map_err(|_| DirectError::Busy)?;
         let _process_lock = self.worker_lock().await?.ok_or(DirectError::Busy)?;
+        if let Some(replacement) = self.restart_replay(owner, acquisition_id, &request).await? {
+            return Ok(replacement);
+        }
         let (row, _, evidence) = self.prepare_action(owner, acquisition_id, &request).await?;
         let resolved = self.resolve_transfer(settings, &row).await?;
         let format = resolved
@@ -306,10 +344,25 @@ impl Direct {
         .await?;
         tx.commit().await?;
         // Only the retired intent's private partials; never a published archive or library file.
-        if let Some(stage) = retired_stage {
-            stage.discard(&source)?;
+        if let Some(stage) = retired_stage
+            && let Err(error) = stage.discard(&source)
+        {
+            tracing::warn!(%error, "restart committed; retired partial cleanup needs local inspection");
         }
         self.get(owner, &replacement).await
+    }
+    async fn restart_replay(
+        &self,
+        owner: &str,
+        id: &str,
+        request: &TransferAction,
+    ) -> Result<Option<DirectAcquisition>, DirectError> {
+        let replacement: Option<String> = sqlx::query_scalar("SELECT e.replacement_id FROM direct_transfer_events e JOIN direct_acquisitions a ON a.id=e.acquisition_id WHERE e.acquisition_id=? AND a.owner=? AND e.action='restart' AND e.revision=? AND e.transfer_fingerprint=?")
+            .bind(id).bind(owner).bind(request.revision).bind(&request.transfer_fingerprint).fetch_optional(self.store.reader()).await?.flatten();
+        match replacement {
+            Some(id) => Ok(Some(self.get(owner, &id).await?)),
+            None => Ok(None),
+        }
     }
     async fn prepare_action(
         &self,
@@ -360,19 +413,38 @@ impl Direct {
             .root(&row.try_get::<String, _>("download_root_id")?)
             .await?;
         let acquisition_id: String = row.try_get("id")?;
-        let stage = Stage::open(&source, &acquisition_id)?;
+        let stage = Stage::open(&source, &acquisition_id, resolved.is_some())?;
         if identity(&stage.root)? != row.try_get::<String, _>("root_identity")? {
             return Err(DirectError::LocalReview);
         }
         stage.check(&source)?;
         if expected_pages.is_some() {
-            check_page_names(&stage.job, expected as u32)?;
+            check_page_names(&stage.job, parts)?;
         }
         for part in parts {
-            let checkpoint = part
-                .checkpoint
-                .as_ref()
-                .ok_or(DirectError::ResumeUnavailable)?;
+            if part.invalid {
+                return Err(DirectError::RestartRequired);
+            }
+            let Some(checkpoint) = &part.checkpoint else {
+                if expected_pages.is_none() {
+                    return Err(DirectError::ResumeUnavailable);
+                }
+                let name = page_name(part.ordinal);
+                if page_absent(&stage.job, &name)? {
+                    continue;
+                }
+                let file = open_at(&stage.job, &name, libc::O_RDONLY)?;
+                let m = file.metadata().map_err(|_| DirectError::LocalReview)?;
+                if !m.is_file()
+                    || m.nlink() != 1
+                    || m.uid() != unsafe { libc::geteuid() }
+                    || m.mode() & 0o777 != 0o600
+                    || m.len() != 0
+                {
+                    return Err(DirectError::RestartRequired);
+                }
+                continue;
+            };
             if !checkpoint.eligible() && !(expected_pages.is_some() && checkpoint.complete) {
                 return Err(DirectError::ResumeUnavailable);
             }
@@ -384,21 +456,18 @@ impl Direct {
             } else {
                 open_at(&stage.job, &page_name(part.ordinal), libc::O_RDONLY)?
             };
-            checkpoint.check_file(&file).await?;
-            if let Some(resolved) = resolved {
-                let url = if let Some(manifest) = &resolved.manifest {
-                    manifest
-                        .page_url((part.ordinal - 1) as usize)
-                        .map_err(|_| DirectError::RestartRequired)?
-                } else {
-                    resolved
-                        .download
-                        .as_ref()
-                        .ok_or(DirectError::RestartRequired)?
-                        .url()
-                        .clone()
-                };
-                // The test redirect is applied through the same client helper as the original GET.
+            // Review and preparation use cheap facts. The transfer verifies the prefix once,
+            // on the blocking pool, before any GET or authorized tail truncation.
+            checkpoint.check_metadata(&file)?;
+            if let Some(resolved) = resolved
+                && expected_pages.is_none()
+            {
+                let url = resolved
+                    .download
+                    .as_ref()
+                    .ok_or(DirectError::RestartRequired)?
+                    .url()
+                    .clone();
                 #[cfg(test)]
                 let url = if let Some(address) = self.fixture {
                     let mut target = reqwest::Url::parse(&format!("http://{address}/"))
@@ -414,6 +483,7 @@ impl Direct {
                 }
             }
         }
+
         Ok(stage)
     }
 }
@@ -421,13 +491,19 @@ struct Part {
     ordinal: u32,
     identity: String,
     checkpoint: Option<Checkpoint>,
+    invalid: bool,
 }
 async fn parts_in(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: &str,
 ) -> Result<Vec<Part>, DirectError> {
     sqlx::query("SELECT ordinal,page_identity,checkpoint FROM direct_transfer_parts WHERE acquisition_id=? ORDER BY ordinal")
-        .bind(id).fetch_all(&mut **tx).await?.into_iter().map(|r| Ok(Part { ordinal: r.try_get("ordinal")?, identity: r.try_get("page_identity")?, checkpoint: r.try_get::<Option<String>,_>("checkpoint")?.map(|s|serde_json::from_str(&s).map_err(|_|DirectError::RestartRequired)).transpose()? })).collect()
+        .bind(id).fetch_all(&mut **tx).await?.into_iter().map(|r| {
+            let raw: Option<String> = r.try_get("checkpoint")?;
+            let parsed = raw.as_ref().map(|s|serde_json::from_str::<Checkpoint>(s));
+            let invalid = parsed.as_ref().is_some_and(|p|p.is_err());
+            Ok(Part { ordinal:r.try_get("ordinal")?, identity:r.try_get("page_identity")?, checkpoint:parsed.and_then(Result::ok), invalid })
+        }).collect()
 }
 pub(super) fn part_identities(
     manifest: Option<&MangaDexManifest>,
@@ -435,10 +511,12 @@ pub(super) fn part_identities(
     if let Some(manifest) = manifest {
         (0..manifest.summary().page_count)
             .map(|i| {
-                let url = manifest
-                    .page_url(i as usize)
-                    .map_err(|_| DirectError::Changed)?;
-                Ok((i + 1, hash(url.path().as_bytes())))
+                Ok((
+                    i + 1,
+                    manifest
+                        .page_identity(i as usize)
+                        .map_err(|_| DirectError::Changed)?,
+                ))
             })
             .collect()
     } else {
@@ -533,7 +611,14 @@ async fn audit(
 pub(super) fn page_name(ordinal: u32) -> String {
     format!("page-{ordinal:06}.partial")
 }
-fn check_page_names(job: &File, count: u32) -> Result<(), DirectError> {
+fn page_absent(job: &File, name: &str) -> Result<bool, DirectError> {
+    match std::fs::symlink_metadata(format!("/proc/self/fd/{}/{name}", job.as_raw_fd())) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Err(DirectError::LocalReview),
+    }
+}
+fn check_page_names(job: &File, parts: &[Part]) -> Result<(), DirectError> {
     let actual = std::fs::read_dir(format!("/proc/self/fd/{}", job.as_raw_fd()))
         .map_err(|_| DirectError::LocalReview)?
         .map(|entry| {
@@ -543,9 +628,14 @@ fn check_page_names(job: &File, count: u32) -> Result<(), DirectError> {
         })
         .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
     let expected = std::iter::once("filepartial".to_owned())
-        .chain((1..=count).map(page_name))
+        .chain(parts.iter().map(|p| page_name(p.ordinal)))
         .collect::<std::collections::BTreeSet<_>>();
-    if actual != expected {
+    if !actual.is_subset(&expected)
+        || !actual.contains("filepartial")
+        || parts.iter().any(|p| {
+            (p.checkpoint.is_some() || p.invalid) && !actual.contains(&page_name(p.ordinal))
+        })
+    {
         return Err(DirectError::RestartRequired);
     }
     Ok(())

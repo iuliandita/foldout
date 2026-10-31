@@ -446,7 +446,7 @@ async fn download_pages(
             let file = open_at(
                 stage.parent.as_raw_fd(),
                 &format!("page-{:06}.partial", index + 1),
-                libc::O_RDWR,
+                libc::O_RDWR | libc::O_CREAT,
             )?;
             Transfer {
                 journal: Some(journal),
@@ -462,19 +462,18 @@ async fn download_pages(
             )
             .await
             .map_err(checkpoint_error)?;
-            let mut descriptor = file;
-            descriptor
-                .seek(SeekFrom::Start(0))
-                .map_err(|_| MangaTransferError::LocalReview)?;
-            let mut bytes = Vec::new();
-            descriptor
-                .take(options.page_bytes + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|_| MangaTransferError::LocalReview)?;
-            if bytes.len() as u64 > options.page_bytes {
-                return Err(MangaTransferError::SizeLimit);
-            }
-            bytes
+            let checkpoint = journal
+                .load(index + 1)
+                .await
+                .map_err(checkpoint_error)?
+                .ok_or(MangaTransferError::Changed)?;
+            super::transfer_checkpoint::verified_page(
+                &file,
+                &checkpoint,
+                options.page_bytes.min(options.total_bytes - total),
+            )
+            .await
+            .map_err(checkpoint_error)?
         } else {
             fetch_page(
                 &client,

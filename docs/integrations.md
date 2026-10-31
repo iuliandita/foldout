@@ -42,36 +42,54 @@ An idle direct intent can be canceled to release its reservation while preservin
 
 Fetch `GET /api/v1/direct/acquisitions/{id}/review` with manage scope. It returns
 `revision`, `transfer_fingerprint`, and separate `resume`/`restart` eligibility
-with refusal reasons. The indexer acquisition review contract stays unchanged.
-Send the unchanged revision and fingerprint to the direct intent's `/resume` or
-`/restart` endpoint. Cookie writes require Origin. Each action is audited and
-serialized with the direct worker. Stale snapshots and consumed actions return
-`direct_review_conflict`; fetch a fresh review. `direct_busy` means retry later.
+with refusal reasons. GET opens files read-only and checks cheap metadata; it
+does not hash file contents. Eligibility is provisional until the action verifies
+the prefix. Malformed or unknown-field checkpoints return a normal snapshot with
+`transfer_checkpoint_invalid`; restart remains available. The indexer acquisition
+review contract stays unchanged.
+
+Send the unchanged revision and fingerprint to `/resume` or `/restart`. Cookie
+writes require Origin. Each action is audited and serialized with the direct
+worker. Stale snapshots and consumed resume actions return `direct_review_conflict`;
+fetch a fresh review. `direct_busy` means retry later. An exact committed restart
+replay returns the same replacement instead of creating another intent.
 
 Resume re-resolves the persisted selection handle; no resolved URL is stored.
-A partial needs `Accept-Ranges: bytes`, a known total length, and a strong ETag
-or Last-Modified. The request sends Range with If-Range, preferring the strong
-ETag. Only a 206 with the exact starting offset, unchanged origin, validators,
-total length and content type may append. The partial's inode, SHA-256 and
-fsynced offset must match. A changed response or partial returns
-`transfer_restart_required`; missing validators or page evidence returns
-`transfer_resume_unavailable`. Both require reviewing restart explicitly.
-Resume never retries automatically and preserves the attempted fence.
+A started partial needs `Accept-Ranges: bytes`, a known total length and a strong
+ETag or strong Last-Modified. Last-Modified qualifies only when the response Date
+is at least one second later; otherwise review reports
+`transfer_validator_not_strong`. Range uses If-Range, preferring the strong ETag.
+Only a 206 with the exact starting offset, unchanged validators, total length and
+content type may append. Archive origin must also remain unchanged. Missing
+validators or byte-range support require an explicit reviewed restart.
 
-MangaDex recovery retains the exact manifest identity and expected page set.
-Every expected page must have a persisted size/hash checkpoint and a matching
-private file; missing or extra pages refuse resume. Complete pages are verified
-and reused without downloading again. Incomplete pages additionally need stable
-HTTP validators. Interruption before all pages have response evidence therefore
-requires restart. Packaging and complete archive validation still precede import.
-These behaviors are exercised with owned loopback fixtures, not live providers.
+Resume returns 202 with `state: downloading` immediately after its fence commits.
+The task continues if the caller disconnects. Poll
+`GET /api/v1/direct/acquisitions/{id}` until it leaves downloading. A transfer
+failure becomes `needs_review` with `transfer_restart_required`,
+`transfer_resume_unavailable` or another failure reason; fetch a fresh review.
+A successful transfer reaches downloaded before the normal import steps run.
+There is no automatic retry. Prefix hashing runs once on the blocking pool. A
+longer owned file is truncated to the saved offset only after that prefix matches
+its saved SHA-256; a mismatched or shortened prefix requires restart.
 
-Restart rechecks the selected source, catalog unit and destination, then retires
-the original intent and creates a fresh queued intent in one write transaction.
-It preserves the old attempted fence, manifest and original creation replay key.
-Only the retired intent's private partial files are discarded; library files and
-published archives are never deleted. The new intent uses fresh staging and
-normal submission checks. Changed chapter metadata requires selecting again.
-An existing import journal, coverage or published transfer requires separate
-import/local review and cannot use this action. `local_review` requires checking
-the configured root or staging identity before continuing.
+MangaDex requires the exact manifest identity and ordered chapter-hash/filename
+page identities, independent of the temporary node URL or token. A fresh at-home
+resolution may rotate nodes while retaining the same manifest. Started pages
+must match their recorded size/hash; incomplete pages also need stable HTTP
+validators. Complete verified pages are reused without another GET. A NULL
+checkpoint with an absent or zero-byte expected page means never started and
+fetches from zero. Missing checkpointed pages, missing manifest rows, changed
+manifests and extra pages require restart. Packaging and archive validation still
+precede import. Fixtures exercise these cases on owned loopback servers.
+
+Restart rechecks the selected source, unit and destination, then retires the old
+intent and creates a fresh queued intent in one write transaction. It preserves
+the old attempted fence, manifest and creation replay key. Only private partial
+staging files are discarded; library files and published archives are untouched.
+A cleanup failure after commit is logged for local inspection and still returns
+the committed replacement, including on exact replay. The new intent uses fresh
+staging and normal submission checks. Changed chapter metadata requires selecting
+again. An existing import journal, coverage or published transfer requires
+separate import/local review. `local_review` requires inspecting the configured
+root or staging identity.
