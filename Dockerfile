@@ -45,7 +45,7 @@ RUN case "$TARGETARCH" in \
     && tar -xJf archive.tar.xz 7zzs License.txt readme.txt \
     && chmod 755 7zzs
 
-FROM rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS backend-debian
+FROM rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS backend-debian
 ARG TARGETARCH
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
