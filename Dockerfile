@@ -30,7 +30,7 @@ RUN --mount=type=cache,id=libraryd-rust-${TARGETARCH},target=/build/target,shari
     LIBRARY_BUILD_COMMIT=${LIBRARY_BUILD_COMMIT} cargo build --locked --offline --release --features embedded-ui \
     && cp /build/target/release/libraryd /build/libraryd
 
-FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS archive
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS archive
 ARG TARGETARCH
 RUN apk add --no-cache ca-certificates xz tar
 WORKDIR /archive
@@ -88,7 +88,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD wget -q -O /dev/null http://127.0.0.1:8787/health/ready || exit 1
 ENTRYPOINT ["/bin/sh", "-c", "umask 077; exec /usr/local/bin/libraryd \"$@\"", "libraryd"]
 
-FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 COPY --from=archive /archive/7zzs /usr/bin/7z
 COPY --from=archive /archive/License.txt /archive/readme.txt /usr/share/licenses/7zip/
 RUN apk add --no-cache ca-certificates poppler-utils util-linux-misc libgcc \
