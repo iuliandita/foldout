@@ -64,7 +64,7 @@ RUN --mount=type=cache,id=libraryd-rust-debian-${TARGETARCH},target=/build/targe
     LIBRARY_BUILD_COMMIT=${LIBRARY_BUILD_COMMIT} cargo build --locked --offline --release --features embedded-ui \
     && cp /build/target/release/libraryd /build/libraryd
 
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS debian
+FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS debian
 COPY --from=archive /archive/7zzs /usr/bin/7z
 COPY --from=archive /archive/License.txt /archive/readme.txt /usr/share/licenses/7zip/
 RUN apt-get update \
